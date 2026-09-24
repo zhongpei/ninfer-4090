@@ -69,13 +69,11 @@ struct PagedKVStorageLayout {
         if (head_dim == kD256KVCacheHeadDim) { return symmetric({DType::I8, 256, DType::FP16, 4}); }
         break;
     case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
-        // Existing RotorQuant rk8v4: D256-rotated INT8 K plus unrotated packed-int4 V with
-        // G32 value scales. Keep this format byte-for-byte compatible with franken/v0.11.
         if (head_dim == kD256KVCacheHeadDim) {
             return {storage,
                     head_dim,
                     {DType::I8, head_dim, DType::FP16, 4},
-                    {DType::U8, head_dim / 2, DType::FP16, 8}};
+                    {DType::U8, head_dim / 2, DType::FP16, 4}};
         }
         break;
     case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
@@ -114,31 +112,44 @@ struct PagedKVStorageLayout {
     throw std::invalid_argument("unsupported paged KV-cache storage geometry");
 }
 
-[[nodiscard]] constexpr bool kv_storage_is_e8_family(KvCacheStorage storage) noexcept {
-    return storage == KvCacheStorage::RotatedInt4KeyInt4ValueGroup64 ||
-           storage == KvCacheStorage::RK4V4E8 || storage == KvCacheStorage::RK2V4E8;
-}
-
-[[nodiscard]] constexpr bool kv_storage_is_int8_family(KvCacheStorage storage) noexcept {
-    return storage == KvCacheStorage::Int8Group64 ||
-           storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 ||
-           kv_storage_is_e8_family(storage);
-}
-
-struct KvE8ModeFlags {
+/** Fork-local 4090 compressed-KV modes. All of these run through the INT8 attention
+ *  kernels; flags describe the physical packing/rotation needed by those kernels. */
+struct KvForkModeFlags {
+    bool packed_v   = false;
+    bool rotate_k   = false;
+    bool rotate_v   = false;
     bool packed_k   = false;
     bool e8_lattice = false;
     bool e8_root    = false;
 };
 
-[[nodiscard]] constexpr KvE8ModeFlags kv_e8_mode_flags(KvCacheStorage storage) noexcept {
+[[nodiscard]] constexpr bool kv_storage_is_int8_family(KvCacheStorage storage) noexcept {
     switch (storage) {
+    case KvCacheStorage::Int8Group64:
+    case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
     case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
-        return {.packed_k = true};
     case KvCacheStorage::RK4V4E8:
-        return {.packed_k = true, .e8_lattice = true};
     case KvCacheStorage::RK2V4E8:
-        return {.e8_root = true};
+        return true;
+    default:
+        return false;
+    }
+}
+
+[[nodiscard]] constexpr KvForkModeFlags kv_fork_mode_flags(KvCacheStorage storage) noexcept {
+    switch (storage) {
+    case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+        return {.packed_v = true, .rotate_k = true, .rotate_v = true};
+    case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return {.packed_v = true, .rotate_k = true, .rotate_v = true, .packed_k = true};
+    case KvCacheStorage::RK4V4E8:
+        return {.packed_v   = true,
+                .rotate_k   = true,
+                .rotate_v   = true,
+                .packed_k   = true,
+                .e8_lattice = true};
+    case KvCacheStorage::RK2V4E8:
+        return {.packed_v = true, .rotate_k = true, .rotate_v = true, .e8_root = true};
     default:
         return {};
     }
