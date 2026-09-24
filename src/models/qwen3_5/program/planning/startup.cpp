@@ -778,13 +778,27 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         throw std::invalid_argument(
             "loaded components do not match the requested execution options");
     }
-    if (parameters.draft &&
-        options.max_context > parameters.model.config().draft->max_position_embeddings) {
-        throw std::invalid_argument("max_context exceeds the selected draft position capacity");
+    if (!(options.rope_scaling_factor >= 1.0F && options.rope_scaling_factor <= 32.0F)) {
+        throw std::invalid_argument("rope_scaling_factor must be in [1,32]");
+    }
+    if (options.rope_scaling_original_context == 0 ||
+        options.rope_scaling_original_context >
+            parameters.model.config().text.max_position_embeddings) {
+        throw std::invalid_argument(
+            "rope_scaling_original_context must be within the model native position capacity");
     }
     if (options.max_context == 0 ||
-        options.max_context > parameters.model.config().text.max_position_embeddings) {
-        throw std::invalid_argument("max_context exceeds the configured position capacity");
+        options.max_context > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::invalid_argument("max_context is outside the supported I32 position range");
+    }
+    if (options.rope_scaling_factor == 1.0F) {
+        if (parameters.draft &&
+            options.max_context > parameters.model.config().draft->max_position_embeddings) {
+            throw std::invalid_argument("max_context exceeds the selected draft position capacity");
+        }
+        if (options.max_context > parameters.model.config().text.max_position_embeddings) {
+            throw std::invalid_argument("max_context exceeds the configured position capacity");
+        }
     }
     if (options.prefill_chunk == 0 || options.prefill_chunk % kPrefillChunkAlignment != 0) {
         throw std::invalid_argument("prefill_chunk must be a nonzero multiple of 128");
@@ -832,6 +846,10 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         break;
     case SpeculativeBackend::DFlash:
     case SpeculativeBackend::DFlash2:
+        if (options.rope_scaling_factor > 1.0F) {
+            throw std::invalid_argument(
+                "YaRN rope scaling is not supported together with DFlash/DFlash2 speculative decoding");
+        }
         if (!parameters.draft || (options.speculative.backend == SpeculativeBackend::DFlash2) !=
                                      parameters.model.config().draft->dflash2.has_value()) {
             throw std::invalid_argument(
@@ -869,6 +887,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->features            = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
     impl->causal_scoring      = inputs.causal_scoring;
+    impl->rope_scaling_factor = inputs.rope_scaling_factor;
+    impl->rope_scaling_original_context = inputs.rope_scaling_original_context;
     impl->device              = inputs.device;
     impl->context_cache       = inputs.context_cache;
     impl->kv_storage          = inputs.kv_storage;
@@ -963,6 +983,8 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .features            = models::load_options(options),
         .use_cuda_graph      = options.use_cuda_graph,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
+        .rope_scaling_factor = options.rope_scaling_factor,
+        .rope_scaling_original_context = options.rope_scaling_original_context,
         .device              = options.device,
         .context_cache       = options.context_cache,
     };
