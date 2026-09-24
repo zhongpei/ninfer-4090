@@ -452,7 +452,7 @@ inline constexpr int kKVCacheAppendPrefixPage    = 64;
 
 __device__ __forceinline__ void kv_cache_append_prefix_copy_cyclic_unit(
     const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
-    __nv_bfloat16* __restrict__ cache_k, __half* __restrict__ cache_v, int token, int unit_in_token,
+    __nv_bfloat16* __restrict__ cache_k, __nv_bfloat16* __restrict__ cache_v, int token, int unit_in_token,
     int slot, int padded_capacity) {
     constexpr int ElementsPerUnit = 8;
     constexpr int UnitsPerHead    = kKVCacheAppendPrefixHeadDim / ElementsPerUnit;
@@ -466,14 +466,14 @@ __device__ __forceinline__ void kv_cache_append_prefix_copy_cyclic_unit(
                                  (slot + static_cast<std::int64_t>(padded_capacity) * kv_head);
 
     const int4 key   = *reinterpret_cast<const int4*>(&k[src]);
-    const int4 value = bf16x8_bits_to_f16x8_bits(*reinterpret_cast<const int4*>(&v[src]));
+    const int4 value = *reinterpret_cast<const int4*>(&v[src]);
     *reinterpret_cast<int4*>(&cache_k[dst]) = key;
     *reinterpret_cast<int4*>(&cache_v[dst]) = value;
 }
 
 __device__ __forceinline__ void kv_cache_append_prefix_copy_paged_unit(
     const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
-    __nv_bfloat16* __restrict__ cache_k, __half* __restrict__ cache_v, int token, int unit_in_token,
+    __nv_bfloat16* __restrict__ cache_k, __nv_bfloat16* __restrict__ cache_v, int token, int unit_in_token,
     int page_offset, int physical_page, int physical_pages) {
     constexpr int ElementsPerUnit = 16;
     constexpr int UnitsPerHead    = kKVCacheAppendPrefixHeadDim / ElementsPerUnit;
@@ -488,11 +488,11 @@ __device__ __forceinline__ void kv_cache_append_prefix_copy_paged_unit(
             (page_offset + kKVCacheAppendPrefixPage * (physical_page + physical_pages * kv_head));
 
     const int4 k0 = *reinterpret_cast<const int4*>(&k[src]);
-    const int4 v0 = bf16x8_bits_to_f16x8_bits(*reinterpret_cast<const int4*>(&v[src]));
+    const int4 v0 = *reinterpret_cast<const int4*>(&v[src]);
     *reinterpret_cast<int4*>(&cache_k[dst]) = k0;
     *reinterpret_cast<int4*>(&cache_v[dst]) = v0;
     const int4 k1                           = *reinterpret_cast<const int4*>(&k[src + 8]);
-    const int4 v1 = bf16x8_bits_to_f16x8_bits(*reinterpret_cast<const int4*>(&v[src + 8]));
+    const int4 v1 = *reinterpret_cast<const int4*>(&v[src + 8]);
     *reinterpret_cast<int4*>(&cache_k[dst + 8]) = k1;
     *reinterpret_cast<int4*>(&cache_v[dst + 8]) = v1;
 }
