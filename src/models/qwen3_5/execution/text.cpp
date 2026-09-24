@@ -1421,6 +1421,11 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 // decode step, which reuses the same io_.pos).
                 ops::set_i32_scalar(io_.pos, base_i + T, s);
                 ops::set_i32_scalar(io_.rope_pos, base_i + T + rope_delta_, s);
+                if (rope_scaling_factor_ > 1.0F) {
+                    ops::scale_positions_yarn(
+                        io_.rope_pos, static_cast<std::uint32_t>(rope_scaling_original_context_),
+                        rope_scaling_factor_, io_.rope_pos, s);
+                }
                 if (sampling_config_ != nullptr) {
                     ops::sample(logits, io_.token,
                                 dimension(parameters_.model.resources().public_token_count),
