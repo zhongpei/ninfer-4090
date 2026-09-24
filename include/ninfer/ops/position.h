@@ -51,4 +51,17 @@ void fill_i32_positions(Tensor& positions, std::int32_t start, cudaStream_t stre
 void offset_i32_positions(const Tensor& source, const Tensor& delta, Tensor& destination,
                           cudaStream_t stream);
 
+/**
+ * Op: scale_positions_yarn
+ *
+ * Positions at or below original_context are unchanged. Positions above it are compressed as:
+ *   original_context + round((position - original_context) / factor)
+ *
+ * Source and destination are the same non-empty contiguous I32 vector; the Op is intentionally
+ * in-place so cache positions can remain raw while only the independent RoPE position buffer is
+ * transformed. factor must be >= 1.0.
+ */
+void scale_positions_yarn(const Tensor& source, std::uint32_t original_context, float factor,
+                          Tensor& destination, cudaStream_t stream);
+
 } // namespace ninfer::ops
