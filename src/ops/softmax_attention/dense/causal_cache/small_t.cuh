@@ -21,10 +21,6 @@ namespace ninfer::ops {
 
 inline constexpr int kCausalHeadDim = 256;
 
-// The most keys one split may cover: a split stages at most 64 physical-page IDs, and two 64-key
-// pages go to key-tile rounding and page alignment.
-inline constexpr int kCausalSmallTSplitKeyLimit = 3968;
-
 struct CausalAppendInput {
     static constexpr bool writes_cache = true;
     const __nv_bfloat16* k;
@@ -97,11 +93,9 @@ __device__ __forceinline__ int causal_small_t_default_splits(int window) {
     return splits < Geometry::SmallTMaximumSplits ? splits : Geometry::SmallTMaximumSplits;
 }
 
-// wave_splits, when positive, is the launch's split count per full wave of CTAs: a count above it
-// drops to the fewest whole waves that still keep every split within kCausalSmallTSplitKeyLimit.
 template <typename Geometry, bool Int8>
 __device__ __forceinline__ int causal_small_t_active_splits(int window, int launch_capacity,
-                                                            int tokens, int wave_splits = 0) {
+                                                            int tokens) {
     if (window <= 0) { return launch_capacity; }
     int splits = 0;
     if constexpr (Int8) {
@@ -122,25 +116,16 @@ __device__ __forceinline__ int causal_small_t_active_splits(int window, int laun
     } else {
         splits = causal_small_t_default_splits<Geometry>(window);
     }
-    if (wave_splits > 0 && splits > wave_splits) {
-        const int whole_waves =
-            wave_splits * div_up(div_up(window, kCausalSmallTSplitKeyLimit), wave_splits);
-        splits = splits < whole_waves ? splits : whole_waves;
-    }
     return splits < launch_capacity ? splits : launch_capacity;
 }
 
-// Quantized storages take the plain default tier. This used to ask for SmallTMaximumSplits at
-// tokens==1 and window>8198 while the host granted that capacity to fp8 only, so nvfp4 and k8v4
-// silently ran fewer splits than this function returned and the two sides disagreed about intent.
-// Measurement said the host's default was the better number for all of them (see
-// causal_small_t_split_count in small_t.cu), so the request is gone rather than the grant
-// extended, and this now agrees with the host by construction.
 template <typename Geometry>
 __device__ __forceinline__ int
 causal_small_t_quantized_active_splits(int window, int launch_capacity, int tokens) {
-    (void)tokens;
-    const int splits = causal_small_t_default_splits<Geometry>(window);
+    int splits = causal_small_t_default_splits<Geometry>(window);
+    if constexpr (Geometry::SmallTSplitScale == 1) {
+        if (tokens == 1 && window > 8198) { splits = Geometry::SmallTMaximumSplits; }
+    }
     return splits < launch_capacity ? splits : launch_capacity;
 }
 
@@ -213,7 +198,7 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
     const float* partial_acc, const float* partial_m, const float* partial_l,
     const std::int32_t* positions, const std::int32_t* valid_columns, std::int32_t tokens,
     std::int32_t full_width, std::int32_t column_begin, std::int32_t batch_size,
-    std::int32_t split_count, std::int32_t wave_splits, __nv_bfloat16* out) {
+    std::int32_t split_count, __nv_bfloat16* out) {
     static_assert(DChunk > 0 && DChunk <= kCausalHeadDim);
 
     const int q_head      = static_cast<int>(blockIdx.x);
@@ -260,7 +245,7 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
 
     const int window = last_pos + 1;
     const int active_split_count =
-        causal_small_t_active_splits<Geometry, Int8>(window, split_count, tokens, wave_splits);
+        causal_small_t_active_splits<Geometry, Int8>(window, split_count, tokens);
 
     __shared__ float weights[256], warp_sums[8], scalars[2];
     const float head_l =
