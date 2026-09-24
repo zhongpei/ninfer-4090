@@ -619,6 +619,10 @@ void TextContext::mtp_forward_batch(const Tensor& ids, const Tensor& hidden,
     if (rope_positions == nullptr) {
         generated_rope_positions = work_.alloc(DType::I32, {T});
         ops::offset_i32_positions(positions, io_.rope_delta, generated_rope_positions, ctx_.stream);
+        if (rope_scaling_factor_ > 1.0F) {
+            ops::scale_positions_yarn(generated_rope_positions, rope_scaling_original_context_,
+                                      rope_scaling_factor_, generated_rope_positions, ctx_.stream);
+        }
         rope_positions = &generated_rope_positions;
     } else if (rope_positions->dtype != DType::I32 || rope_positions->ne[0] != T ||
                (rope_positions->ne[1] != 1 && rope_positions->ne[1] != 3) ||
@@ -653,6 +657,10 @@ void TextContext::mtp_forward_ar_step(const Tensor& token, const Tensor& previou
     auto position_scope  = work_.scope();
     Tensor rope_position = work_.alloc(DType::I32, {1});
     ops::offset_i32_positions(position, io_.rope_delta, rope_position, ctx_.stream);
+    if (rope_scaling_factor_ > 1.0F) {
+        ops::scale_positions_yarn(rope_position, rope_scaling_original_context_,
+                                  rope_scaling_factor_, rope_position, ctx_.stream);
+    }
     mtp_forward_core(token, previous_hidden, position, rope_position, envelope, mtp_hidden,
                      nullptr);
     auto logits_scope = work_.scope();
@@ -1310,7 +1318,9 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 }
             }
 
-            const std::int32_t rope_axes = multimodal != nullptr ? 3 : (rope_delta_ != 0 ? 1 : 0);
+            const bool yarn_scaling = rope_scaling_factor_ > 1.0F;
+            const std::int32_t rope_axes =
+                multimodal != nullptr ? 3 : ((rope_delta_ != 0 || yarn_scaling) ? 1 : 0);
             const bool overlay_staging   = !vision_chunk.host_embeddings.empty();
             const auto roots             = workspace::text_prefill_roots(
                 work_, config_, len, rope_axes,
@@ -1334,9 +1344,14 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                                 rope_positions_host.data() + static_cast<std::size_t>(axis) * len);
                 }
                 copy_i32(rope_positions_host.data(), rope_positions, s);
-            } else if (rope_delta_ != 0) {
+            } else if (rope_delta_ != 0 || yarn_scaling) {
                 rope_positions = roots.rope_positions;
                 ops::offset_i32_positions(positions, io_.rope_delta, rope_positions, s);
+            }
+            if (yarn_scaling) {
+                Tensor flat_rope_positions = rope_positions.view({rope_positions.numel()});
+                ops::scale_positions_yarn(flat_rope_positions, rope_scaling_original_context_,
+                                          rope_scaling_factor_, flat_rope_positions, s);
             }
             ScopedPositions scoped_cache(active_cache_positions_, positions);
             ScopedPositions scoped_rope(active_rope_positions_, rope_positions);
@@ -1395,6 +1410,10 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 // decode step, which reuses the same io_.pos).
                 ops::set_i32_scalar(io_.pos, base_i + T, s);
                 ops::set_i32_scalar(io_.rope_pos, base_i + T + rope_delta_, s);
+                if (yarn_scaling) {
+                    ops::scale_positions_yarn(io_.rope_pos, rope_scaling_original_context_,
+                                              rope_scaling_factor_, io_.rope_pos, s);
+                }
                 if (sampling_config_ != nullptr) {
                     ops::sample(logits, io_.token,
                                 dimension(parameters_.model.resources().public_token_count),
