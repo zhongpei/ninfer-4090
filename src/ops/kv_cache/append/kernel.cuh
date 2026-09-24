@@ -502,7 +502,8 @@ __global__ void kv_cache_append_prefix_cyclic_kernel(
     const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
     const std::int32_t* __restrict__ positions, const std::int32_t* __restrict__ counts,
     const std::int32_t* __restrict__ lanes, __nv_bfloat16* __restrict__ cache_k,
-    __half* __restrict__ cache_v, int min_count, int max_count, int width, int padded_capacity) {
+    __nv_bfloat16* __restrict__ cache_v, int min_count, int max_count, int width,
+    int padded_capacity) {
     static_assert(Capacity == 2048 || Capacity == 4096);
     static_assert((Capacity & (Capacity - 1)) == 0);
     constexpr int UnitsPerToken = kKVCacheAppendPrefixHeads * kKVCacheAppendPrefixHeadDim / 8;
@@ -534,7 +535,8 @@ __global__ void kv_cache_append_prefix_paged_kernel(
     const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
     const std::int32_t* __restrict__ positions, const std::int32_t* __restrict__ counts,
     const std::int32_t* __restrict__ table_rows, __nv_bfloat16* __restrict__ cache_k,
-    __half* __restrict__ cache_v, const std::int32_t* __restrict__ block_tables, int physical_pages,
+    __nv_bfloat16* __restrict__ cache_v, const std::int32_t* __restrict__ block_tables,
+    int physical_pages,
     int logical_pages, int min_count, int max_count, int width) {
     constexpr int UnitsPerToken  = kKVCacheAppendPrefixHeads * 8;
     constexpr int TokensPerBlock = 256 / UnitsPerToken;
