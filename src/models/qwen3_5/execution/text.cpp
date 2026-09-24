@@ -1349,7 +1349,8 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 ops::offset_i32_positions(positions, io_.rope_delta, rope_positions, s);
             }
             if (yarn_scaling) {
-                Tensor flat_rope_positions = rope_positions.view({rope_positions.numel()});
+                Tensor flat_rope_positions =
+                    rope_positions.view({static_cast<std::int32_t>(rope_positions.numel())});
                 ops::scale_positions_yarn(flat_rope_positions, rope_scaling_original_context_,
                                           rope_scaling_factor_, flat_rope_positions, s);
             }
