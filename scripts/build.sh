@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build NInfer-3090 on Linux, including WSL2, with the toolchain this project needs.
+# Build NInfer-4090 on Linux, including WSL2, with the toolchain this project needs.
 #
 # The usual stumbling block is that the CUDA toolkit is installed but nvcc is not on PATH -
 # /usr/local/cuda-12.8/bin is not added by default on Ubuntu. Configure then fails the CMakeLists
@@ -20,7 +20,7 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="${NINFER_BUILD_DIR:-$repo_root/build-linux}"
-arch="${NINFER_CUDA_ARCH:-86}"
+arch="${NINFER_CUDA_ARCH:-89}"
 run_tests=0
 clean=0
 package=0
