@@ -575,6 +575,8 @@ public:
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
+    const float rope_scaling_factor;
+    const std::uint32_t rope_scaling_original_context;
 
     // A checkpoint captured under one execution profile (backend, proposal head, KV coding) must
     // never be replayed under another. Capture and reuse-lookup derive the tag from this one place:
