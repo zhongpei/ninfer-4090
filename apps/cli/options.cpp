@@ -90,6 +90,9 @@ KvCacheStorage parse_kv_cache(std::string_view text) {
     if (text == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
     // RotorQuant rk8v4: rotated INT8 keys with a packed signed int4 value plane. Opt-in.
     if (text == "rk8v4") { return KvCacheStorage::RotatedInt8KeyInt4ValueGroup64; }
+    if (text == "rk4v4") { return KvCacheStorage::RotatedInt4KeyInt4ValueGroup64; }
+    if (text == "rk4v4-e8") { return KvCacheStorage::RK4V4E8; }
+    if (text == "rk2v4-e8") { return KvCacheStorage::RK2V4E8; }
     if (text == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
     if (text == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
     throw std::invalid_argument("invalid kv-dtype: " + std::string(text));
@@ -118,7 +121,7 @@ std::string usage_text(const char* argv0) {
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--devices N,M]\n"
-           "       [--kv-dtype bf16|int8|fp8|rk8v4|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
+           "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
            "       [--lookup-ngram N]\n"
            "       [--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4]\n"
            "       [--gdn-state-fp16] [--mlp-a8-decode] [--no-prefill-a8]\n"
@@ -130,7 +133,7 @@ std::string usage_text(const char* argv0) {
            "       [--raw-output] [--print-token-ids] [--no-thinking] [--thinking-budget N]\n"
            "       [--reasoning-effort none|minimal|low|medium|high|xhigh|max] [--vision]\n"
            "       [--vision-residency resident|overlay] [--vision-max-merged N]\n"
-           "       [--no-cuda-graph]\n"
+           "       [--no-cuda-graph] [--rope-scaling-factor F] [--rope-scaling-original-context N]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
@@ -260,6 +263,15 @@ Options parse_options(int argc, char** argv) {
             }
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
+        } else if (arg == "--rope-scaling-factor") {
+            options.rope_scaling_factor =
+                parse_float(value(arg), "rope-scaling-factor", 1.0F, 32.0F);
+        } else if (arg == "--rope-scaling-original-context") {
+            options.rope_scaling_original_context =
+                parse_u32(value(arg), "rope-scaling-original-context");
+            if (options.rope_scaling_original_context == 0) {
+                throw std::invalid_argument("--rope-scaling-original-context must be positive");
+            }
         } else if (arg == "--stop-token-id") {
             const std::uint32_t token = parse_u32(value(arg), "stop-token-id", true);
             if (token > static_cast<std::uint32_t>(std::numeric_limits<TokenId>::max())) {
