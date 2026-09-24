@@ -1,0 +1,43 @@
+name: Port E8 KV kernels
+
+on:
+  push:
+    branches:
+      - feat/ternary-yarn-4090-v1
+    paths:
+      - ".github/workflows/port-e8-kernels.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  port:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ternary-yarn-4090-v1
+          fetch-depth: 0
+      - name: Import E8 kernel implementation from sergiuszm
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add sergiuszm https://github.com/sergiuszm/ninfer-4090.git
+          git fetch --no-tags sergiuszm refs/heads/rtx4090-port:refs/remotes/sergiuszm/rtx4090-port
+          files=(
+            src/ops/kv_cache/append/kernel.cuh
+            src/ops/kv_cache/append/launch.cu
+            src/ops/softmax_attention/dense/causal_cache/prompt.cu
+            src/ops/softmax_attention/dense/causal_cache/prompt_common.cuh
+            src/ops/softmax_attention/dense/causal_cache/prompt_i8.cuh
+            src/ops/softmax_attention/dense/causal_cache/small_t.cu
+            src/ops/softmax_attention/dense/causal_cache/small_t.cuh
+            src/ops/softmax_attention/dense/causal_cache/small_t_i8.cuh
+          )
+          git checkout refs/remotes/sergiuszm/rtx4090-port -- "${files[@]}"
+          rm -f .github/workflows/port-e8-kernels.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${files[@]}" .github/workflows/port-e8-kernels.yml
+          git commit -m "feat(kv): port E8 attention and cache kernels"
+          git push origin HEAD:feat/ternary-yarn-4090-v1
