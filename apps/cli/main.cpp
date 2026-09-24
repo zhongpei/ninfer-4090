@@ -83,7 +83,13 @@ std::string format_kv_cache(ninfer::KvCacheStorage storage) {
     case ninfer::KvCacheStorage::Fp8E4M3Row256:
         return "fp8-e4m3-row256";
     case ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
-        return "rotated-k8g64-v4g32";
+        return "rk8v4";
+    case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return "rk4v4";
+    case ninfer::KvCacheStorage::RK4V4E8:
+        return "rk4v4-e8";
+    case ninfer::KvCacheStorage::RK2V4E8:
+        return "rk2v4-e8";
     case ninfer::KvCacheStorage::Nvfp4Group16:
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
@@ -282,6 +288,8 @@ int main(int argc, char** argv) {
         engine_options.vision_residency         = cli.vision_residency;
         engine_options.vision_max_merged_tokens = cli.vision_max_merged_tokens;
         engine_options.use_cuda_graph           = cli.use_cuda_graph;
+        engine_options.rope_scaling_factor      = cli.rope_scaling_factor;
+        engine_options.rope_scaling_original_context = cli.rope_scaling_original_context;
         engine_options.lm_head_q4               = cli.lm_head_q4;
         engine_options.lm_head_q6               = cli.lm_head_q6;
         engine_options.embedding_q4             = cli.embedding_q4;
