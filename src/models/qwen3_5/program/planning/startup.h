@@ -88,6 +88,8 @@ struct SequencePlanningInputs {
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
+    float rope_scaling_factor                = 1.0F;
+    std::uint32_t rope_scaling_original_context = 262144;
     models::LoadOptions features;
     bool use_cuda_graph = true;
     bool causal_scoring = false;
@@ -111,6 +113,8 @@ struct SequencePlanImpl {
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
+    float rope_scaling_factor                = 1.0F;
+    std::uint32_t rope_scaling_original_context = 262144;
     models::LoadOptions features;
     bool use_cuda_graph = true;
     bool causal_scoring = false;
