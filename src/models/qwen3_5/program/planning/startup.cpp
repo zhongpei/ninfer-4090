@@ -23,6 +23,7 @@
 #include "ninfer/ops/softmax_attention.h"
 #include "ninfer/ops/speculative_round.h"
 #include <algorithm>
+#include <cmath>
 #include <initializer_list>
 #include <limits>
 #include <stdexcept>
@@ -778,13 +779,41 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         throw std::invalid_argument(
             "loaded components do not match the requested execution options");
     }
-    if (parameters.draft &&
+    const bool yarn_enabled = options.rope_scaling_factor > 1.0F;
+    if (!(options.rope_scaling_factor >= 1.0F) ||
+        !std::isfinite(options.rope_scaling_factor)) {
+        throw std::invalid_argument("rope_scaling_factor must be finite and >= 1.0");
+    }
+    if (options.rope_scaling_original_context >
+        static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::invalid_argument("rope_scaling_original_context exceeds int32");
+    }
+    if (yarn_enabled && options.rope_scaling_original_context == 0) {
+        throw std::invalid_argument(
+            "rope_scaling_original_context must be positive when YaRN scaling is enabled");
+    }
+    if (yarn_enabled &&
+        options.rope_scaling_original_context >
+            parameters.model.config().text.max_position_embeddings) {
+        throw std::invalid_argument(
+            "rope_scaling_original_context exceeds the checkpoint native position capacity");
+    }
+    if (yarn_enabled && is_masked_draft_backend(options.speculative.backend)) {
+        throw std::invalid_argument(
+            "YaRN rope scaling is not supported with DFlash/DFlash2; use MTP or disable scaling");
+    }
+    if (is_masked_draft_backend(options.speculative.backend) && parameters.draft &&
         options.max_context > parameters.model.config().draft->max_position_embeddings) {
         throw std::invalid_argument("max_context exceeds the selected draft position capacity");
     }
     if (options.max_context == 0 ||
-        options.max_context > parameters.model.config().text.max_position_embeddings) {
+        (!yarn_enabled &&
+         options.max_context > parameters.model.config().text.max_position_embeddings)) {
         throw std::invalid_argument("max_context exceeds the configured position capacity");
+    }
+    if (options.max_context >
+        static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::invalid_argument("max_context exceeds int32 position capacity");
     }
     if (options.prefill_chunk == 0 || options.prefill_chunk % kPrefillChunkAlignment != 0) {
         throw std::invalid_argument("prefill_chunk must be a nonzero multiple of 128");
@@ -864,9 +893,11 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->prefill_chunk       = inputs.prefill_chunk;
     impl->draft_window        = inputs.draft_window;
     impl->lookup_ngram        = inputs.lookup_ngram;
-    impl->speculative_backend = inputs.speculative_backend;
-    impl->proposal_head       = inputs.proposal_head;
-    impl->features            = inputs.features;
+    impl->speculative_backend            = inputs.speculative_backend;
+    impl->proposal_head                   = inputs.proposal_head;
+    impl->rope_scaling_factor             = inputs.rope_scaling_factor;
+    impl->rope_scaling_original_context   = inputs.rope_scaling_original_context;
+    impl->features                        = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
     impl->causal_scoring      = inputs.causal_scoring;
     impl->device              = inputs.device;
@@ -960,6 +991,8 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,
+        .rope_scaling_factor = options.rope_scaling_factor,
+        .rope_scaling_original_context = options.rope_scaling_original_context,
         .features            = models::load_options(options),
         .use_cuda_graph      = options.use_cuda_graph,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
