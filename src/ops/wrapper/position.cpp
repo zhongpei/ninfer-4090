@@ -2,6 +2,7 @@
 
 #include "ops/launcher/position.h"
 
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -46,6 +47,26 @@ void offset_i32_positions(const Tensor& source, const Tensor& delta, Tensor& des
         throw std::invalid_argument("offset_i32_positions: delta must not alias destination");
     }
     detail::offset_i32_positions_launch(source, delta, destination, stream);
+}
+
+void scale_positions_yarn(const Tensor& source, std::uint32_t original_context, float factor,
+                          Tensor& destination, cudaStream_t stream) {
+    require_i32_vector(source, "scale_positions_yarn source");
+    require_i32_vector(destination, "scale_positions_yarn destination");
+    if (source.ne[0] != destination.ne[0]) {
+        throw std::invalid_argument("scale_positions_yarn: source and destination shapes differ");
+    }
+    if (source.data != destination.data) {
+        throw std::invalid_argument(
+            "scale_positions_yarn: source and destination must be the same tensor (in-place only)");
+    }
+    if (!(factor >= 1.0F) || !std::isfinite(factor)) {
+        throw std::invalid_argument("scale_positions_yarn: factor must be finite and >= 1.0");
+    }
+    if (original_context > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::invalid_argument("scale_positions_yarn: original context exceeds int32");
+    }
+    detail::scale_positions_yarn_launch(source, original_context, factor, destination, stream);
 }
 
 } // namespace ninfer::ops
