@@ -108,7 +108,7 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
         <<<grid, kBlock, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(q.data), input,
             static_cast<const std::int32_t*>(pos.data), static_cast<__nv_bfloat16*>(cache_k.data),
-            static_cast<__half*>(cache_v.data),
+            static_cast<__nv_bfloat16*>(cache_v.data),
             static_cast<const std::int32_t*>(cache.block_tables.data),
             invocation.valid_columns == nullptr
                 ? nullptr
