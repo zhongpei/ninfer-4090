@@ -788,8 +788,9 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
             "rope_scaling_original_context must be within the model native position capacity");
     }
     if (options.max_context == 0 ||
-        options.max_context > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
-        throw std::invalid_argument("max_context is outside the supported I32 position range");
+        options.max_context > ops::kCausalAttentionMaximumVisibleKeys) {
+        throw std::invalid_argument(
+            "max_context exceeds the supported causal-attention envelope");
     }
     if (options.rope_scaling_factor == 1.0F) {
         if (parameters.draft &&
