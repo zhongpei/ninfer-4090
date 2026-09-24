@@ -1,0 +1,28 @@
+name: Source audit
+
+on:
+  push:
+    branches:
+      - feat/ternary-yarn-4090-v1
+    paths:
+      - ".github/workflows/source-audit.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ternary-yarn-4090-v1
+      - name: Enumerate KV storage and context constants
+        shell: bash
+        run: |
+          echo "=== KV STORAGE REFERENCES ==="
+          git grep -n "KvCacheStorage::" -- '*.cpp' '*.h' '*.cu' '*.cuh' || true
+          echo "=== 262144 REFERENCES ==="
+          git grep -n -E "262144|262,144" -- '*.cpp' '*.h' '*.cu' '*.cuh' || true
+          echo "=== EXECUTION CORE INITIALIZERS ==="
+          git grep -n -E "ExecutionCore\{|\{device, parameters, work, state_images->linear\(\)" -- 'src/models/qwen3_5/**' || true
