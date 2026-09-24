@@ -92,6 +92,11 @@ public:
         prefill_split_frontier_ = position;
     }
 
+    void set_rope_scaling(float factor, std::uint32_t original_context) noexcept {
+        rope_scaling_factor_           = factor;
+        rope_scaling_original_context_ = original_context;
+    }
+
     void set_rewrite_checkpoint_hidden_output(Tensor* output) noexcept {
         rewrite_checkpoint_hidden_output_ = output;
     }
@@ -238,6 +243,8 @@ private:
     std::int32_t active_sequence_batch_                                            = 0;
     std::int32_t active_sequence_width_                                            = 0;
     std::int32_t rope_delta_                                                       = 0;
+    float rope_scaling_factor_                                                      = 1.0F;
+    std::uint32_t rope_scaling_original_context_                                   = 262144;
     std::int32_t linear_state_source_slot_                                         = 0;
     std::int32_t linear_state_destination_slot_                                    = 0;
     GdnStateAction gdn_state_action_          = GdnStateAction::UpdateInPlace;
