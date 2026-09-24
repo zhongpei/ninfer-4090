@@ -13,7 +13,8 @@
 
 namespace ninfer::ops {
 
-inline constexpr std::uint32_t kCausalAttentionMaximumVisibleKeys = 262144;
+// YaRN profiles on 24 GiB Ada are intended to reach well beyond Qwen's native 262,144 tokens.
+inline constexpr std::uint32_t kCausalAttentionMaximumVisibleKeys = 786432;
 
 struct CausalAttentionExecutionEnvelope {
     std::uint32_t min_visible_keys = 0;
