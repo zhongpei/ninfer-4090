@@ -92,7 +92,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--prefill-cublas [--no-prefill-cublas-projections]] [--lookup-ngram N] "
            "[--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
-           "[--frequency-penalty F] [--seed N] [--greedy]\n"
+           "[--frequency-penalty F] [--seed N] [--greedy] "
+           "[--rope-scaling-factor F] [--rope-scaling-original-context N]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --default-max-tokens defaults to " +
@@ -135,7 +136,12 @@ std::string serve_usage_text(const char* argv0) {
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
            "       sampler defaults come from the loaded model and resolved thinking mode; "
            "server flags and request fields override individual values.\n"
-           "       --greedy forces temperature 0 (exact argmax).\n";
+           "       --greedy forces temperature 0 (exact argmax).\n"
+           "       --rope-scaling-factor enables YaRN linear RoPE position compression above "
+           "--rope-scaling-original-context (default 262144); 1.0 disables scaling. Cache "
+           "positions are never scaled. YaRN may extend --max-context beyond the checkpoint's "
+           "native position limit; DFlash/DFlash2 are intentionally rejected while scaling is "
+           "active in this first implementation.\n";
 }
 
 // "1,2" selects an ordered primary/secondary pair. One entry is accepted and is equivalent to
@@ -418,6 +424,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.sampling_overrides.seed = parse_u64(require_value("--seed"), "seed");
         } else if (arg == "--greedy") {
             options.greedy = true;
+        } else if (arg == "--rope-scaling-factor") {
+            options.rope_scaling_factor =
+                parse_float_in(require_value("--rope-scaling-factor"), "rope-scaling-factor", 1.0f,
+                               32.0f);
+        } else if (arg == "--rope-scaling-original-context") {
+            options.rope_scaling_original_context = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--rope-scaling-original-context"),
+                                      "rope-scaling-original-context"));
         } else if (arg == "--log-level") {
             options.log_level = product::parse_log_level(require_value("--log-level"));
         } else {
@@ -467,6 +481,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
     product::validate_speculative_cli_options(options.speculative);
+    if (options.rope_scaling_factor > 1.0F &&
+        (options.speculative.backend == SpeculativeBackend::DFlash ||
+         options.speculative.backend == SpeculativeBackend::DFlash2)) {
+        throw std::invalid_argument(
+            "YaRN rope scaling is not supported with DFlash/DFlash2; use MTP or disable scaling");
+    }
+    if (options.rope_scaling_factor > 1.0F && options.rope_scaling_original_context == 0) {
+        throw std::invalid_argument(
+            "--rope-scaling-original-context must be positive when YaRN scaling is enabled");
+    }
     if (options.vision_residency == VisionResidency::Overlay && !options.enable_vision) {
         throw std::invalid_argument("--vision-residency overlay requires --vision");
     }
