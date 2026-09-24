@@ -1,0 +1,25 @@
+name: Bootstrap franken v0.11 baseline
+
+on:
+  push:
+    paths:
+      - ".github/workflows/bootstrap-franken.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  import-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Replace main with iamwavecut franken/v0.11
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/iamwavecut/ninfer-3090.git
+          git fetch --no-tags upstream refs/heads/franken/v0.11:refs/remotes/upstream/franken-v0.11
+          git checkout -B main refs/remotes/upstream/franken-v0.11
+          git push --force origin main
