@@ -1,0 +1,27 @@
+name: Dev inspect YaRN port
+
+on:
+  push:
+    paths:
+      - ".github/workflows/dev-port-yarn.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect v0.11 execution wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== ExecutionCore construction sites ==='
+          git grep -n 'ExecutionCore\|prefill_chunk, proposal_head' -- src/models/qwen3_5 || true
+          echo '=== position generation ==='
+          git grep -n 'rope_positions\|rope_pos\|rope_delta' -- src/models/qwen3_5/program src/models/qwen3_5/execution | head -n 300 || true
+          echo '=== planning max position validation ==='
+          git grep -n 'max_position_embeddings\|max_context exceeds' -- src/models/qwen3_5 || true
+          echo '=== KV enum and rk8v4 ==='
+          git grep -n 'rk8v4\|Rotor\|KvCacheStorage' -- include src apps | head -n 300 || true
