@@ -245,6 +245,11 @@ struct EngineOptions {
     // preprocessing. Also bounds the overlay window.
     std::uint32_t vision_max_merged_tokens = 16384;
     bool use_cuda_graph                    = true;
+    // YaRN linear RoPE position scaling for context extension beyond the native trained length.
+    // factor=1.0 disables scaling. Cache positions remain unscaled; only RoPE positions are
+    // transformed above rope_scaling_original_context.
+    float rope_scaling_factor                   = 1.0F;
+    std::uint32_t rope_scaling_original_context = 262144;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;
