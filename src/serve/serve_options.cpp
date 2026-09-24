@@ -92,7 +92,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--prefill-cublas [--no-prefill-cublas-projections]] [--lookup-ngram N] "
            "[--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
-           "[--frequency-penalty F] [--seed N] [--greedy]\n"
+           "[--frequency-penalty F] [--seed N] [--greedy] "
+           "[--rope-scaling-factor F] [--rope-scaling-original-context N]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --default-max-tokens defaults to " +
@@ -135,7 +136,11 @@ std::string serve_usage_text(const char* argv0) {
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
            "       sampler defaults come from the loaded model and resolved thinking mode; "
            "server flags and request fields override individual values.\n"
-           "       --greedy forces temperature 0 (exact argmax).\n";
+           "       --greedy forces temperature 0 (exact argmax).\n"
+           "       --rope-scaling-factor enables YaRN linear RoPE scaling beyond the native "
+           "trained length; 1.0 disables it. Positions above "
+           "--rope-scaling-original-context (default 262144) are compressed as "
+           "original + round((position-original)/factor). KV positions are never scaled.\n";
 }
 
 // "1,2" selects an ordered primary/secondary pair. One entry is accepted and is equivalent to
@@ -418,6 +423,17 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.sampling_overrides.seed = parse_u64(require_value("--seed"), "seed");
         } else if (arg == "--greedy") {
             options.greedy = true;
+        } else if (arg == "--rope-scaling-factor") {
+            options.rope_scaling_factor =
+                parse_float_in(require_value("--rope-scaling-factor"), "rope-scaling-factor",
+                               1.0F, 32.0F);
+        } else if (arg == "--rope-scaling-original-context") {
+            options.rope_scaling_original_context = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--rope-scaling-original-context"),
+                                      "rope-scaling-original-context"));
+            if (options.rope_scaling_original_context == 0) {
+                throw std::invalid_argument("--rope-scaling-original-context must be positive");
+            }
         } else if (arg == "--log-level") {
             options.log_level = product::parse_log_level(require_value("--log-level"));
         } else {
