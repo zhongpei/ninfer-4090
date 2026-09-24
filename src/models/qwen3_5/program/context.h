@@ -38,7 +38,25 @@ struct ExecutionCore {
     Tensor& prefill_hidden;
     std::uint32_t prefill_chunk;
     ProposalHead proposal_head;
+    // Mandatory policy: all execution schedules must explicitly carry YaRN state so prefill,
+    // decode and CUDA-graph representatives cannot silently diverge.
+    float rope_scaling_factor;
+    std::uint32_t rope_scaling_original_context;
 };
+
+[[nodiscard]] inline std::int32_t scale_rope_position_yarn(const ExecutionCore& execution,
+                                                            std::int32_t position) noexcept {
+    if (!(execution.rope_scaling_factor > 1.0F) || position <= 0 ||
+        static_cast<std::uint32_t>(position) <= execution.rope_scaling_original_context) {
+        return position;
+    }
+    const double delta =
+        static_cast<double>(position) -
+        static_cast<double>(execution.rope_scaling_original_context);
+    return static_cast<std::int32_t>(execution.rope_scaling_original_context) +
+           static_cast<std::int32_t>(
+               delta / static_cast<double>(execution.rope_scaling_factor) + 0.5);
+}
 
 struct PrefillContext {
     ExecutionCore execution;
