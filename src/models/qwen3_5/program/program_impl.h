@@ -21,6 +21,7 @@
 #include "models/qwen3_5/program/vision_prefill.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <array>
 #include <limits>
@@ -583,9 +584,17 @@ public:
     // a divergent copy is what once made every stored rk8v4 checkpoint carry a tag no lookup could
     // produce, so prefix reuse missed unconditionally under that profile.
     [[nodiscard]] std::uint32_t capture_identity_tag() const noexcept {
-        return static_cast<std::uint32_t>(speculative_backend) |
-               (static_cast<std::uint32_t>(proposal_head) << 8U) |
-               (static_cast<std::uint32_t>(kv_storage) << 16U);
+        std::uint32_t tag = static_cast<std::uint32_t>(speculative_backend) |
+                            (static_cast<std::uint32_t>(proposal_head) << 8U) |
+                            (static_cast<std::uint32_t>(kv_storage) << 16U);
+        // A saved/reused state is numerically tied to the RoPE policy that produced its KV.
+        // Preserve the legacy tag when scaling is disabled, but make scaled sessions incompatible
+        // across factor/original-context changes.
+        if (rope_scaling_factor > 1.0F) {
+            tag ^= std::bit_cast<std::uint32_t>(rope_scaling_factor) * 0x9e3779b9U;
+            tag ^= rope_scaling_original_context * 0x85ebca6bU;
+        }
+        return tag;
     }
     const bool vision_enabled;
     const bool use_cuda_graph;
