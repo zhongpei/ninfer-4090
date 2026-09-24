@@ -74,7 +74,8 @@ __global__ void kv_cache_append_full_bf16_kernel(const __nv_bfloat16* __restrict
                                                  const std::int32_t* __restrict__ positions,
                                                  Metadata metadata,
                                                  __nv_bfloat16* __restrict__ cache_k,
-                                                 __half* __restrict__ cache_v, std::int32_t width) {
+                                                 __nv_bfloat16* __restrict__ cache_v,
+                                                 std::int32_t width) {
     constexpr int VecElems = 8;
     const int tokens       = metadata.valid_tokens(width);
     const std::int64_t idx = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -95,7 +96,7 @@ __global__ void kv_cache_append_full_bf16_kernel(const __nv_bfloat16* __restrict
         static_cast<std::int64_t>(d) + static_cast<std::int64_t>(kKVCacheAppendFullHeadDim) *
                                            (kv_head + Geometry::KVHeads * token);
     const int4 k_value = load_vec<int4>(&k[src_off]);
-    const int4 v_value = bf16x8_bits_to_f16x8_bits(load_vec<int4>(&v[src_off]));
+    const int4 v_value = load_vec<int4>(&v[src_off]);
     physical_page      = __shfl_sync(0xffffffffu, physical_page, 0);
     const std::int64_t cache_off =
         paged_kv_element_offset<kKVCacheAppendFullHeadDim, Geometry::KVHeads>(
