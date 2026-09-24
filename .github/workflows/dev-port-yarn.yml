@@ -13,15 +13,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect v0.11 execution wiring
+      - name: Inspect v0.11 YaRN wiring
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== ExecutionCore construction sites ==='
-          git grep -n 'ExecutionCore\|prefill_chunk, proposal_head' -- src/models/qwen3_5 || true
-          echo '=== position generation ==='
-          git grep -n 'rope_positions\|rope_pos\|rope_delta' -- src/models/qwen3_5/program src/models/qwen3_5/execution | head -n 300 || true
-          echo '=== planning max position validation ==='
-          git grep -n 'max_position_embeddings\|max_context exceeds' -- src/models/qwen3_5 || true
-          echo '=== KV enum and rk8v4 ==='
-          git grep -n 'rk8v4\|Rotor\|KvCacheStorage' -- include src apps | head -n 300 || true
+          echo '=== TextContext construction sites ==='
+          git grep -n 'TextContext card' -- src/models/qwen3_5 || true
+          echo '=== ExecutionCore aggregate sites ==='
+          git grep -n 'ExecutionCore{' -- src/models/qwen3_5 || true
+          git grep -n 'prefill_chunk, proposal_head' -- src/models/qwen3_5 || true
+          echo '=== YaRN policy references ==='
+          git grep -n 'rope_scaling_' -- include src apps scripts || true
+          echo '=== position scaling references ==='
+          git grep -n 'scale_positions_yarn' -- include src || true
+          echo '=== whitespace ==='
+          git diff --check HEAD~25..HEAD || true
