@@ -169,17 +169,25 @@ namespace ninfer::models::qwen3_5::detail {
 
 namespace {
 
-std::array<std::int32_t, 3> prompt_rope_position(const PreparedPromptData& prompt,
-                                                 std::uint32_t token);
+std::array<std::int32_t, 3> prompt_rope_position(
+    const PreparedPromptData& prompt, std::uint32_t token, float rope_scaling_factor,
+    std::uint32_t rope_scaling_original_context);
 
-std::array<std::int32_t, 3> prompt_rope_position(const PreparedPromptData& prompt,
-                                                 std::uint32_t token) {
+std::array<std::int32_t, 3> prompt_rope_position(
+    const PreparedPromptData& prompt, std::uint32_t token, float rope_scaling_factor,
+    std::uint32_t rope_scaling_original_context) {
     const std::size_t tokens = prompt.token_ids.size();
     if (token >= tokens || prompt.positions.size() != 3 * tokens) {
         throw std::invalid_argument("MTP bridge position is outside prepared prompt metadata");
     }
-    return {prompt.positions[token], prompt.positions[tokens + token],
-            prompt.positions[2 * tokens + token]};
+    std::array<std::int32_t, 3> out{
+        prompt.positions[token], prompt.positions[tokens + token],
+        prompt.positions[2 * tokens + token]};
+    for (std::int32_t& position : out) {
+        position = execution::scale_rope_position_yarn(
+            position, rope_scaling_factor, rope_scaling_original_context);
+    }
+    return out;
 }
 
 } // namespace
@@ -1006,7 +1014,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         execution::PrefillContext schedule_state{
             {device, parameters, work, state_images->linear(),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, rope_scaling_factor, rope_scaling_original_context},
             text_kv_view(sequence),
             mtp_kv_view(sequence),
             decoder->text_kv,
@@ -1031,7 +1039,9 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             const execution::MtpBridgeInput bridge{
                 .previous_hidden = &previous_hidden,
                 .position        = checked_i32(staged.base - 1, "MTP bridge position"),
-                .rope_position   = prompt_rope_position(staged.prompt, staged.base - 1),
+                .rope_position   = prompt_rope_position(staged.prompt, staged.base - 1,
+                                                        rope_scaling_factor,
+                                                        rope_scaling_original_context),
             };
             if (staged.vision) {
                 execution::mtp_bridge_multimodal(schedule_state, staged.prompt, *staged.vision,
@@ -1173,15 +1183,19 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             execution::sample_from_hidden(schedule_state, sequence.tail_hidden,
                                           checked_i32(staged.prompt_tokens, "sample position"),
                                           ops::kSamplePurposePrefill);
-            set_device_i32(io.rope_pos, checked_i32(staged.prompt_tokens, "rope position") +
-                                            sequence.rope_delta);
+            set_device_i32(
+                io.rope_pos,
+                execution::scale_rope_position_yarn(
+                    checked_i32(staged.prompt_tokens, "rope position") + sequence.rope_delta,
+                    rope_scaling_factor, rope_scaling_original_context));
             if (staged.prepare_mtp) {
                 if (staged.mtp_bridge != MtpBridgeMode::AfterExactHit) {
                     throw std::logic_error("zero-suffix MTP reuse has no exact-hit bridge");
                 }
                 mark_workspace_usage(workspace_plan.mtp_prefill);
-                const auto bridge_rope =
-                    prompt_rope_position(staged.prompt, staged.prompt_tokens - 1);
+                const auto bridge_rope = prompt_rope_position(
+                    staged.prompt, staged.prompt_tokens - 1, rope_scaling_factor,
+                    rope_scaling_original_context);
                 execution::mtp_bridge_and_propose(
                     schedule_state, io.token, sequence.tail_hidden,
                     checked_i32(staged.prompt_tokens - 1, "MTP full-prefix bridge position"),
