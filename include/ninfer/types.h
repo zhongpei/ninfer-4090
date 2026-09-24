@@ -47,6 +47,12 @@ enum class KvCacheStorage : std::uint8_t {
     // scale. Ported onto the kv_cache_append Op that owns KV quantization, and opt-in through
     // --kv-dtype rk8v4. See docs/rtx-3090-windows.md.
     RotatedInt8KeyInt4ValueGroup64,
+    // 4-bit rotated K + 4-bit rotated V, one FP16 scale per 64 dimensions.
+    RotatedInt4KeyInt4ValueGroup64,
+    // E8 lattice projected 4-bit K + rotated 4-bit V.
+    RK4V4E8,
+    // E8 cylinder/root-coded 2-bit K + rotated 4-bit V.
+    RK2V4E8,
     // NVFP4 e2m1, group-16 scale, both K and V planes packed two codes per byte.
     Nvfp4Group16,
     // K8V4: FP8 E4M3 key plane (same coding as Fp8E4M3Row256) paired with an NVFP4 value plane.
