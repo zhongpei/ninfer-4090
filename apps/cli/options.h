@@ -34,6 +34,8 @@ struct Options {
     VisionResidency vision_residency       = VisionResidency::Resident;
     std::uint32_t vision_max_merged_tokens = 16384;
     bool use_cuda_graph = true;
+    float rope_scaling_factor                   = 1.0F;
+    std::uint32_t rope_scaling_original_context = 262144;
     bool lm_head_q4     = false;
     bool lm_head_q6     = false;
     bool embedding_q4   = false;

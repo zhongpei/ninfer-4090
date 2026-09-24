@@ -156,6 +156,16 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                                         ar_positions, ar_rope_positions, ar_valid_columns,
                                         static_cast<std::int32_t>(state.text_cache.max_context()),
                                         state.execution.device.stream);
+            if (state.execution.rope_scaling_factor > 1.0F) {
+                // The round kernel emits raw absolute+delta RoPE positions. Scale the complete
+                // frame before any AR draft step reads it; validity masks keep unused cells inert.
+                Tensor ar_rope_frame = frame.ar_rope_positions.view(
+                    {frame.ar_rope_positions.ne[0] * frame.ar_rope_positions.ne[1]});
+                ops::scale_positions_yarn(
+                    ar_rope_frame, state.execution.rope_scaling_original_context,
+                    state.execution.rope_scaling_factor, ar_rope_frame,
+                    state.execution.device.stream);
+            }
             card.mtp_forward_decode_batch(alignment_ids, target_hidden, target_positions,
                                           target_rope, licensed_counts, mtp_rows, envelopes.batch,
                                           alignment_hidden);

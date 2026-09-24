@@ -30,12 +30,13 @@ approval requirements beyond the user's instructions and the actual execution en
 NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU performance. It implements
 `Qwen3_5ForCausalLM` and `Qwen3_5MoeForCausalLM`; official Qwen3.6/3.8 artifacts and user recipes
 use the same architecture, binding and execution path.
-This fork targets **`sm_86`** and is tuned on **NVIDIA GeForce RTX 3090** (24 GB), built with
-CUDA 12.8. Upstream (`Neroued/ninfer`) targets `sm_120a` on RTX 5090; that is where its schedules,
-route tables and published measurements come from, and none of it is authoritative here -- every
-route table this fork inherited and re-measured on sm_86 turned out to be wrong by 12-41%. Treat an
-upstream tuning constant as a hypothesis until measured on this card. The build environment and the
-compatibility constraints are in "Windows build environment (RTX 3090 fork host)" below.
+This fork targets **`sm_89`** on **NVIDIA GeForce RTX 4090** (24 GB), built from the
+`franken/v0.11` Ternary line. Its primary model is
+`WaveCut/Ternary-Bonsai-2-27B-NInfer-v3`, with MTP3, YaRN-style long-context RoPE position
+scaling, and the RTX-4090 compressed-KV paths including `rk4v4-e8`. The inherited sm_86 path is
+kept as a compatibility build target, but RTX 4090 is authoritative for new tuning. Upstream
+(`Neroued/ninfer`) targets `sm_120a` on RTX 5090; treat its schedules as hypotheses until
+measured on Ada.
 
 Generation uses one GPU, one resident model, startup-fixed concurrency of one to eight requests,
 bounded FIFO ingress, no active-request preemption, and one compact decode batch per round.

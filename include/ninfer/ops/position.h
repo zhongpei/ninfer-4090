@@ -51,4 +51,25 @@ void fill_i32_positions(Tensor& positions, std::int32_t start, cudaStream_t stre
 void offset_i32_positions(const Tensor& source, const Tensor& delta, Tensor& destination,
                           cudaStream_t stream);
 
+/**
+ * Op: scale_positions_yarn
+ *
+ * Math / indexing:
+ *   p <= original_context: p' = p
+ *   p > original_context:  p' = original_context +
+ *                              round((p - original_context) / factor)
+ *
+ * Logical shapes:
+ *   source and destination are the same contiguous I32 vector [T].
+ *
+ * Numeric:
+ *   factor must be >= 1.0. The runtime uses the same double-precision quotient on host and
+ *   device so prefill and decode map the same absolute position to the same RoPE position.
+ *
+ * Effects:
+ *   In-place transformation only. KV/cache positions must never be passed to this Op.
+ */
+void scale_positions_yarn(const Tensor& source, std::uint32_t original_context, float factor,
+                          Tensor& destination, cudaStream_t stream);
+
 } // namespace ninfer::ops

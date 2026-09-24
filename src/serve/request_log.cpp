@@ -133,7 +133,13 @@ const char* kv_cache_name(ninfer::KvCacheStorage storage) {
     case ninfer::KvCacheStorage::Fp8E4M3Row256:
         return "fp8-e4m3-row256";
     case ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
-        return "rotated-k8g64-v4g32";
+        return "rk8v4";
+    case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return "rk4v4";
+    case ninfer::KvCacheStorage::RK4V4E8:
+        return "rk4v4-e8";
+    case ninfer::KvCacheStorage::RK2V4E8:
+        return "rk2v4-e8";
     case ninfer::KvCacheStorage::Nvfp4Group16:
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
@@ -693,6 +699,8 @@ std::string format_server_start_json(
              {"kv_cache", kv_cache_name(engine_options.kv_cache)},
              {"vision", engine_options.enable_vision},
              {"cuda_graph", engine_options.use_cuda_graph},
+             {"rope_scaling_factor", engine_options.rope_scaling_factor},
+             {"rope_scaling_original_context", engine_options.rope_scaling_original_context},
              {"lm_head_q4", engine_options.lm_head_q4},
              {"lm_head_q6", engine_options.lm_head_q6},
              {"embedding_q4", engine_options.embedding_q4},

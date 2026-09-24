@@ -69,14 +69,27 @@ struct PagedKVStorageLayout {
         if (head_dim == kD256KVCacheHeadDim) { return symmetric({DType::I8, 256, DType::FP16, 4}); }
         break;
     case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
-        // RotorQuant rk8v4 (this fork only): the key plane is the same rotated INT8 coding as
-        // Int8Group64; the value plane packs two signed 4-bit codes per byte (U8, half the
-        // leading extent) with a finer 32-value scale group, so its scale plane is twice as wide.
         if (head_dim == kD256KVCacheHeadDim) {
             return {storage,
                     head_dim,
                     {DType::I8, head_dim, DType::FP16, 4},
-                    {DType::U8, head_dim / 2, DType::FP16, 8}};
+                    {DType::U8, head_dim / 2, DType::FP16, 4}};
+        }
+        break;
+    case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+    case KvCacheStorage::RK4V4E8:
+        // E8-family modes use independently H64-rotated G64 planes. Codes are packed two
+        // dimensions per byte and each 64-D group carries one FP16 scale.
+        if (head_dim == kD256KVCacheHeadDim) {
+            return symmetric({DType::U8, head_dim / 2, DType::FP16, 4});
+        }
+        break;
+    case KvCacheStorage::RK2V4E8:
+        if (head_dim == kD256KVCacheHeadDim) {
+            return {storage,
+                    head_dim,
+                    {DType::U8, head_dim / 4, DType::FP16, 4},
+                    {DType::U8, head_dim / 2, DType::FP16, 4}};
         }
         break;
     case KvCacheStorage::Fp8E4M3Row256:
@@ -97,6 +110,49 @@ struct PagedKVStorageLayout {
         break;
     }
     throw std::invalid_argument("unsupported paged KV-cache storage geometry");
+}
+
+/** Fork-local 4090 compressed-KV modes. All of these run through the INT8 attention
+ *  kernels; flags describe the physical packing/rotation needed by those kernels. */
+struct KvForkModeFlags {
+    bool packed_v   = false;
+    bool rotate_k   = false;
+    bool rotate_v   = false;
+    bool packed_k   = false;
+    bool e8_lattice = false;
+    bool e8_root    = false;
+};
+
+[[nodiscard]] constexpr bool kv_storage_is_int8_family(KvCacheStorage storage) noexcept {
+    switch (storage) {
+    case KvCacheStorage::Int8Group64:
+    case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+    case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+    case KvCacheStorage::RK4V4E8:
+    case KvCacheStorage::RK2V4E8:
+        return true;
+    default:
+        return false;
+    }
+}
+
+[[nodiscard]] constexpr KvForkModeFlags kv_fork_mode_flags(KvCacheStorage storage) noexcept {
+    switch (storage) {
+    case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+        return {.packed_v = true, .rotate_k = true, .rotate_v = true};
+    case KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return {.packed_v = true, .rotate_k = true, .rotate_v = true, .packed_k = true};
+    case KvCacheStorage::RK4V4E8:
+        return {.packed_v   = true,
+                .rotate_k   = true,
+                .rotate_v   = true,
+                .packed_k   = true,
+                .e8_lattice = true};
+    case KvCacheStorage::RK2V4E8:
+        return {.packed_v = true, .rotate_k = true, .rotate_v = true, .e8_root = true};
+    default:
+        return {};
+    }
 }
 
 } // namespace ninfer

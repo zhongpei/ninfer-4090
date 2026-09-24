@@ -28,6 +28,17 @@ using qwen3_5::PreparedPromptData;
 using detail::DFlashPersistentState;
 using qwen3_5::PromptModality;
 
+[[nodiscard]] inline std::int32_t scale_rope_position_yarn(
+    std::int32_t position, float factor, std::uint32_t original_context) noexcept {
+    if (factor <= 1.0F || position <= static_cast<std::int32_t>(original_context)) {
+        return position;
+    }
+    const double delta =
+        static_cast<double>(position - static_cast<std::int32_t>(original_context));
+    return static_cast<std::int32_t>(original_context) +
+           static_cast<std::int32_t>(delta / static_cast<double>(factor) + 0.5);
+}
+
 struct ExecutionCore {
     DeviceContext& device;
     const execution::Parameters& parameters;
@@ -38,6 +49,8 @@ struct ExecutionCore {
     Tensor& prefill_hidden;
     std::uint32_t prefill_chunk;
     ProposalHead proposal_head;
+    float rope_scaling_factor                   = 1.0F;
+    std::uint32_t rope_scaling_original_context = 262144;
 };
 
 struct PrefillContext {

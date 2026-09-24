@@ -1,10 +1,11 @@
 #pragma once
 
-// ninfer::ops - split-KV causal small-T attention, INT8 KV-cache partial kernel.
+// ninfer::ops - split-KV GQA small-T attention, int8 KV-cache partial kernel.
+// Historical design: docs/archive/optimization-era/2026-07-08-gqa-decode-int8-kernel-redesign.md.
 //
-//   * QK runs on native m16n8k32.s8 tensor cores. Q and newly appended K receive the same fixed
-//     register-only D256 rotation before G64 quantization. K stays int8 in the cache and is read
-//     straight into smem (no dequant). The int32 MMA output is rescaled per 64-group by
+//   * QK runs on native m16n8k32.s8 tensor cores. Q is quantized on-chip to int8
+//     per (row, 64-group); K stays int8 in the cache and is read straight into
+//     smem (no dequant). The int32 MMA output is rescaled per 64-group by
 //     qs[row,g]*ks[key,g]. This halves the QK MMA count vs bf16 and removes the
 //     entire K dequant.
 //   * PV uses FP16 (V is quantized per key, so its scale cannot be factored out
@@ -16,12 +17,14 @@
 //     __syncthreads orders the in-block readback. No from_new special-casing.
 //
 // Standalone from the bf16 kernel; shared scaffolding (layout constants, ldmatrix
-// helpers, the s8/f16 MMA helpers, the reducer) lives in causal_attention_small_t.cuh.
+// helpers, the s8/f16 MMA helpers, the reducer) lives in small_t.cuh.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <math_constants.h>
 
+#include "ops/kernel/e8_lattice.cuh"
+#include "ops/kernel/e8_root_codec.cuh"
 #include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
 #include "ops/kv_cache/int8_g64_codec.cuh"
 
@@ -39,19 +42,17 @@ namespace ninfer::ops {
 // at a time. K/V codes and scales are staged asynchronously; non-producer warps
 // dequantize V while producers execute QK. After both consume the code tile, the
 // next K/V tile is prefetched into the same arena while the current PV runs.
-// PackedValues selects the rk8v4 half-width value plane, for both the fused append this kernel
-// performs and the value staging it consumes. The key path is unchanged in both instantiations.
 template <typename Geometry, int TokenTile, int WarpsPerCta, int MinBlocksPerSm, int KeyBlock,
-          bool DynamicArena, bool MultiBatch, bool Masked, typename CacheInput,
-          bool PackedValues = false>
+          bool DynamicArena, bool PackedV, bool RotateK, bool RotateV, bool PackedK,
+          bool E8Lattice = false, bool E8Root = false, bool MultiBatch = false, bool Masked = false, typename CacheInput = void*>
 __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     void causal_attention_small_t_i8_tiled_kernel(
         const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, std::int8_t* cache_k_i8,
-        std::int8_t* cache_v_i8, __half* cache_k_scale, __half* cache_v_scale,
+        std::uint8_t* cache_v_codes, __half* cache_k_scale, __half* cache_v_scale,
         const std::int32_t* block_tables, const std::int32_t* valid_columns,
         const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t full_width,
-        std::int32_t column_begin, std::int32_t logical_capacity, std::int32_t wave_splits,
-        float scale, float* partial_acc, float* partial_m, float* partial_l) {
+        std::int32_t column_begin, std::int32_t logical_capacity, float scale, float* partial_acc,
+        float* partial_m, float* partial_l) {
     constexpr int Wc                   = WarpsPerCta;
     constexpr int RowCount             = TokenTile * Geometry::GroupSize;
     constexpr int RowTiles             = (RowCount + 15) / 16;
@@ -61,17 +62,12 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     constexpr int DB16                 = D / 2;
     constexpr int Threads              = Wc * 32;
     constexpr int Groups               = kKVCacheInt8Groups;
-    // Value scale rows always use the wider packed-int4 stride so one arena serves both
-    // codings; the INT8 coding uses the leading Groups entries of each row.
-    constexpr int VGroups              = kKVCacheInt4ValueGroups;
     constexpr int GroupKc              = kKVCacheInt8Group / 32;
     constexpr int QKKs                 = D / 32;
     constexpr int QKNt                 = Bc / 8;
     constexpr int ConsumerWarpsPerTile = Wc / RowTiles;
     constexpr int PVNtPerWarp          = D / (ConsumerWarpsPerTile * 8);
     constexpr int PVKs                 = Bc / 16;
-    // The 262144-key maximum envelope spans at most 49 pages in this split geometry.
-    constexpr int PageIds         = 64;
     constexpr int ProducerThreads = RowTiles * 32;
     constexpr int VLoaderThreads  = Threads - ProducerThreads;
     constexpr float Log2E         = 1.4426950408889634074f;
@@ -103,18 +99,6 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     __shared__ float alpha_s[Br];
     __shared__ __align__(16) __half k_scale_s[Bc * Groups];
     __shared__ __align__(16) __half v_scale_s[Bc * Groups];
-    __shared__ std::int32_t physical_pages_s[PageIds];
-    // A packed value row occupies only the leading D/2 bytes of its D-byte slot, so that key's
-    // eight G32 scales live in the upper half of its own slot. Placing them per key rather than in
-    // one block matters because the staged rows keep the full D stride. Static shared memory is
-    // untouched, which this kernel needs: it already sits at the 48 KiB static ceiling.
-    const auto value_scale_row = [&](int key_l) -> __half* {
-        if constexpr (PackedValues) {
-            return reinterpret_cast<__half*>(v_i8 + key_l * D + D / 2);
-        } else {
-            return &v_scale_s[key_l * Groups];
-        }
-    };
 
     const int kv_head     = static_cast<int>(blockIdx.x);
     const int split       = static_cast<int>(blockIdx.y);
@@ -155,8 +139,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             if (causal_valid_q_head<Geometry>(kv_head, q_head)) {
                 partial_m[causal_partial_stat_index<Geometry>(q_head, token, split, TokenTile)] =
                     -CUDART_INF_F;
-                partial_l[causal_partial_stat_index<Geometry>(q_head, token, split, TokenTile)] =
-                    0.0f;
+                partial_l[causal_partial_stat_index<Geometry>(q_head, token, split, TokenTile)] = 0.0f;
             }
         }
         for (int idx = tid; idx < RowCount * D; idx += Threads) {
@@ -187,7 +170,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 
     const int window = last_pos + 1;
     const int active_split_count =
-        causal_small_t_active_splits<Geometry, true>(window, split_count, TokenTile, wave_splits);
+        causal_small_t_active_splits<Geometry, true>(window, split_count, TokenTile);
     if (split >= active_split_count) { return; }
 
     const int logical_tiles = div_up(window, Bc);
@@ -203,116 +186,133 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     }
     const int first_tile = (split_start / Bc) * Bc;
     const int key_blocks = div_up(split_end - first_tile, Bc);
-    const int first_page = first_tile >> kPagedKVPageShift;
-    const int page_count = ((split_end - 1) >> kPagedKVPageShift) - first_page + 1;
-    for (int page = tid; page < page_count; page += Threads) {
-        physical_pages_s[page] = block_table[first_page + page];
-    }
 
     if constexpr (CacheInput::writes_cache) {
-        // Decompose H256 as H4 over four independently transformed H64 groups. The existing
-        // (token, group) warp schedule computes all H64 fragments in parallel; the FP32 main arena
-        // is the exchange point for the final H4 stage. This retains the complete transform's
-        // butterfly/rounding order while shortening the fused append critical path. V stays in
-        // the original coordinates and retains the existing G64 codec.
-        float* k_h64_s = reinterpret_cast<float*>(r_s);
+        // The owning split quantizes each current row before its cache tile is consumed.
         for (int pair = warp; pair < valid_tokens * Groups; pair += Wc) {
             const int token    = pair / Groups;
             const int grp      = pair - token * Groups;
             const int position = pos[token];
             if (position < split_start || position >= split_end) { continue; }
-            const int d0            = grp * kKVCacheInt8Group + lane;
-            const int d1            = d0 + 32;
-            const std::int64_t src0 = kv_cache_int8_new_index<Geometry>(kv_head, d0, token);
-            const std::int64_t src1 = kv_cache_int8_new_index<Geometry>(kv_head, d1, token);
-            float k_h64[2] = {__bfloat162float(input.k[src0]), __bfloat162float(input.k[src1])};
-            hadamard_d64_fragment_inplace(k_h64, lane);
-            k_h64_s[token * D + d0] = k_h64[0];
-            k_h64_s[token * D + d1] = k_h64[1];
-        }
-        __syncthreads();
-
-        for (int pair = warp; pair < valid_tokens * Groups; pair += Wc) {
-            const int token    = pair / Groups;
-            const int grp      = pair - token * Groups;
-            const int position = pos[token];
-            if (position < split_start || position >= split_end) { continue; }
-            const int physical_page =
-                physical_pages_s[(position >> kPagedKVPageShift) - first_page];
+            int physical_page       = lane == 0 ? paged_kv_physical_page(block_table, position) : 0;
             const int page_offset   = position & kPagedKVPageMask;
             const int d0            = grp * kKVCacheInt8Group + lane;
             const int d1            = d0 + 32;
             const std::int64_t src0 = kv_cache_int8_new_index<Geometry>(kv_head, d0, token);
             const std::int64_t src1 = kv_cache_int8_new_index<Geometry>(kv_head, d1, token);
-
-            float k_out[2];
-#pragma unroll
-            for (int half = 0; half < 2; ++half) {
-                const int dh   = lane + half * 32;
-                const float x0 = k_h64_s[token * D + dh];
-                const float x1 = k_h64_s[token * D + kKVCacheInt8Group + dh];
-                const float x2 = k_h64_s[token * D + 2 * kKVCacheInt8Group + dh];
-                const float x3 = k_h64_s[token * D + 3 * kKVCacheInt8Group + dh];
-                k_out[half]    = normalized_hadamard_d256_group_value_from_h64(x0, x1, x2, x3, grp);
-            }
-
-            const float kv0    = k_out[0];
-            const float kv1    = k_out[1];
-            const float vv0    = __bfloat162float(input.v[src0]);
-            const float vv1    = __bfloat162float(input.v[src1]);
-            float kamax        = fmaxf(fabsf(kv0), fabsf(kv1));
-            kamax              = warp_max(kamax, FullMask);
-            const auto k_quant = kv_cache_int8_quant_params(kamax);
-            // The vv0 lanes span dimensions [64g, 64g+32) and the vv1 lanes the next 32, so the
-            // packed coding's two G32 groups fall out of the lane assignment directly.
-            const float vamax_lo = warp_max(fabsf(vv0), FullMask);
-            const float vamax_hi = warp_max(fabsf(vv1), FullMask);
-            const auto v_quant   = PackedValues
-                                       ? kv_cache_int4_quant_params(vamax_lo)
-                                       : kv_cache_int8_quant_params(fmaxf(vamax_lo, vamax_hi));
-            const auto v_quant_hi =
-                PackedValues ? kv_cache_int4_quant_params(vamax_hi) : v_quant;
-            cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0,
-                                                                page_offset)] =
-                kv_cache_int8_quant_code(kv0, k_quant.inverse_scale);
-            cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1,
-                                                                page_offset)] =
-                kv_cache_int8_quant_code(kv1, k_quant.inverse_scale);
-            if constexpr (PackedValues) {
-                // A packed byte holds the adjacent dimension pair, which spans lanes l and l^1.
-                const std::int8_t c0 = kv_cache_int4_quant_code(vv0, v_quant.inverse_scale);
-                const std::int8_t c1 = kv_cache_int4_quant_code(vv1, v_quant_hi.inverse_scale);
-                const int partner0   = __shfl_xor_sync(FullMask, static_cast<int>(c0), 1);
-                const int partner1   = __shfl_xor_sync(FullMask, static_cast<int>(c1), 1);
+            float kv0               = __bfloat162float(input.k[src0]);
+            float kv1               = __bfloat162float(input.k[src1]);
+            float vv0               = __bfloat162float(input.v[src0]);
+            float vv1               = __bfloat162float(input.v[src1]);
+            if constexpr (RotateK) { kv_cache_hadamard64(kv0, kv1, FullMask); }
+            if constexpr (RotateV) { kv_cache_hadamard64(vv0, vv1, FullMask); }
+            float kamax             = fmaxf(fabsf(kv0), fabsf(kv1));
+            float vamax             = fmaxf(fabsf(vv0), fabsf(vv1));
+            kamax                   = warp_max(kamax, FullMask);
+            vamax                   = warp_max(vamax, FullMask);
+            const __half ksh = __float2half_rn(kamax > 0.0f ? kamax / ((PackedK || E8Root) ? 7.0f : 127.0f) : 0.0f);
+            const __half vsh = __float2half_rn(vamax > 0.0f ? vamax / (PackedV ? 7.0f : 127.0f)
+                                                                : 0.0f);
+            const float ks          = __half2float(ksh);
+            const float vs          = __half2float(vsh);
+            const float k_inv       = ks > 0.0f ? 1.0f / ks : 0.0f;
+            const float v_inv       = vs > 0.0f ? 1.0f / vs : 0.0f;
+            physical_page           = __shfl_sync(FullMask, physical_page, 0);
+            if constexpr (E8Root) {
+                uint8_t c1_0, c2_0, c1_1, c2_1;
+                e8_encode_cylinder_8d_warp(kv0, ks, c1_0, c2_0, lane);
+                e8_encode_cylinder_8d_warp(kv1, ks, c1_1, c2_1, lane);
+                if ((lane & 7) == 0) {
+                    int s0 = (lane / 8);
+                    int s1 = 4 + (lane / 8);
+                    const std::int64_t k_base = paged_kv_page_head_offset<64, Geometry::KVHeads>(physical_page, kv_head) +
+                                                static_cast<std::int64_t>(page_offset) * 64 + grp * 16;
+                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s0 * 2 + 0] = c1_0;
+                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s0 * 2 + 1] = c2_0;
+                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s1 * 2 + 0] = c1_1;
+                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[k_base + s1 * 2 + 1] = c2_1;
+                }
+                const float vv0_hi = __shfl_down_sync(FullMask, vv0, 1);
+                const float vv1_hi = __shfl_down_sync(FullMask, vv1, 1);
                 if ((lane & 1) == 0) {
-                    auto* packed_v = reinterpret_cast<std::uint8_t*>(cache_v_i8);
-                    const std::int64_t packed_base = kv_cache_int4_value_code_index<Geometry>(
-                        physical_page, kv_head, grp * (kKVCacheInt8Group / 2), page_offset);
-                    packed_v[packed_base + (lane >> 1)] =
-                        kv_cache_int4_pack(c0, static_cast<std::int8_t>(partner0));
-                    packed_v[packed_base + (lane >> 1) + 16] =
-                        kv_cache_int4_pack(c1, static_cast<std::int8_t>(partner1));
+                    cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d0 / 2, page_offset)] =
+                        kv_cache_pack_i4(kv_cache_i4_quant_code(vv0, v_inv), kv_cache_i4_quant_code(vv0_hi, v_inv));
+                    cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d1 / 2, page_offset)] =
+                        kv_cache_pack_i4(kv_cache_i4_quant_code(vv1, v_inv), kv_cache_i4_quant_code(vv1_hi, v_inv));
+                }
+            } else if constexpr (PackedK) {
+                std::int8_t c0 = 0, c1 = 0;
+                if constexpr (E8Lattice) {
+                    float kv0_scaled = kv0 * k_inv;
+                    float kv1_scaled = kv1 * k_inv;
+                    e8_project_8d_warp(kv0_scaled, kv1_scaled, lane);
+                    // NOTE (correctness hardening of the ported codec): e8_project_8d_warp
+                    // returns the nearest E8 lattice point, which may lie in the D8+0.5
+                    // coset (all coordinates half-integral). The i4/int8 codes can only hold
+                    // integers and no coset bit is stored, so the half is intentionally
+                    // collapsed here by the rintf()+cast below and the D8+0.5 coset is NOT
+                    // reconstructed on decode (reconstructed K == code * ks). This is a
+                    // deliberate half-coset approximation of rk4v4-e8, not an exact E8
+                    // lattice projection, for any vector whose nearest lattice point is
+                    // half-integral. Preserving the exact E8 point would require a per-8-dim
+                    // coset bit in the packed layout (a format change, out of scope here).
+                    // The rk4v4 (non-E8) path below is unaffected. Original design credit:
+                    // UDPSendToFailed/ninfer-4090 (and Don-Chad/ninfer-3090 lineage).
+                    int q0 = static_cast<int>(rintf(kv0_scaled));
+                    int q1 = static_cast<int>(rintf(kv1_scaled));
+                    c0 = static_cast<std::int8_t>(max(-8, min(7, q0)));
+                    c1 = static_cast<std::int8_t>(max(-8, min(7, q1)));
+                } else {
+                    c0 = kv_cache_i4_quant_code(kv0, k_inv);
+                    c1 = kv_cache_i4_quant_code(kv1, k_inv);
+                }
+                const std::int8_t c0_hi = static_cast<std::int8_t>(__shfl_down_sync(FullMask, static_cast<int>(c0), 1));
+                const std::int8_t c1_hi = static_cast<std::int8_t>(__shfl_down_sync(FullMask, static_cast<int>(c1), 1));
+                const float vv0_hi = __shfl_down_sync(FullMask, vv0, 1);
+                const float vv1_hi = __shfl_down_sync(FullMask, vv1, 1);
+                if ((lane & 1) == 0) {
+                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d0 / 2, page_offset)] =
+                        kv_cache_pack_i4(c0, c0_hi);
+                    reinterpret_cast<std::uint8_t*>(cache_k_i8)[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d1 / 2, page_offset)] =
+                        kv_cache_pack_i4(c1, c1_hi);
+                    cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d0 / 2, page_offset)] =
+                        kv_cache_pack_i4(kv_cache_i4_quant_code(vv0, v_inv), kv_cache_i4_quant_code(vv0_hi, v_inv));
+                    cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d1 / 2, page_offset)] =
+                        kv_cache_pack_i4(kv_cache_i4_quant_code(vv1, v_inv), kv_cache_i4_quant_code(vv1_hi, v_inv));
                 }
             } else {
-                cache_v_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0,
-                                                                    page_offset)] =
-                    kv_cache_int8_quant_code(vv0, v_quant.inverse_scale);
-                cache_v_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1,
-                                                                    page_offset)] =
-                    kv_cache_int8_quant_code(vv1, v_quant.inverse_scale);
+                cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0, page_offset)] =
+                    kv_cache_int8_quant_code(kv0, k_inv);
+                cache_k_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1, page_offset)] =
+                    kv_cache_int8_quant_code(kv1, k_inv);
+                if constexpr (PackedV) {
+                    const float vv0_hi = __shfl_down_sync(FullMask, vv0, 1);
+                    const float vv1_hi = __shfl_down_sync(FullMask, vv1, 1);
+                    if ((lane & 1) == 0) {
+                        cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d0 / 2,
+                                                                     page_offset)] =
+                            kv_cache_pack_i4(kv_cache_i4_quant_code(vv0, v_inv),
+                                           kv_cache_i4_quant_code(vv0_hi, v_inv));
+                        cache_v_codes[kv_cache_i4_code_index<Geometry>(physical_page, kv_head, d1 / 2,
+                                                                     page_offset)] =
+                            kv_cache_pack_i4(kv_cache_i4_quant_code(vv1, v_inv),
+                                           kv_cache_i4_quant_code(vv1_hi, v_inv));
+                    }
+                } else {
+                    auto* cache_v_i8 = reinterpret_cast<std::int8_t*>(cache_v_codes);
+                    cache_v_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d0,
+                                                                  page_offset)] =
+                        kv_cache_int8_quant_code(vv0, v_inv);
+                    cache_v_i8[kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d1,
+                                                                  page_offset)] =
+                        kv_cache_int8_quant_code(vv1, v_inv);
+                }
             }
             if (lane == 0) {
-                const std::int64_t so = kv_cache_int8_quant_scale_index<Geometry>(
-                    physical_page, kv_head, grp, page_offset);
-                cache_k_scale[so] = k_quant.scale;
-                if constexpr (PackedValues) {
-                    cache_v_scale[kv_cache_int4_value_scale_index<Geometry>(
-                        physical_page, kv_head, 2 * grp, page_offset)] = v_quant.scale;
-                    cache_v_scale[kv_cache_int4_value_scale_index<Geometry>(
-                        physical_page, kv_head, 2 * grp + 1, page_offset)] = v_quant_hi.scale;
-                } else {
-                    cache_v_scale[so] = v_quant.scale;
-                }
+                const std::int64_t so =
+                    kv_cache_int8_quant_scale_index<Geometry>(physical_page, kv_head, grp, page_offset);
+                cache_k_scale[so] = ksh;
+                cache_v_scale[so] = vsh;
             }
         }
         __syncthreads();
@@ -322,34 +322,26 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     for (int i = tid; i < RowCount * Groups; i += Threads) { q_scale_tmp[i] = 0.0f; }
     __syncthreads();
 
-    for (int row = warp; row < RowCount; row += Wc) {
-        int q_head = 0;
-        int token  = 0;
+    for (int unit = warp; unit < RowCount * Groups; unit += Wc) {
+        const int row = unit / Groups;
+        const int grp = unit - row * Groups;
+        const int d0  = grp * kKVCacheInt8Group + lane;
+        const int d1  = d0 + 32;
+        int q_head    = 0;
+        int token     = 0;
         causal_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
-        float q_values[8];
-#pragma unroll
-        for (int r = 0; r < 8; ++r) {
-            const int d = lane + 32 * r;
-            q_values[r] = __bfloat162float(q[causal_q_index<Geometry>(q_head, d, token)]);
+        float x0        = __bfloat162float(q[causal_q_index<Geometry>(q_head, d0, token)]);
+        float x1        = __bfloat162float(q[causal_q_index<Geometry>(q_head, d1, token)]);
+        if constexpr (RotateK) {
+            kv_cache_hadamard64(x0, x1, FullMask);
         }
-        normalized_hadamard_d256_inplace(q_values, lane);
-
-#pragma unroll
-        for (int grp = 0; grp < Groups; ++grp) {
-            const int d0    = grp * kKVCacheInt8Group + lane;
-            const int d1    = d0 + 32;
-            const float x0  = q_values[2 * grp];
-            const float x1  = q_values[2 * grp + 1];
-            float amax      = fmaxf(fabsf(x0), fabsf(x1));
-            amax            = warp_max(amax, FullMask);
-            const float qs  = amax > 0.0f ? amax / 127.0f : 0.0f;
-            const float inv = qs > 0.0f ? 1.0f / qs : 0.0f;
-            causal_small_t_store_byte_swizzled(q_i8, row, d0, DB16,
-                                               kv_cache_int8_quant_code(x0, inv));
-            causal_small_t_store_byte_swizzled(q_i8, row, d1, DB16,
-                                               kv_cache_int8_quant_code(x1, inv));
-            if (lane == 0) { q_scale_tmp[row * Groups + grp] = qs; }
-        }
+        float amax      = fmaxf(fabsf(x0), fabsf(x1));
+        amax            = warp_max(amax, FullMask);
+        const float qs  = amax > 0.0f ? amax / 127.0f : 0.0f;
+        const float inv = qs > 0.0f ? 1.0f / qs : 0.0f;
+        causal_small_t_store_byte_swizzled(q_i8, row, d0, DB16, kv_cache_int8_quant_code(x0, inv));
+        causal_small_t_store_byte_swizzled(q_i8, row, d1, DB16, kv_cache_int8_quant_code(x1, inv));
+        if (lane == 0) { q_scale_tmp[row * Groups + grp] = qs; }
     }
     __syncthreads();
 
@@ -398,20 +390,10 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 const std::int64_t off = kv_cache_int8_quant_scale_index<Geometry>(
                     physical_page, kv_head, 0, key & kPagedKVPageMask);
                 ninfer::ops::cp_async<8>(&k_scale_s[key_l * Groups], &cache_k_scale[off]);
-                if constexpr (PackedValues) {
-                    const std::int64_t voff = kv_cache_int4_value_scale_index<Geometry>(
-                        physical_page, kv_head, 0, key & kPagedKVPageMask);
-                    ninfer::ops::cp_async<16>(value_scale_row(key_l), &cache_v_scale[voff]);
-                } else {
-                    ninfer::ops::cp_async<8>(value_scale_row(key_l), &cache_v_scale[off]);
-                }
+                ninfer::ops::cp_async<8>(&v_scale_s[key_l * Groups], &cache_v_scale[off]);
             } else {
                 store_vec(&k_scale_s[key_l * Groups], make_int2(0, 0));
-                if constexpr (PackedValues) {
-                    store_vec(value_scale_row(key_l), make_int4(0, 0, 0, 0));
-                } else {
-                    store_vec(value_scale_row(key_l), make_int2(0, 0));
-                }
+                store_vec(&v_scale_s[key_l * Groups], make_int2(0, 0));
             }
         }
 #pragma unroll 1
@@ -421,35 +403,55 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             const int d     = dc * 16;
             const int key   = tile_k0 + key_l;
             if (key >= split_start && key < split_end) {
-                const std::int64_t off = kv_cache_int8_quant_code_index<Geometry>(
-                    physical_page, kv_head, d, key & kPagedKVPageMask);
-                std::int8_t* dst = &k_i8[key_l * D + causal_small_t_tc_swz(key_l, dc * 8) * 2];
-                ninfer::ops::cp_async<16>(dst, &cache_k_i8[off]);
-                if constexpr (PackedValues) {
-                    // Sixteen dimensions occupy eight packed bytes, staged into the leading half
-                    // of the same value slot so the arena footprint matches the INT8 coding.
-                    const std::int64_t voff = kv_cache_int4_value_code_index<Geometry>(
-                        physical_page, kv_head, d >> 1, key & kPagedKVPageMask);
-                    ninfer::ops::cp_async<8>(
-                        &v_i8[key_l * D + (d >> 1)],
-                        reinterpret_cast<const std::uint8_t*>(cache_v_i8) + voff);
+                if constexpr (E8Root) {
+                    const std::int64_t koff = paged_kv_page_head_offset<64, Geometry::KVHeads>(
+                        physical_page, kv_head) + static_cast<std::int64_t>(key & kPagedKVPageMask) * 64 + (d / 4);
+                    const uint32_t src4 = *reinterpret_cast<const uint32_t*>(&reinterpret_cast<const std::uint8_t*>(cache_k_i8)[koff]);
+                    const uint8_t c1_0 = static_cast<uint8_t>(src4 & 0xFF);
+                    const uint8_t c2_0 = static_cast<uint8_t>((src4 >> 8) & 0xFF);
+                    const uint8_t c1_1 = static_cast<uint8_t>((src4 >> 16) & 0xFF);
+                    const uint8_t c2_1 = static_cast<uint8_t>((src4 >> 24) & 0xFF);
+                    int8_t dec8_0[8], dec8_1[8];
+                    e8_root_decode_8d_int8(c1_0, c2_0, dec8_0);
+                    e8_root_decode_8d_int8(c1_1, c2_1, dec8_1);
+                    std::int8_t* dst = &k_i8[key_l * D + causal_small_t_tc_swz(key_l, dc * 8) * 2];
+                    *reinterpret_cast<uint64_t*>(&dst[0]) = *reinterpret_cast<const uint64_t*>(dec8_0);
+                    *reinterpret_cast<uint64_t*>(&dst[8]) = *reinterpret_cast<const uint64_t*>(dec8_1);
+                    const std::int64_t voff = kv_cache_i4_code_index<Geometry>(
+                        physical_page, kv_head, d / 2, key & kPagedKVPageMask);
+                    kv_cache_unpack_i4x16(&cache_v_codes[voff], &v_i8[key_l * D + d]);
+                } else if constexpr (PackedK) {
+                    const std::int64_t koff = kv_cache_i4_code_index<Geometry>(
+                        physical_page, kv_head, d / 2, key & kPagedKVPageMask);
+                    std::int8_t* dst = &k_i8[key_l * D + causal_small_t_tc_swz(key_l, dc * 8) * 2];
+                    kv_cache_unpack_i4x16(&reinterpret_cast<const std::uint8_t*>(cache_k_i8)[koff], dst);
+                    const std::int64_t voff = kv_cache_i4_code_index<Geometry>(
+                        physical_page, kv_head, d / 2, key & kPagedKVPageMask);
+                    kv_cache_unpack_i4x16(&cache_v_codes[voff], &v_i8[key_l * D + d]);
                 } else {
-                    ninfer::ops::cp_async<16>(&v_i8[key_l * D + d], &cache_v_i8[off]);
+                    const std::int64_t off = kv_cache_int8_quant_code_index<Geometry>(
+                        physical_page, kv_head, d, key & kPagedKVPageMask);
+                    std::int8_t* dst = &k_i8[key_l * D + causal_small_t_tc_swz(key_l, dc * 8) * 2];
+                    ninfer::ops::cp_async<16>(dst, &cache_k_i8[off]);
+                    if constexpr (PackedV) {
+                        const std::int64_t voff = kv_cache_i4_code_index<Geometry>(
+                            physical_page, kv_head, d / 2, key & kPagedKVPageMask);
+                        kv_cache_unpack_i4x16(&cache_v_codes[voff], &v_i8[key_l * D + d]);
+                    } else {
+                        ninfer::ops::cp_async<16>(&v_i8[key_l * D + d],
+                                                  &reinterpret_cast<std::int8_t*>(cache_v_codes)[off]);
+                    }
                 }
             } else {
                 std::int8_t* dst = &k_i8[key_l * D + causal_small_t_tc_swz(key_l, dc * 8) * 2];
                 store_vec(dst, make_int4(0, 0, 0, 0));
-                if constexpr (PackedValues) {
-                    store_vec(&v_i8[key_l * D + (d >> 1)], make_int2(0, 0));
-                } else {
-                    store_vec(&v_i8[key_l * D + d], make_int4(0, 0, 0, 0));
-                }
+                store_vec(&v_i8[key_l * D + d], make_int4(0, 0, 0, 0));
             }
         }
         ninfer::ops::cp_commit();
     };
 
-    int physical_page = physical_pages_s[0];
+    int physical_page = block_table[first_tile >> kPagedKVPageShift];
     issue_kv_tile(first_tile, physical_page);
     ninfer::ops::cp_wait<0>();
     __syncthreads();
@@ -480,9 +482,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     const int acol = k * 16 + a_coloff;
                     ldmatrix_x4(
                         af[kk][0], af[kk][1], af[kk][2], af[kk][3],
-                        smem_addr(
-                            &q_b16[(producer_row_base + a_rowoff) * DB16 +
-                                   causal_small_t_tc_swz(producer_row_base + a_rowoff, acol)]));
+                        smem_addr(&q_b16[(producer_row_base + a_rowoff) * DB16 +
+                                         causal_small_t_tc_swz(producer_row_base + a_rowoff, acol)]));
                 }
 
 #pragma unroll
@@ -605,26 +606,22 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 const int key   = k0 + key_l;
                 __half* dst     = &v_f16[key_l * D + causal_small_t_tc_swz(key_l, d)];
                 if (key >= split_start && key < split_end) {
-                    // dc == lane here, so a value group spans eight consecutive lanes under the
-                    // INT8 G64 coding and four under the packed G32 one.
-                    constexpr int VLanesPerGroup = PackedValues ? 4 : 8;
-                    const int grp = PackedValues ? (d >> 5) : (d >> 6);
+                    const int grp = d >> 6;
                     float vs      = 0.0f;
-                    if ((lane & (VLanesPerGroup - 1)) == 0) {
-                        vs = __half2float(value_scale_row(key_l)[grp]);
-                    }
-                    vs = __shfl_sync(FullMask, vs, lane & ~(VLanesPerGroup - 1));
-                    // f16 loaders, because dst is __half* and this tile feeds mma_f16. The bf16
-                    // loaders are the same width, so using them here compiles and silently
-                    // reinterprets every value.
-                    if constexpr (PackedValues) {
-                        store_vec(dst, kv_cache_int4_dequant_f16x8_from(
-                                           reinterpret_cast<const std::uint8_t*>(v_i8) +
-                                               key_l * D + (d >> 1),
-                                           vs));
-                    } else {
-                        store_vec(dst, kv_cache_int8_dequant_f16x8_from(&v_i8[key_l * D + d], vs));
-                    }
+                    if ((lane & 7) == 0) { vs = __half2float(v_scale_s[key_l * Groups + grp]); }
+                    vs                = __shfl_sync(FullMask, vs, grp * 8);
+                    const int2 raw    = load_vec<int2>(&v_i8[key_l * D + d]);
+                    const auto* codes = reinterpret_cast<const std::int8_t*>(&raw);
+                    int4 values;
+                    values.x = pack_f16x2(static_cast<float>(codes[0]) * vs,
+                                          static_cast<float>(codes[1]) * vs);
+                    values.y = pack_f16x2(static_cast<float>(codes[2]) * vs,
+                                          static_cast<float>(codes[3]) * vs);
+                    values.z = pack_f16x2(static_cast<float>(codes[4]) * vs,
+                                          static_cast<float>(codes[5]) * vs);
+                    values.w = pack_f16x2(static_cast<float>(codes[6]) * vs,
+                                          static_cast<float>(codes[7]) * vs);
+                    store_vec(dst, values);
                 } else {
                     store_vec(dst, make_int4(0, 0, 0, 0));
                 }
@@ -636,7 +633,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         if (has_next) {
             const int next_k0 = k0 + Bc;
             if ((next_k0 & kPagedKVPageMask) == 0) {
-                physical_page = physical_pages_s[(next_k0 >> kPagedKVPageShift) - first_page];
+                physical_page = block_table[next_k0 >> kPagedKVPageShift];
             }
             issue_kv_tile(next_k0, physical_page);
         }
@@ -664,8 +661,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 const int pcol = k * 16 + a_coloff;
                 ldmatrix_x4(
                     pf[0], pf[1], pf[2], pf[3],
-                    smem_addr(
-                        &p_consumer[a_rowoff * Bc + causal_small_t_tc_swz32(a_rowoff, pcol)]));
+                    smem_addr(&p_consumer[a_rowoff * Bc + causal_small_t_tc_swz32(a_rowoff, pcol)]));
                 unsigned vf[2];
                 const int vrow = k * 16 + b_koff + b_rin;
                 const int vcol = global_n * 8;

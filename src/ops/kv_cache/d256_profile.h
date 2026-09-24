@@ -80,7 +80,18 @@ inline constexpr D256KVCacheProfile d256_kv_cache_profile(ninfer::KvCacheStorage
     case ninfer::KvCacheStorage::Fp8E4M3Row256:
         return d256_kv_cache_profile(DType::FP8_E4M3FN);
     case ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
-        return d256_kv_cache_profile(DType::I8, DType::U8);
+        return {DType::I8, DType::U8, kD256KVCacheHeadDim, kD256KVCacheHeadDim / 2,
+                64,        DType::FP16, 4,                  DType::FP16,
+                4};
+    case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+    case ninfer::KvCacheStorage::RK4V4E8:
+        return {DType::U8, DType::U8, kD256KVCacheHeadDim / 2, kD256KVCacheHeadDim / 2,
+                64,        DType::FP16, 4,                     DType::FP16,
+                4};
+    case ninfer::KvCacheStorage::RK2V4E8:
+        return {DType::U8, DType::U8, kD256KVCacheHeadDim / 4, kD256KVCacheHeadDim / 2,
+                64,        DType::FP16, 4,                     DType::FP16,
+                4};
     case ninfer::KvCacheStorage::Nvfp4Group16:
         // Both planes are e2m1-coded (2 codes/byte, so half the head dimension) with a 16-value
         // group and a raw E4M3 scale byte per group.

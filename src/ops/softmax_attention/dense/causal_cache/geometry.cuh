@@ -9,7 +9,9 @@ struct CausalAttentionGeometry : AttentionHeadMapping<QHeadsValue, KVHeadsValue>
     static_assert(SmallTSplitScaleValue > 0);
 
     static constexpr int SmallTSplitScale    = SmallTSplitScaleValue;
-    static constexpr int SmallTMaximumSplits = 85 * SmallTSplitScale;
+    // 256 splits keep each split below the 64-page staging limit through the supported
+    // 786,432-token YaRN envelope while staying within the reducer's fixed 256-way contract.
+    static constexpr int SmallTMaximumSplits = 256;
 };
 
 using CausalD256H24Kv4 = CausalAttentionGeometry<24, 4, 1>;

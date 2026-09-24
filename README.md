@@ -1,31 +1,62 @@
-# NInfer-3090
+# NInfer-4090 — Ternary Bonsai 2 + YaRN
 
-NInfer-3090 is a specialized C++20/CUDA inference engine for **Qwen3.8-27B** and Qwen3.6 on one
-24 GB NVIDIA GeForce RTX 3090. Qwen3.8-27B is a first-class, tested target: the native SM86
-runtime loads its official groupwise `.ninfer` artifact, serves OpenAI- and Anthropic-compatible
-APIs, and supports paged KV, compatible-prefix reuse, CUDA Graphs, MTP speculative decoding,
-reasoning-effort control, ReplaySSM state transactions, and concurrent cohorts through **C8**.
+This fork targets **RTX 4090 / sm_89** and combines three previously separate lines:
 
-Community project, maintained on a best-effort basis. Issues and PRs are very welcome, but support
-and feature requests are not guaranteed.
+- `iamwavecut/ninfer-3090@franken/v0.11`: Ternary Bonsai 2, NInfer v3, Hadamard-rotated
+  `t2_g128_fp16`, MTP/DFlash2, Vision and the current Qwen3.8 runtime.
+- `alanthinker/ninfer-4090-yarn`: long-context linear YaRN-style RoPE position scaling, including
+  prefill/decode consistency, MTP autoregressive positions and multimodal MRoPE.
+- `sergiuszm/ninfer-4090`: RTX-4090 compressed KV paths, including `rk4v4-e8` / `rk2v4-e8`.
 
+The primary artifact is
+[WaveCut/Ternary-Bonsai-2-27B-NInfer-v3](https://huggingface.co/WaveCut/Ternary-Bonsai-2-27B-NInfer-v3).
+The inherited build still accepts sm_86 explicitly, but **sm_89 is the default and the product
+target**.
 
+## First-version profile
 
-On an RTX 3090, Qwen3.8-27B supports a measured **171K-token INT8 context** with the standard
-1 GiB safety headroom, or **226K tokens** with the opt-in RotorQuant `rk8v4` profile.
+The first merged profile keeps the native fast path and long-context path deliberately separate:
 
-> **RotorQuant `rk8v4` is available again**, ported onto the `kv_cache_append` Op that now owns KV
-> quantization. `--kv-dtype rk8v4` reaches a measured **226,560-token context** in about the same
-> KV the INT8 profile spends on 171,648 tokens, for **+0.082% perplexity**. It is opt-in; INT8
-> remains the default and the quality-default profile.
+| Context | RoPE | Speculation | Preferred KV |
+|---|---|---|---|
+| <= 262,144 | native | MTP3 or DFlash2 | `rk4v4-e8` / `rk8v4` |
+| > 262,144 | YaRN scaling | **MTP3** | **`rk4v4-e8`** |
 
-This fork targets `sm_86`. Blackwell-only NVFP4/W4A4 and FP8 A8 tensor-core *weight and
-activation* execution are unavailable. FP8 and NVFP4 weights are admitted through their A16
-dequantizing routes. The paged runtime's KV-cache storage is a separate axis from weight/activation
-kernels: all six KV formats, including row-scaled FP8 E4M3, are measured and available on SM86 —
-see [`docs/config-calculator.html`](docs/config-calculator.html).
+DFlash/DFlash2 with YaRN is rejected at startup. Their proposal path currently shares one tensor
+between physical KV positions and RoPE positions; scaling that tensor would corrupt cache addressing.
+MTP keeps those domains separate and is supported by the long-context path.
 
-The goal is the make the utmost rippin Qwen inference stack for the 3000 series. Gladly taking PR's, all help much appreciated. 
+### RTX 4090 long-context launch
+
+```bash
+ninfer-serve models/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --model-id bonsai2-27b \
+  --max-context 658176 --kv-capacity auto \
+  --kv-dtype rk4v4-e8 \
+  --spec mtp --draft-tokens 3 --lm-head-draft \
+  --rope-scaling-factor 2.12 --rope-scaling-original-context 262144 \
+  --gdn-state-fp16 \
+  --vision --vision-residency overlay --vision-max-merged 12288
+```
+
+For the acceptance pass, start at **512K** if the 658,176-token profile does not fit the actual
+desktop/headless VRAM budget. `--kv-capacity auto` sizes the shared cache after weights and runtime
+reservations.
+
+### Native-context DFlash2 launch
+
+```bash
+ninfer-serve models/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --model-id bonsai2-27b \
+  --max-context 262144 --kv-capacity auto \
+  --kv-dtype rk4v4-e8 \
+  --spec dflash2 --draft-tokens 7 \
+  --vision --vision-residency overlay --vision-max-merged 12288
+```
+
+The sections below are inherited from the franken/v0.11 3090 line and remain useful for architecture,
+artifact conversion and runtime details; published 3090 performance numbers are historical rather
+than measurements of this 4090+YaRN merge.
 
 **New in v0.11.0: prompt processing is roughly twice as fast, and the recommended profile is the fast one.**
 Qwen3.8-27B prefill reaches 2,989 tok/s at 4K (`--prefill-cublas --prefill-chunk 4096`, +0.156%
