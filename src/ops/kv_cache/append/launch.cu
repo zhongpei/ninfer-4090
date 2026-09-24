@@ -114,7 +114,8 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
     kv_cache_append_full_bf16_kernel<Geometry, Metadata><<<fill_grid, Block, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(k.data), static_cast<const __nv_bfloat16*>(v.data),
         static_cast<const std::int32_t*>(positions.data), metadata,
-        static_cast<__nv_bfloat16*>(cache_k.data), static_cast<__half*>(cache_v.data), tokens);
+        static_cast<__nv_bfloat16*>(cache_k.data),
+        static_cast<__nv_bfloat16*>(cache_v.data), tokens);
     CUDA_CHECK(cudaGetLastError());
 }
 
