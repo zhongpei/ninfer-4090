@@ -47,6 +47,8 @@ void configure_text_card(TextContext& card, const ExecutionCore& execution,
                          const ops::SamplingConfig* sampling, std::int32_t state_source_slot,
                          std::int32_t state_destination_slot, std::uint32_t mtp_proposal_extent) {
     card.set_sampling(sampling);
+    card.set_rope_scaling(execution.rope_scaling_factor,
+                          execution.rope_scaling_original_context);
     card.set_linear_state_slots(state_source_slot, state_destination_slot);
     card.set_gdn_state_action(GdnStateAction::UpdateInPlace, nullptr);
     card.set_mtp_proposal_extent(mtp_proposal_extent);
