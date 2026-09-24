@@ -4,6 +4,7 @@
 #include "models/qwen3_5/program/context.h"
 #include "core/nvtx.h"
 #include "ninfer/ops/mtp_round.h"
+#include "ninfer/ops/position.h"
 #include "ninfer/ops/scatter.h"
 #include "ninfer/ops/scalar.h"
 #include <cuda_runtime.h>
@@ -37,6 +38,12 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
     CUDA_CHECK(cudaMemcpyAsync(rope_position_view.data, rope_position.data(),
                                rope_position.size_bytes(), cudaMemcpyHostToDevice,
                                state.execution.device.stream));
+    if (state.execution.rope_scaling_factor > 1.0F) {
+        Tensor rope_flat = rope_position_view.view({3});
+        ops::scale_positions_yarn(rope_flat, state.execution.rope_scaling_original_context,
+                                  state.execution.rope_scaling_factor, rope_flat,
+                                  state.execution.device.stream);
+    }
     const auto bridge_visible = static_cast<std::uint32_t>(position + 1);
     const ops::CausalAttentionExecutionEnvelope bridge_envelope{bridge_visible, bridge_visible};
     card.mtp_forward_batch(next_token, previous_hidden, position_view, bridge_envelope, mtp_hidden,
@@ -85,6 +92,8 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                          {}, state.execution.linear_attention, state.execution.io,
                          state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
                          &state.text_cache, &state.mtp_cache);
+        card.set_rope_scaling(state.execution.rope_scaling_factor,
+                              state.execution.rope_scaling_original_context);
         Tensor anchors            = frame.anchors.slice(0, 0, batch_size);
         Tensor frontiers          = frame.base_frontiers.slice(0, 0, batch_size);
         Tensor budgets            = frame.remaining_budgets.slice(0, 0, batch_size);
@@ -156,6 +165,14 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                                         ar_positions, ar_rope_positions, ar_valid_columns,
                                         static_cast<std::int32_t>(state.text_cache.max_context()),
                                         state.execution.device.stream);
+            if (state.execution.rope_scaling_factor > 1.0F) {
+                Tensor ar_rope_flat = ar_rope_positions.view(
+                    {ar_rope_positions.ne[0] * ar_rope_positions.ne[1]});
+                ops::scale_positions_yarn(ar_rope_flat,
+                                          state.execution.rope_scaling_original_context,
+                                          state.execution.rope_scaling_factor, ar_rope_flat,
+                                          state.execution.device.stream);
+            }
             card.mtp_forward_decode_batch(alignment_ids, target_hidden, target_positions,
                                           target_rope, licensed_counts, mtp_rows, envelopes.batch,
                                           alignment_hidden);
