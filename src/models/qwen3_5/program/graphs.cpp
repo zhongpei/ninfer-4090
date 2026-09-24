@@ -214,7 +214,10 @@ void ProgramImpl::prepare_graphs() {
             }
         }
         set_device_i32(io.pos, checked_i32(frontier, "graph representative position"));
-        set_device_i32(io.rope_pos, checked_i32(frontier, "graph representative rope position"));
+        set_device_i32(
+            io.rope_pos,
+            scale_rope_position_yarn(rope_scaling_factor, rope_scaling_original_context,
+                                     checked_i32(frontier, "graph representative rope position")));
         if (io.mtp) {
             set_device_i32(io.mtp->position,
                            checked_i32(frontier, "graph representative MTP position"));
@@ -266,8 +269,10 @@ void ProgramImpl::prepare_graphs() {
                 }
                 for (std::uint32_t column = 0; column < width; ++column) {
                     mtp_host_ingress->target_rope_positions[row * width + column] =
-                        checked_i32(frontier + std::min(column, extent),
-                                    "graph representative MTP RoPE position");
+                        scale_rope_position_yarn(
+                            rope_scaling_factor, rope_scaling_original_context,
+                            checked_i32(frontier + std::min(column, extent),
+                                        "graph representative MTP RoPE position"));
                 }
                 mtp_host_ingress->text_kv_table_rows[row]      = static_cast<std::int32_t>(row);
                 mtp_host_ingress->mtp_kv_table_rows[row]       = static_cast<std::int32_t>(row);
@@ -285,7 +290,9 @@ void ProgramImpl::prepare_graphs() {
                 ordinary_host_ingress->cache_positions[row] =
                     checked_i32(frontier, "graph representative ordinary position");
                 ordinary_host_ingress->rope_positions[row] =
-                    checked_i32(frontier, "graph representative ordinary RoPE position");
+                    scale_rope_position_yarn(
+                        rope_scaling_factor, rope_scaling_original_context,
+                        checked_i32(frontier, "graph representative ordinary RoPE position"));
                 ordinary_host_ingress->text_kv_table_rows[row] = static_cast<std::int32_t>(row);
                 ordinary_host_ingress->state_source_slots[row] = capture_state_slot(row);
                 ordinary_host_ingress->state_destination_slots[row] = capture_state_slot(row);
@@ -302,7 +309,9 @@ void ProgramImpl::prepare_graphs() {
                                         io,
                                         prefill_hidden,
                                         prefill_chunk,
-                                        proposal_head};
+                                        proposal_head,
+                                        rope_scaling_factor,
+                                        rope_scaling_original_context};
     };
 
     if (speculative_backend == SpeculativeBackend::None) {
