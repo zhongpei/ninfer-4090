@@ -36,6 +36,12 @@ venv/
 out/
 vcpkg_installed/
 
+# Local model launchers
+/run_df.sh
+/run_long.sh
+/run_huihui_df.sh
+/run_huihui_long.sh
+
 # Local workspace and transient runtime output
 /.local/
 /temp/

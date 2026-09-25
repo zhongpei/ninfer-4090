@@ -157,7 +157,12 @@ def validate(gguf: GGUFFile) -> None:
         )
     for name, (shape, kind) in expected.items():
         info = gguf.tensors[name]
-        if info.shape != shape or info.type_name != kind:
+        allowed = (
+            ("PQ2_0", "Q2_K", "Q3_K")
+            if name.endswith(("ffn_down.weight", "ssm_out.weight"))
+            else (kind,)
+        )
+        if info.shape != shape or info.type_name not in allowed:
             raise ValueError(f"{gguf.path}: {name} is {info.type_name} {info.shape}")
     end = max(info.offset + info.nbytes for info in gguf.tensors.values())
     if gguf.data_bytes_available < end:
@@ -250,9 +255,19 @@ def _flat(read_rows, k: int):
 def ternary_source(
     gguf: GGUFFile, tensor: str, shape: tuple[int, int], select: RowMap
 ) -> LogicalSource:
-    """Rotated ternary rows as encoded T2 words, and their exact values for any other method."""
+    """Rotated rows as encoded T2 words or lazily decoded standard K-quant values."""
 
     k = shape[1]
+    info = gguf.info(tensor)
+
+    if info.type_name not in ("PQ2_0", "PTQ1_0"):
+        def values(first: int, last: int) -> torch.Tensor:
+            index = select(first, last)
+            low, high = int(index.min()), int(index.max()) + 1
+            decoded = gguf.read_direct(tensor, low, high)
+            return torch.from_numpy(np.ascontiguousarray(decoded[index - low]))
+
+        return LogicalSource(shape, f"{tensor}{list(shape)}", _flat(values, k))
 
     def encoded(begin: int, end: int) -> EncodedRows:
         index = select(begin, end)
@@ -282,8 +297,12 @@ def _norm(gguf: GGUFFile, tensor: str, offset: bool) -> LogicalSource:
 
 def text_sources(
     gguf: GGUFFile,
-) -> tuple[dict[str, LogicalSource], dict[str, LogicalSource]]:
-    """Encoded T2 sources and direct sources of every GGUF-backed text parameter."""
+) -> tuple[
+    dict[str, LogicalSource],
+    dict[str, LogicalSource],
+    dict[str, LogicalSource],
+]:
+    """Encoded T2, decoded K-quant, and direct sources for text parameters."""
 
     encoded = {
         "text/output_head": ternary_source(
@@ -380,7 +399,13 @@ def text_sources(
             channels.T, torch.bfloat16, g + "ssm_conv1d.weight"
         )
         direct[d + "norm"] = _norm(gguf, g + "ssm_norm.weight", False)
-    return encoded, direct
+    decoded = {
+        name: source for name, source in encoded.items() if source.read_encoded is None
+    }
+    encoded = {
+        name: source for name, source in encoded.items() if source.read_encoded is not None
+    }
+    return encoded, decoded, direct
 
 
 def bonsai2_27b_ternary(model, recipe, sources):
@@ -405,9 +430,14 @@ def bonsai2_27b_ternary(model, recipe, sources):
     for name in model.parameters:
         if name.startswith("dflash2/") and name.endswith(DFLASH2_Q4_PROJECTIONS):
             recipe.assign(name, format=Q4, method=grouped_absmax)
-    encoded, direct = text_sources(gguf)
+    encoded, decoded, direct = text_sources(gguf)
     for name, source in encoded.items():
         recipe.assign(name, format=T2, method=import_encoded, source=source)
+    for name, source in decoded.items():
+        # Huihui exports may retain a rotated matrix in llama.cpp Q2_K/Q3_K.
+        # Decode it to values, then materialise the existing NInfer T2 target;
+        # the Hadamard sign Use below remains attached to the rotated domain.
+        recipe.assign(name, format=T2, method=grouped_absmax, source=source)
     for name, source in direct.items():
         recipe.assign(
             name,
@@ -427,7 +457,7 @@ def bonsai2_27b_ternary(model, recipe, sources):
             recipe.separate([p + "gdn/a_projection", p + "gdn/b_projection"])
         recipe.group([p + "mlp/gate", p + "mlp/up"])
     auxiliaries = {width: sign_auxiliary(values) for width, values in signs.items()}
-    for name in encoded:
+    for name in (*encoded, *decoded):
         parameter = model.parameters[name]
         for input_name in parameter.inputs:
             recipe.use(

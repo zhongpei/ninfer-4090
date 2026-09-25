@@ -30,6 +30,8 @@ DEFAULT_ALIGNMENT = 32
 TYPE_F32 = 0
 TYPE_F16 = 1
 TYPE_BF16 = 30
+TYPE_Q2_K = 10
+TYPE_Q3_K = 11
 TYPE_PQ2_0 = 142
 TYPE_PTQ1_0 = 143
 
@@ -37,6 +39,8 @@ TYPE_NAMES = {
     TYPE_F32: "F32",
     TYPE_F16: "F16",
     TYPE_BF16: "BF16",
+    TYPE_Q2_K: "Q2_K",
+    TYPE_Q3_K: "Q3_K",
     TYPE_PQ2_0: "PQ2_0",
     TYPE_PTQ1_0: "PTQ1_0",
 }
@@ -47,6 +51,8 @@ BLOCK_GEOMETRY = {
     TYPE_F32: (1, 4),
     TYPE_F16: (1, 2),
     TYPE_BF16: (1, 2),
+    TYPE_Q2_K: (256, 84),
+    TYPE_Q3_K: (256, 110),
     TYPE_PQ2_0: (128, 34),
     TYPE_PTQ1_0: (128, 28),
 }
@@ -240,11 +246,25 @@ class GGUFFile:
             raise ValueError(f"{info.name}: {columns} columns are not whole blocks")
         return columns // block_elements * block_bytes
 
-    def read_direct(self, name: str) -> np.ndarray:
-        """Return F32/F16/BF16 words as float32 in the tensor's row-major shape."""
+    def read_direct(
+        self, name: str, row_begin: int = 0, row_end: int | None = None
+    ) -> np.ndarray:
+        """Return direct or standard K-quant values as float32 in row-major order."""
 
         info = self.info(name)
-        raw = self.tensor_bytes(name)
+        if len(info.shape) == 1:
+            if row_begin != 0 or row_end is not None:
+                raise ValueError(f"{name}: row ranges require a rank-2 tensor")
+            raw = self.tensor_bytes(name)
+            begin, end = 0, info.shape[0]
+        else:
+            rows = info.shape[0]
+            end = rows if row_end is None else row_end
+            if not 0 <= row_begin <= end <= rows:
+                raise ValueError(f"{name}: row range [{row_begin},{end}) is outside {rows}")
+            row_bytes = self._row_bytes(info)
+            raw = self.tensor_bytes(name, row_begin * row_bytes, end * row_bytes)
+            begin = row_begin
         if info.type_id == TYPE_F32:
             values = np.frombuffer(raw, dtype="<f4")
         elif info.type_id == TYPE_F16:
@@ -252,9 +272,20 @@ class GGUFFile:
         elif info.type_id == TYPE_BF16:
             words = np.frombuffer(raw, dtype="<u2").astype(np.uint32) << 16
             values = words.view(np.float32)
+        elif info.type_id == TYPE_Q2_K:
+            blocks = np.asarray(raw).reshape(
+                end - begin, info.shape[1] // 256, 84
+            )
+            values = decode_q2_k(blocks)
+        elif info.type_id == TYPE_Q3_K:
+            blocks = np.asarray(raw).reshape(
+                end - begin, info.shape[1] // 256, 110
+            )
+            values = decode_q3_k(blocks)
         else:
-            raise ValueError(f"{name}: {info.type_name} is not a direct format")
-        return np.ascontiguousarray(values.reshape(info.shape))
+            raise ValueError(f"{name}: {info.type_name} is not a readable direct format")
+        shape = info.shape if len(info.shape) == 1 else (end - begin, info.shape[1])
+        return np.ascontiguousarray(values.reshape(shape))
 
     def read_bf16_words(self, name: str) -> np.ndarray:
         info = self.info(name)
@@ -301,6 +332,72 @@ def decode_pq2_0(blocks: np.ndarray) -> TernaryBlocks:
         raise ValueError("PQ2_0 block holds code 3 (+2), which is not ternary")
     values = (codes.astype(np.int16) - 1).astype(np.int8)
     return TernaryBlocks(values, np.ascontiguousarray(scales))
+
+
+def decode_q2_k(blocks: np.ndarray) -> np.ndarray:
+    """Decode llama.cpp ``Q2_K`` blocks (256 values, 84 bytes each)."""
+
+    if blocks.ndim != 3 or blocks.shape[-1] != 84:
+        raise ValueError(f"Q2_K blocks must be [rows, groups, 84], got {blocks.shape}")
+    blocks = np.ascontiguousarray(blocks, dtype=np.uint8)
+    scales = blocks[:, :, :16]
+    d = blocks[:, :, 80:82].copy().view("<f2").reshape(blocks.shape[:2]).astype(np.float32)
+    dmin = blocks[:, :, 82:84].copy().view("<f2").reshape(blocks.shape[:2]).astype(np.float32)
+    q = blocks[:, :, 16:80]
+    rows, groups = blocks.shape[:2]
+    values = np.empty((rows, groups, 256), dtype=np.float32)
+    position = 0
+    for base in (0, 32):
+        for shift in (0, 2, 4, 6):
+            for half in (0, 16):
+                scale = scales[:, :, position]
+                values[:, :, position * 16 : (position + 1) * 16] = (
+                    d[:, :, None]
+                    * (scale & 0x0F)[:, :, None]
+                    * ((q[:, :, base + half : base + half + 16] >> shift) & 3)
+                    - dmin[:, :, None] * (scale >> 4)[:, :, None]
+                )
+                position += 1
+    return values
+
+
+def decode_q3_k(blocks: np.ndarray) -> np.ndarray:
+    """Decode llama.cpp ``Q3_K`` blocks (256 values, 110 bytes each)."""
+
+    if blocks.ndim != 3 or blocks.shape[-1] != 110:
+        raise ValueError(f"Q3_K blocks must be [rows, groups, 110], got {blocks.shape}")
+    blocks = np.ascontiguousarray(blocks, dtype=np.uint8)
+    high = blocks[:, :, :32]
+    q = blocks[:, :, 32:96]
+    packed_scales = blocks[:, :, 96:108]
+    d = blocks[:, :, 108:110].copy().view("<f2").reshape(blocks.shape[:2]).astype(np.float32)
+    rows, groups = blocks.shape[:2]
+    scales = np.empty((rows, groups, 16), dtype=np.int8)
+    for index in range(16):
+        low = (
+            packed_scales[:, :, index] & 0x0F
+            if index < 8
+            else packed_scales[:, :, index - 8] >> 4
+        )
+        high_bits = (
+            packed_scales[:, :, 8 + index % 4] >> (2 * (index // 4))
+        ) & 3
+        scales[:, :, index] = (low | (high_bits << 4)).astype(np.int16) - 32
+    values = np.empty((rows, groups, 256), dtype=np.float32)
+    position = 0
+    for base, masks in ((0, (1, 2, 4, 8)), (32, (16, 32, 64, 128))):
+        for shift, mask in zip((0, 2, 4, 6), masks):
+            for half in (0, 16):
+                scale = d * scales[:, :, position].astype(np.float32)
+                low = (q[:, :, base + half : base + half + 16] >> shift) & 3
+                high_bit = ((high[:, :, half : half + 16] & mask) != 0).astype(
+                    np.int8
+                )
+                values[:, :, position * 16 : (position + 1) * 16] = scale[:, :, None] * (
+                    low.astype(np.float32) - np.where(high_bit, 0.0, 4.0)
+                )
+                position += 1
+    return values
 
 
 _PTQ1_0_STAGES = (32, 16, 8)
