@@ -1,48 +1,50 @@
-# Huihui GGUF → NInfer 转换说明
+# Huihui GGUF to NInfer Conversion Guide
 
-## 作用
+## Purpose
 
-`convert.py` 用 Huihui 的 PrismML GGUF 替换现有 NInfer 工件中的文本部分，
-不会重新生成或覆盖整个模型。输入的旧 NInfer 工件保留以下内容：
+`convert.py` replaces the text portion of an existing NInfer artifact with the
+Huihui PrismML GGUF. It does not rebuild or overwrite the complete model. The
+source NInfer artifact retains:
 
-- Vision 视觉塔和视觉资源
-- MTP、DFlash2 权重与配置
-- tokenizer、chat template、generation config
-- 所有未选中的 tensor、目录绑定和执行 uses
+- the vision tower and vision resources;
+- MTP and DFlash2 weights and configuration;
+- the tokenizer, chat template, and generation configuration; and
+- every unselected tensor, directory binding, and execution use.
 
-会重新生成：
+The converter regenerates:
 
-- `text/` 文本塔
-- `proposal/` proposal head（如果旧工件包含）
-- 文本使用的 Hadamard sign auxiliary
+- the `text/` text tower;
+- the `proposal/` proposal head, when the source artifact contains one; and
+- the Hadamard-sign auxiliary used by the text tower.
 
-Huihui GGUF 中的 `PQ2_0` 直接导入；其中少量旋转矩阵使用 llama.cpp 的
-`Q2_K`/`Q3_K`，工具会先按 llama.cpp 规则解码，再写入现有 NInfer 的
-`t2_g128_fp16` 对象。
+The `PQ2_0` tensors in the Huihui GGUF are imported directly. A small number
+of rotated matrices use llama.cpp `Q2_K`/`Q3_K`; the converter decodes them
+with llama.cpp-compatible rules and materializes them into the existing
+NInfer `t2_g128_fp16` objects.
 
-## 输入
+## Inputs
 
-默认路径是当前机器上的：
+The default paths on this machine are:
 
 ```text
-旧工件：/opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer
-GGUF：  /opt/llama.cpp-Ternary-Bonsai-2-27B/models/Huihui-Qwen3.8-27B-abliterated-Ternary-Bonsai-PQ2_0.gguf
+source artifact: /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer
+GGUF:            /opt/llama.cpp-Ternary-Bonsai-2-27B/models/Huihui-Qwen3.8-27B-abliterated-Ternary-Bonsai-PQ2_0.gguf
 ```
 
-也可以通过 `--base-artifact` 和 `--gguf` 指定其他路径。旧工件和 GGUF
-必须对应同一套 Qwen3.8-27B Dense 几何结构。
+Use `--base-artifact` and `--gguf` to select different paths. The source
+artifact and GGUF must describe the same Qwen3.8-27B Dense geometry.
 
-## 转换步骤
+## Conversion
 
-先做不写文件的结构校验：
+Run the non-writing structural validation first:
 
 ```bash
 /opt/minicoda3/bin/python3 tools/convert/huihui_bonsai/convert.py \
   --validate-only --device cpu
 ```
 
-确认 GPU 空闲后执行完整转换。下面示例使用 GPU0，输出到仓库根目录，
-与原 NInfer 模型放在一起：
+After confirming that GPU0 is free, run the full conversion. This example
+writes the result beside the source NInfer model in the repository root:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 /opt/minicoda3/bin/python3 \
@@ -52,24 +54,25 @@ CUDA_VISIBLE_DEVICES=0 /opt/minicoda3/bin/python3 \
   --out /opt/ninfer-4090/huihui-qwen3.8-27b-abliterated.ninfer
 ```
 
-转换会额外写出：
+The conversion also writes:
 
 ```text
 /opt/ninfer-4090/huihui-qwen3.8-27b-abliterated.ninfer.conversion.json
 ```
 
-如果输出文件或报告已经存在，工具会拒绝覆盖；原始 NInfer 工件不会被修改。
+The tool refuses to overwrite an existing output artifact or report. The
+source NInfer artifact is never modified.
 
-## 转换后检查
+## Verification
 
-检查工件目录：
+Inspect the converted artifact:
 
 ```bash
 /opt/minicoda3/bin/python3 -m tools.artifact.inspect \
   /opt/ninfer-4090/huihui-qwen3.8-27b-abliterated.ninfer --json
 ```
 
-运行最小文本推理：
+Run a minimal text-generation check:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 build/apps/ninfer \
@@ -78,7 +81,7 @@ CUDA_VISIBLE_DEVICES=0 build/apps/ninfer \
   --max-context 512 --max-new 16 --kv-dtype int8 --greedy --no-thinking
 ```
 
-测试保留的 DFlash2 路径：
+Test the retained DFlash2 path:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 build/apps/ninfer \
@@ -88,8 +91,10 @@ CUDA_VISIBLE_DEVICES=0 build/apps/ninfer \
   --spec dflash2 --draft-tokens 3
 ```
 
-## 限制
+## Limitations
 
-`Q2_K`/`Q3_K` 目前为了匹配原 NInfer 工件布局，会重新量化到 T2；它们不会
-以 llama.cpp 原生 Q2_K/Q3_K 格式写入 NInfer。完整转换需要 CUDA 和足够的
-显存；`--validate-only --device cpu` 只用于校验，不是生产转换路径。
+To match the existing NInfer artifact layout, `Q2_K`/`Q3_K` tensors are
+currently requantized to T2; they are not stored in native llama.cpp
+Q2_K/Q3_K format. Full conversion requires CUDA and sufficient VRAM.
+`--validate-only --device cpu` is a validation path only, not the production
+conversion path.
