@@ -1,15 +1,18 @@
-"""Ternary Bonsai 2 27B: a PrismML PQ2_0 GGUF as the text tower of a Qwen3.8-27B artifact.
+"""Ternary Bonsai 2 27B: PrismML/Huihui rotated GGUF text towers for Qwen3.8-27B.
 
-The GGUF stores every text projection except the GDN A/B controls as Hadamard-rotated ternary
-rows with one binary16 scale per 128 columns, the token-embedding table rotated as well, and
-llama.cpp's exporter conventions: GDN value heads in tiled order, zero-centred norms as `1 + w`
-and `ssm_a = -exp(A_log)`. This module restores the grouped value-head order and the primal
-norm and A_log values, and exposes the rotated projections as encoded T2 rows whose Uses carry
-the sign vector of their input width, so the recipe stores them without rounding. The token table
-is stored the same way, inverse-rotated; the runtime restores each gathered row with the
-hidden-width signs. MTP, Vision, the frontend resources and the DFlash2 adapter come from the
-companions given to `--model` and `--source dflash2`, which share the geometry; `--source mtp`
-replaces the checkpoint's MTP head.
+The native PrismML GGUF stores text projections as Hadamard-rotated ternary rows with one FP16
+scale per 128 columns. Huihui's abliterated derivative deliberately changes a subset of output
+projections and writes those changed matrices as llama.cpp Q2_K/Q3_K instead: they remain in the
+same rotated basis, but they are no longer ternary weights.
+
+This module therefore has two loss boundaries. Native PQ2_0/PTQ1_0 rows are imported bit-for-bit
+as NInfer T2. Modified Q2_K/Q3_K output projections are faithfully decoded and stored as NInfer Q5,
+which is the existing optimized representation for these down/output shapes; they are never
+collapsed back to {-1,0,+1}. Every rotated Use still carries the sign vector of its input width.
+
+The reader also restores grouped GDN value-head order, primal zero-centred norms and A_log values.
+The token table is inverse-rotated by the runtime at gather. MTP, Vision, frontend resources and
+DFlash2 come from the companion sources supplied to the converter.
 """
 
 from __future__ import annotations
