@@ -5,7 +5,7 @@ scale per 128 columns. Huihui's abliterated derivative deliberately changes a su
 projections and writes those changed matrices as llama.cpp Q2_K/Q3_K instead: they remain in the
 same rotated basis, but they are no longer ternary weights.
 
-This module therefore has two loss boundaries. Native PQ2_0/PTQ1_0 rows are imported bit-for-bit
+This module therefore has two loss boundaries. Native exact ternary rows are imported bit-for-bit
 as NInfer T2. Modified Q2_K/Q3_K output projections are faithfully decoded and stored as NInfer Q5,
 which is the existing optimized representation for these down/output shapes; they are never
 collapsed back to {-1,0,+1}. Every rotated Use still carries the sign vector of its input width.
