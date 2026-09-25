@@ -55,7 +55,7 @@ they must not be projected back to NInfer T2.
 
 The converter keeps the representation mixed:
 
-- native `PQ2_0` / `PTQ1_0`: exact code+scale import to `t2_g128_fp16`;
+- native `PQ2_0`: exact code+scale import to `t2_g128_fp16`;
 - modified `Q2_K` / `Q3_K` MLP-down and GDN-output tensors: decode to FP32 and requantize to
   `q5_g64_fp16`;
 - Hadamard sign Uses remain attached to both representations, so the modified Q5 matrices stay in
