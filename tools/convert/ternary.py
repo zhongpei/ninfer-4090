@@ -20,7 +20,7 @@ import numpy as np
 import torch
 
 from .methods import AuxiliaryValue, cast_direct, grouped_absmax, import_encoded
-from .official_recipes import Q4, _optional
+from .official_recipes import Q4, Q5, _optional
 from .sources.gguf import GGUFFile
 from .sources.logical import EncodedRows, LogicalSource, array_source
 
@@ -295,14 +295,30 @@ def _norm(gguf: GGUFFile, tensor: str, offset: bool) -> LogicalSource:
     return _direct(words - 1.0 if offset else words, torch.bfloat16, tensor)
 
 
+def mixed_projection_format(name: str) -> str:
+    """NInfer storage for a rotated projection that is no longer ternary.
+
+    Huihui's abliterated Bonsai-2 export modifies the down/output projections in
+    layers 22..52 and stores those changed matrices as llama.cpp Q2_K/Q3_K. Those
+    values are not ternary anymore: forcing them back to T2 would perform a second,
+    destructive projection onto {-1,0,+1}. NInfer already has an optimized Q5
+    linear_add route for exactly the two affected shapes (MLP down and GDN output),
+    so Q5 preserves the decoded modified weights without adding a new runtime path.
+    """
+
+    if name.endswith(("/mlp/down", "/gdn/output")):
+        return Q5
+    raise ValueError(f"{name}: non-ternary rotated projection has no registered mixed format")
+
+
 def text_sources(
     gguf: GGUFFile,
 ) -> tuple[
     dict[str, LogicalSource],
-    dict[str, LogicalSource],
+    dict[str, tuple[LogicalSource, str]],
     dict[str, LogicalSource],
 ]:
-    """Encoded T2, decoded K-quant, and direct sources for text parameters."""
+    """Exact T2, higher-precision mixed, and direct sources for text parameters."""
 
     encoded = {
         "text/output_head": ternary_source(
@@ -399,13 +415,15 @@ def text_sources(
             channels.T, torch.bfloat16, g + "ssm_conv1d.weight"
         )
         direct[d + "norm"] = _norm(gguf, g + "ssm_norm.weight", False)
-    decoded = {
-        name: source for name, source in encoded.items() if source.read_encoded is None
+    mixed = {
+        name: (source, mixed_projection_format(name))
+        for name, source in encoded.items()
+        if source.read_encoded is None
     }
     encoded = {
         name: source for name, source in encoded.items() if source.read_encoded is not None
     }
-    return encoded, decoded, direct
+    return encoded, mixed, direct
 
 
 def bonsai2_27b_ternary(model, recipe, sources):
@@ -430,14 +448,15 @@ def bonsai2_27b_ternary(model, recipe, sources):
     for name in model.parameters:
         if name.startswith("dflash2/") and name.endswith(DFLASH2_Q4_PROJECTIONS):
             recipe.assign(name, format=Q4, method=grouped_absmax)
-    encoded, decoded, direct = text_sources(gguf)
+    encoded, mixed, direct = text_sources(gguf)
     for name, source in encoded.items():
         recipe.assign(name, format=T2, method=import_encoded, source=source)
-    for name, source in decoded.items():
-        # Huihui exports may retain a rotated matrix in llama.cpp Q2_K/Q3_K.
-        # Decode it to values, then materialise the existing NInfer T2 target;
-        # the Hadamard sign Use below remains attached to the rotated domain.
-        recipe.assign(name, format=T2, method=grouped_absmax, source=source)
+    for name, (source, target_format) in mixed.items():
+        # Q2_K/Q3_K here are the intentionally modified Huihui ablation weights,
+        # not an alternate packing of the original ternary matrix. Decode their
+        # llama.cpp quantization faithfully, then requantize to NInfer Q5. The
+        # Hadamard-sign Use below keeps the matrix in the same rotated domain.
+        recipe.assign(name, format=target_format, method=grouped_absmax, source=source)
     for name, source in direct.items():
         recipe.assign(
             name,
@@ -457,7 +476,7 @@ def bonsai2_27b_ternary(model, recipe, sources):
             recipe.separate([p + "gdn/a_projection", p + "gdn/b_projection"])
         recipe.group([p + "mlp/gate", p + "mlp/up"])
     auxiliaries = {width: sign_auxiliary(values) for width, values in signs.items()}
-    for name in (*encoded, *decoded):
+    for name in (*encoded, *mixed):
         parameter = model.parameters[name]
         for input_name in parameter.inputs:
             recipe.use(
@@ -475,6 +494,7 @@ __all__ = [
     "attention_rows",
     "bonsai2_27b_ternary",
     "expected_tensors",
+    "mixed_projection_format",
     "sign_vectors",
     "ternary_source",
     "text_sources",
