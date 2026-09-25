@@ -5,7 +5,9 @@ import pytest
 import torch
 
 from tools.artifact.codecs.row_split import decode_row_split_codes, encode_row_split
+from tools.artifact.schema import TensorObject, TensorSpec
 from tools.convert import ternary
+from tools.convert.huihui_bonsai.convert import _replacement_spec
 from tools.convert.sources.gguf import TYPE_PQ2_0, GGUFFile, encode_pq2_0, write_gguf
 
 
@@ -93,3 +95,21 @@ def test_modified_rotated_output_projections_use_q5_not_t2():
     assert ternary.mixed_projection_format("text/layers/22/gdn/output") == "q5_g64_fp16"
     with pytest.raises(ValueError, match="no registered mixed format"):
         ternary.mixed_projection_format("text/layers/22/mlp/gate")
+
+
+def test_huihui_mixed_object_spec_updates_the_artifact_format():
+    old = TensorObject(
+        "weight/000468", (5120, 6144), "t2_g128_fp16", "row_split_k128_v1", 0, 1
+    )
+    job = type(
+        "Job",
+        (),
+        {
+            "spec": TensorSpec(
+                "weight/000000", (5120, 6144), "q5_g64_fp16", "row_split_k128_v1"
+            ),
+            "parameters": ("text/layers/22/gdn/output",),
+        },
+    )()
+    spec = _replacement_spec(old, job)
+    assert spec.id == old.id and spec.format == "q5_g64_fp16"

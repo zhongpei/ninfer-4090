@@ -31,7 +31,11 @@ from tools.convert.qwen3_5 import build_model
 from tools.convert.proposal import add_official_proposal
 from tools.convert.recipe import Recipe
 from tools.convert.sources.safetensors import SafetensorsSource
-from tools.convert.ternary import bonsai2_27b_ternary, validate as validate_gguf
+from tools.convert.ternary import (
+    bonsai2_27b_ternary,
+    mixed_projection_format,
+    validate as validate_gguf,
+)
 
 
 DEFAULT_GGUF = Path(
@@ -52,6 +56,29 @@ def _object_spec(obj: ResourceObject | TensorObject):
     if isinstance(obj, ResourceObject):
         return ResourceSpec(obj.id, obj.bytes, obj.encoding)
     return TensorSpec(obj.id, obj.shape, obj.format, obj.layout)
+
+
+def _replacement_spec(old: TensorObject, job) -> TensorSpec:
+    """Return the output spec, allowing only the registered mixed transition."""
+    expected = job.spec
+    if old.shape != expected.shape or old.layout != expected.layout:
+        raise ValueError(
+            f"{old.id}: existing tensor {(old.shape, old.format, old.layout)} "
+            f"differs from new tensor {(expected.shape, expected.format, expected.layout)}"
+        )
+    if old.format != expected.format:
+        allowed = (
+            old.format == "t2_g128_fp16"
+            and expected.format == "q5_g64_fp16"
+            and len(job.parameters) == 1
+            and mixed_projection_format(job.parameters[0]) == expected.format
+        )
+        if not allowed:
+            raise ValueError(
+                f"{old.id}: unregistered format transition "
+                f"{old.format} -> {expected.format}"
+            )
+    return TensorSpec(old.id, expected.shape, expected.format, expected.layout)
 
 
 def _text_parameter_names(bindings: dict) -> set[str]:
@@ -136,12 +163,7 @@ def _replacement_targets(artifact: Artifact, prepared) -> tuple[dict, dict, set[
         old = artifact.by_id[target_id]
         if not isinstance(old, TensorObject):
             raise ValueError(f"{target_id}: replacement target is not a tensor")
-        actual = (old.shape, old.format, old.layout)
-        expected = (job.spec.shape, job.spec.format, job.spec.layout)
-        if actual != expected:
-            raise ValueError(
-                f"{target_id}: existing tensor {actual} differs from new tensor {expected}"
-            )
+        _replacement_spec(old, job)
         jobs[target_id] = job
         used[target_id] = job.parameters
 
@@ -204,7 +226,12 @@ def _run(
             )
             return
 
-        specs = [_object_spec(obj) for obj in artifact.objects]
+        specs = [
+            _replacement_spec(obj, jobs[obj.id])
+            if obj.id in jobs
+            else _object_spec(obj)
+            for obj in artifact.objects
+        ]
         provenance = deepcopy(artifact.directory.provenance)
         provenance["text_replacement"] = {
             "converter": "tools/convert/huihui_bonsai/convert.py",
