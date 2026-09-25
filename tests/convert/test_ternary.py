@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from tools.artifact.codecs.row_split import decode_row_split_codes, encode_row_split
@@ -85,3 +86,10 @@ def test_sign_auxiliary_is_a_bf16_vector():
     assert value.format == "bf16" and value.shape == (1024,)
     words = np.frombuffer(value.data, dtype="<u2")
     assert words[0] == 0x3F80 and words[1] == 0xBF80
+
+
+def test_modified_rotated_output_projections_use_q5_not_t2():
+    assert ternary.mixed_projection_format("text/layers/22/mlp/down") == "q5_g64_fp16"
+    assert ternary.mixed_projection_format("text/layers/22/gdn/output") == "q5_g64_fp16"
+    with pytest.raises(ValueError, match="no registered mixed format"):
+        ternary.mixed_projection_format("text/layers/22/mlp/gate")
