@@ -44,3 +44,25 @@ ordinary decode, MTP verify, MTP AR, prefix reuse, and Vision MRoPE.
 DFlash2 + YaRN is deliberately not part of v1. The required follow-up is to split the drafter's
 single proposal-position domain into independent cache positions and RoPE positions, propagate both
 through proposal/verify and CUDA Graph capture, then remove the startup guard.
+
+
+## Huihui abliterated Ternary conversion
+
+The Huihui Ternary derivative is not an all-ternary checkpoint. Its ablation pass changes layers
+22 through 52 and some modified output projections are emitted as llama.cpp `Q2_K` / `Q3_K`.
+Those formats carry ordinary multi-level K-quant values (Q2_K also has a per-block minimum term);
+they must not be projected back to NInfer T2.
+
+The converter keeps the representation mixed:
+
+- native `PQ2_0` / `PTQ1_0`: exact code+scale import to `t2_g128_fp16`;
+- modified `Q2_K` / `Q3_K` MLP-down and GDN-output tensors: decode to FP32 and requantize to
+  `q5_g64_fp16`;
+- Hadamard sign Uses remain attached to both representations, so the modified Q5 matrices stay in
+  the same rotated basis as the rest of Bonsai 2.
+
+Q5 is intentional rather than Q6: NInfer's existing `linear_add` implementation has optimized Q5
+routes for exactly `[5120,17408]` (MLP down) and `[5120,6144]` (GDN output), and the official
+Dense groupwise recipe already selects Q5 for those output projections. Q6 would require a new
+residual-add execution path while storing more bytes, despite the source itself carrying only
+Q2_K/Q3_K precision.
