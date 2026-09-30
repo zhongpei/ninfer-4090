@@ -16,9 +16,12 @@ def main():
     ap.add_argument("--model", required=True, help="target/base HF checkpoint")
     ap.add_argument("--drafter", required=True, help="trained DFlash2 companion directory")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--recipe", default="qwen3_8_27b")
+    ap.add_argument("--recipe", default="",
+                    help="converter recipe; defaults to qwen3_8_27b, or bonsai2_27b_ternary with --ternary")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--components", default="text,dflash2")
+    ap.add_argument("--ternary", default="",
+                    help="optional Ternary Bonsai GGUF, forwarded as --source ternary=PATH")
     ap.add_argument("--name", default="")
     ap.add_argument("--proposal", action="store_true")
     ap.add_argument("--proposal-rows", type=int, default=131072)
@@ -27,15 +30,18 @@ def main():
                     help="additional NAME=PATH source forwarded to tools.convert")
     args = ap.parse_args()
 
+    recipe = args.recipe or ("bonsai2_27b_ternary" if args.ternary else "qwen3_8_27b")
     command = [
         sys.executable, "-m", "tools.convert",
         "--model", args.model,
-        "--recipe", args.recipe,
+        "--recipe", recipe,
         "--source", f"dflash2={args.drafter}",
         "--components", args.components,
         "--out", args.out,
         "--device", args.device,
     ]
+    if args.ternary:
+        command += ["--source", f"ternary={args.ternary}"]
     for source in args.source:
         command += ["--source", source]
     if args.name:
