@@ -175,6 +175,17 @@ void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& sele
                                         cudaStream_t stream);
 
 /**
+ * Rewrite the live DFlash2 proposal distribution as q=1 on the supplied draft token.
+ * candidate_ids is I32 [16,K,B], proposal_q is FP32 [16,K,B], drafts is I32 [K,B],
+ * current_extents is I32 [B]. Only columns below each row's extent are written.
+ */
+void speculative_make_one_hot_sparse_proposal(const Tensor& drafts,
+                                              const Tensor& current_extents,
+                                              Tensor& candidate_ids, Tensor& proposal_q,
+                                              std::int32_t token_domain,
+                                              cudaStream_t stream);
+
+/**
  * Op: proposal_remap_token_ids
  *
  * Math / indexing:
