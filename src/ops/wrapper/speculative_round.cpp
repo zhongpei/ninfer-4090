@@ -237,36 +237,6 @@ void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& sele
     detail::speculative_select_accepted_hidden_launch(hidden, selectors, out, stream);
 }
 
-void speculative_override_drafts(Tensor& drafts, const Tensor& overrides,
-                                 const Tensor& override_extents, cudaStream_t stream) {
-    constexpr const char* op = "speculative_override_drafts";
-    if (drafts.ne[0] <= 0 || drafts.ne[1] <= 0) {
-        throw std::invalid_argument("speculative_override_drafts: K and B must be positive");
-    }
-    require_matrix(drafts, DType::I32, drafts.ne[0], drafts.ne[1], op, "drafts");
-    require_matrix(overrides, DType::I32, drafts.ne[0], drafts.ne[1], op, "overrides");
-    require_vector(override_extents, DType::I32, drafts.ne[1], op, "override_extents");
-    detail::speculative_override_drafts_launch(drafts, overrides, override_extents, stream);
-}
-
-void speculative_override_sparse_proposal(Tensor& candidate_ids, Tensor& proposal_q,
-                                          const Tensor& overrides,
-                                          const Tensor& override_extents,
-                                          std::int32_t token_domain, cudaStream_t stream) {
-    constexpr const char* op = "speculative_override_sparse_proposal";
-    const std::int32_t k = overrides.ne[0];
-    const std::int32_t batch = overrides.ne[1];
-    if (k <= 0 || batch <= 0 || token_domain <= 16) {
-        throw std::invalid_argument("speculative_override_sparse_proposal: invalid profile");
-    }
-    require_matrix(overrides, DType::I32, k, batch, op, "overrides");
-    require_vector(override_extents, DType::I32, batch, op, "override_extents");
-    require_tensor3(candidate_ids, DType::I32, 16, k, batch, op, "candidate_ids");
-    require_tensor3(proposal_q, DType::FP32, 16, k, batch, op, "proposal_q");
-    detail::speculative_override_sparse_proposal_launch(
-        candidate_ids, proposal_q, overrides, override_extents, token_domain, stream);
-}
-
 void proposal_remap_token_ids(Tensor& proposal_tokens, const std::int32_t* id_map, std::int32_t n,
                               cudaStream_t stream) {
     constexpr const char* op = "proposal_remap_token_ids";
