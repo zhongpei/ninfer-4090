@@ -122,6 +122,9 @@ std::string usage_text(const char* argv0) {
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--devices N,M]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
+           "       [--spec-router fixed|stair] [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
+           "       [--spec-stair-draft-cost F] [--spec-stair-prior F] [--spec-stair-prior-weight F]\n"
+           "       [--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F]\n"
            "       [--lookup-ngram N]\n"
            "       [--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4]\n"
            "       [--gdn-state-fp16] [--mlp-a8-decode] [--no-prefill-a8]\n"
@@ -157,6 +160,9 @@ std::string usage_text(const char* argv0) {
            "perplexity cost (docs/performance.md), off by default, and it wants a larger "
            "--prefill-chunk to pay. --no-prefill-cublas-projections keeps the attention and GDN "
            "input projections off that route.\n"
+           "--spec-router stair keeps the configured DFlash/DFlash2 drafter at maximum K while "
+           "choosing the target-verify extent from an explicit measured cost staircase; fixed is "
+           "the default and all Stair parameters are exposed for A/B calibration.\n"
            "--lookup-ngram N adds context-lookup drafting alongside --spec: the last N tokens are "
            "matched against the sequence so far and what followed is proposed. It is exact, and 0 "
            "(the default) disables it.\n"
@@ -211,6 +217,31 @@ Options parse_options(int argc, char** argv) {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = parse_u32(value(arg), "draft-tokens");
+        } else if (arg == "--spec-router") {
+            options.speculative.routing.mode =
+                product::parse_speculative_routing_mode(value(arg));
+        } else if (arg == "--spec-stair-widths") {
+            product::parse_speculative_stair_widths(value(arg), options.speculative.routing);
+        } else if (arg == "--spec-stair-costs") {
+            product::parse_speculative_stair_costs(value(arg), options.speculative.routing);
+        } else if (arg == "--spec-stair-draft-cost") {
+            options.speculative.routing.draft_cost =
+                parse_float(value(arg), "spec-stair-draft-cost", 0.0F, 1000.0F);
+        } else if (arg == "--spec-stair-prior") {
+            options.speculative.routing.prior_acceptance =
+                parse_float(value(arg), "spec-stair-prior", 0.0F, 1.0F);
+        } else if (arg == "--spec-stair-prior-weight") {
+            options.speculative.routing.prior_weight =
+                parse_float(value(arg), "spec-stair-prior-weight", 0.0F, 1000000.0F);
+        } else if (arg == "--spec-stair-warmup") {
+            options.speculative.routing.warmup_rounds =
+                parse_u32(value(arg), "spec-stair-warmup", true);
+        } else if (arg == "--spec-stair-probe-period") {
+            options.speculative.routing.probe_period =
+                parse_u32(value(arg), "spec-stair-probe-period", true);
+        } else if (arg == "--spec-stair-margin") {
+            options.speculative.routing.switch_margin =
+                parse_float(value(arg), "spec-stair-margin", 0.0F, 10.0F);
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--lm-head-q4") {
