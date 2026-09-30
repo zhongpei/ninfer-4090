@@ -309,7 +309,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
                              static_cast<std::uint64_t>(lanes.size()));
         DecodeGraphExecutable* executable = nullptr;
         ops::CausalAttentionExecutionEnvelope envelope{maximum_frontier + 1, maximum_frontier + 1};
-        if (use_cuda_graph && !lookup_batch) {
+        if (use_cuda_graph) {
             DecodeGraphProfile& profile =
                 select_graph_profile(ordinary_graphs, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "ordinary batch");
@@ -618,7 +618,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             throw std::invalid_argument("DFlash batch contains an invalid or duplicate lane");
         }
         const SequenceState& sequence = active_sequence(lane);
-        const RequestControl& request = requests[lane];
+        RequestControl& request = requests[lane];
         if (request.lifecycle != Lifecycle::Active ||
             budgets[row].generated_tokens_remaining == 0 || !sequence.kv ||
             text_kv_addresses->bound_row(sequence.kv->text) < 0 ||
@@ -681,7 +681,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         DecodeGraphExecutable* executable    = nullptr;
         execution::DFlashEnvelopes envelopes = dflash_envelopes(0, maximum_frontier, draft_window);
         ops::CausalAttentionExecutionEnvelope target_envelope{1, maximum_target_tokens};
-        if (use_cuda_graph) {
+        if (use_cuda_graph && !lookup_batch) {
             DecodeGraphProfile& profile =
                 select_graph_profile(dflash_graphs, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "DFlash batch");
