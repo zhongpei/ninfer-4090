@@ -32,11 +32,6 @@ void speculative_accept_sparse_drafts_launch(
 
 void speculative_select_accepted_hidden_launch(const Tensor& hidden, const Tensor& selectors,
                                                Tensor& out, cudaStream_t stream);
-void speculative_override_drafts_launch(Tensor& drafts, const Tensor& overrides,
-                                        const Tensor& override_extents, cudaStream_t stream);
-void speculative_override_sparse_proposal_launch(
-    Tensor& candidate_ids, Tensor& proposal_q, const Tensor& overrides,
-    const Tensor& override_extents, std::int32_t token_domain, cudaStream_t stream);
 
 void proposal_remap_token_ids_launch(Tensor& proposal_tokens, const std::int32_t* id_map,
                                      std::int32_t n, cudaStream_t stream);
