@@ -14,5 +14,11 @@ TandemLLM copyright notices and attribution remain with their respective authors
 StairCut is described by Khaled Bakeer in *StairCut: sizing speculative draft trees on a measured
 verification-cost staircase* (2026).
 
+The NInfer adaptations also use TandemLLM's counted n-gram/suffix-memory design ideas: local
+occurrence voting, a larger static suffix corpus, a persistent cross-request suffix store,
+confidence-gated copy drafting, neural-drafter replacement/head-skip experiments, and deeper copy
+chains after strong acceptance. NInfer reimplements these around its existing Program transaction,
+ReplaySSM and paged-KV contracts rather than importing Tandem's Python engine wholesale.
+
 This notice covers code/design adapted from TandemLLM. Model weights and other third-party
 components retain their own licenses and notices.
