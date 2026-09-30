@@ -32,6 +32,9 @@ void speculative_accept_sparse_drafts_launch(
 
 void speculative_select_accepted_hidden_launch(const Tensor& hidden, const Tensor& selectors,
                                                Tensor& out, cudaStream_t stream);
+void speculative_make_one_hot_sparse_proposal_launch(
+    const Tensor& drafts, const Tensor& current_extents, Tensor& candidate_ids,
+    Tensor& proposal_q, std::int32_t token_domain, cudaStream_t stream);
 
 void proposal_remap_token_ids_launch(Tensor& proposal_tokens, const std::int32_t* id_map,
                                      std::int32_t n, cudaStream_t stream);
