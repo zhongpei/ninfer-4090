@@ -169,6 +169,20 @@ void speculative_select_accepted_hidden_launch(const Tensor& hidden, const Tenso
     CUDA_CHECK(cudaGetLastError());
 }
 
+void speculative_override_drafts_launch(Tensor& drafts, const Tensor& overrides,
+                                        const Tensor& override_extents, cudaStream_t stream) {
+    constexpr int kBlock = 64;
+    const int k = drafts.ne[0];
+    const int batch = drafts.ne[1];
+    const dim3 grid(static_cast<unsigned int>(std::max(1, div_up(k, kBlock))),
+                    static_cast<unsigned int>(batch));
+    speculative_override_drafts_kernel<<<grid, kBlock, 0, stream>>>(
+        static_cast<std::int32_t*>(drafts.data),
+        static_cast<const std::int32_t*>(overrides.data),
+        static_cast<const std::int32_t*>(override_extents.data), k);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void proposal_remap_token_ids_launch(Tensor& proposal_tokens, const std::int32_t* id_map,
                                      std::int32_t n, cudaStream_t stream) {
     constexpr int kBlock = 256;
