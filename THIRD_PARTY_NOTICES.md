@@ -20,5 +20,10 @@ confidence-gated copy drafting, neural-drafter replacement/head-skip experiments
 chains after strong acceptance. NInfer reimplements these around its existing Program transaction,
 ReplaySSM and paged-KV contracts rather than importing Tandem's Python engine wholesale.
 
+The DFlash2 training tools also adapt TandemLLM's target-tap recorder contract, CE + target-top-K
+KL objective, block-16 fine-tuning, held-out accepted-tokens-per-block gate, resume/export workflow,
+and DFlash2 lattice/tree-planning algorithms. The standalone NInfer copy removes the Tandem engine
+dependency and exports the companion tensor names already understood by NInfer's converter.
+
 This notice covers code/design adapted from TandemLLM. Model weights and other third-party
 components retain their own licenses and notices.
