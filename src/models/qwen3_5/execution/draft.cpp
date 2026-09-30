@@ -632,6 +632,18 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
             CUDA_CHECK(cudaMemcpyAsync(drafts.data, lookup_tokens.data(),
                                        expected * sizeof(TokenId), cudaMemcpyHostToDevice,
                                        state.execution.device.stream));
+            // DFlash2 normally uses sparse rejection sampling. Keep that exact accounting route:
+            // lookup is a one-hot proposal (q=1), not a request to switch to the dense accept Op.
+            // In particular, sparse acceptance leaves token-count publication to Program commit,
+            // which is required for partial terminal prefixes and presence/frequency penalties.
+            if (frame.candidate_ids.data && frame.proposal_q.data) {
+                Tensor candidates = frame.candidate_ids.slice(2, 0, batch_size);
+                Tensor proposal_q = frame.proposal_q.slice(2, 0, batch_size);
+                ops::speculative_make_one_hot_sparse_proposal(
+                    drafts, extents, candidates, proposal_q,
+                    dimension(state.execution.parameters.model.resources().public_token_count),
+                    state.execution.device.stream);
+            }
         }
         ops::speculative_prepare_verify_inputs(anchors, drafts, frontiers, extents, verify_ids,
                                                target_positions, state.execution.device.stream);
@@ -660,10 +672,10 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                     .target_tokens           = target_tokens,
                     .drafts                  = drafts,
                     .current_extents         = extents,
-                    .candidate_ids           = !lookup_override && frame.candidate_ids.data
+                    .candidate_ids           = frame.candidate_ids.data
                                                    ? frame.candidate_ids.slice(2, 0, batch_size)
                                                    : Tensor{},
-                    .proposal_q = !lookup_override && frame.proposal_q.data
+                    .proposal_q = frame.proposal_q.data
                                       ? frame.proposal_q.slice(2, 0, batch_size)
                                       : Tensor{},
                     .frontiers       = frontiers,
