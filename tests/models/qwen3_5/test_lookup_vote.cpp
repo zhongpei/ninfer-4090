@@ -1,4 +1,4 @@
-#include "models/qwen3_5/program/speculative/lookup_vote.h"
+#include "models/qwen3_5/program/speculative/lookup_draft.h"
 #include <iostream>
 #include <vector>
 
