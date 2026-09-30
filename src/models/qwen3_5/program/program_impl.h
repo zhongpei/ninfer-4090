@@ -16,6 +16,7 @@
 #include "models/qwen3_5/program/storage/state_store.h"
 #include "models/qwen3_5/program/prefix_identity.h"
 #include "models/qwen3_5/program/speculative/stair_router.h"
+#include "models/qwen3_5/program/speculative/lookup_vote.h"
 #include "models/qwen3_5/program/planning/resource_projection.h"
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
@@ -406,6 +407,11 @@ struct RequestControl {
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     StairRouterState stair_router;
+    struct LookupRoundState {
+        std::uint32_t full_accept_run = 0;
+        std::uint32_t last_extent = 0;
+        bool last_used = false;
+    } lookup_round;
     detail::PhysicalResources active_resources;
     detail::PhysicalResources optional_resources;
     bool publish_continuation = true;
@@ -575,10 +581,13 @@ public:
     const std::uint32_t prefill_chunk;
     const std::uint32_t draft_window;
     const std::uint32_t lookup_ngram;
+    const LookupDraftOptions lookup_options;
     const SpeculativeRoutingOptions speculative_routing;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
+    ::ninfer::qwen3_5::LookupPersistentStore lookup_persistent;
+    ::ninfer::qwen3_5::LookupCorpusStore lookup_corpus;
     const float rope_scaling_factor;
     const std::uint32_t rope_scaling_original_context;
 
