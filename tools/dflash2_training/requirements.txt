@@ -1,0 +1,8 @@
+# Core training/recording dependencies
+torch
+safetensors
+transformers
+accelerate
+
+# Optional but recommended on 24GB Ada cards for --optimizer adamw8bit:
+# bitsandbytes
