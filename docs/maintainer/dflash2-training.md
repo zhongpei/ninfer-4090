@@ -121,13 +121,14 @@ config.json
 model.safetensors
 ```
 
-For the current Ternary Bonsai source:
+For the current Ternary Bonsai source, keep the Qwen3.8 HF directory as the primary
+configuration/resource source and pass the GGUF as the recipe's named `ternary` source:
 
 ```bash
 python -m tools.dflash2_training.export_ninfer \
-  --model /models/Ternary-Bonsai-2-27B.gguf \
+  --model /models/Qwen3.8-27B \
+  --ternary /models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
   --drafter train/dflash2-b16 \
-  --recipe bonsai2_27b_ternary \
   --components text,dflash2 \
   --out out/bonsai2-dflash2-b16.ninfer
 ```
