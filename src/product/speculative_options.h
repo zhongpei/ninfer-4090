@@ -17,6 +17,19 @@ namespace ninfer::product {
     throw std::invalid_argument("invalid speculative backend: " + std::string(value));
 }
 
+[[nodiscard]] inline LookupDraftStrategy parse_lookup_draft_strategy(std::string_view value) {
+    if (value == "recent") { return LookupDraftStrategy::Recent; }
+    if (value == "vote") { return LookupDraftStrategy::Vote; }
+    throw std::invalid_argument("invalid lookup strategy: " + std::string(value));
+}
+
+[[nodiscard]] inline LookupDFlashMode parse_lookup_dflash_mode(std::string_view value) {
+    if (value == "off") { return LookupDFlashMode::Off; }
+    if (value == "replace") { return LookupDFlashMode::Replace; }
+    if (value == "skip") { return LookupDFlashMode::HeadSkip; }
+    throw std::invalid_argument("invalid lookup DFlash mode: " + std::string(value));
+}
+
 [[nodiscard]] inline SpeculativeRoutingMode
 parse_speculative_routing_mode(std::string_view value) {
     if (value == "fixed") { return SpeculativeRoutingMode::Fixed; }
@@ -105,6 +118,34 @@ inline void parse_speculative_stair_costs(std::string_view value,
 
 inline void validate_speculative_cli_options(const SpeculativeOptions& options) {
     const auto& router = options.routing;
+    const auto& lookup = options.lookup;
+    if (lookup.max_order == 0 || lookup.max_order > 16 || lookup.max_matches == 0 ||
+        lookup.min_support == 0 || !std::isfinite(lookup.min_confidence) ||
+        lookup.min_confidence < 0.0F || lookup.min_confidence > 1.0F ||
+        lookup.base_drafts == 0 || lookup.base_drafts > 15 ||
+        lookup.deep_drafts == 0 || lookup.deep_drafts > 15 ||
+        lookup.deep_drafts < lookup.base_drafts || !std::isfinite(lookup.corpus_weight) ||
+        lookup.corpus_weight < 0.0F || lookup.corpus_samples == 0) {
+        throw std::invalid_argument("invalid context-lookup drafting parameter");
+    }
+    if (options.lookup_ngram != 0 && options.lookup_ngram > lookup.max_order) {
+        throw std::invalid_argument("--lookup-ngram must not exceed --lookup-max-order");
+    }
+    if (lookup.dflash_mode != LookupDFlashMode::Off) {
+        if (options.lookup_ngram == 0 || lookup.strategy != LookupDraftStrategy::Vote) {
+            throw std::invalid_argument(
+                "--lookup-dflash replace|skip requires --lookup-ngram and --lookup-strategy vote");
+        }
+        if (options.backend != SpeculativeBackend::DFlash &&
+            options.backend != SpeculativeBackend::DFlash2) {
+            throw std::invalid_argument(
+                "--lookup-dflash replace|skip requires --spec dflash|dflash2");
+        }
+        if (lookup.base_drafts > options.draft_tokens || lookup.deep_drafts > options.draft_tokens) {
+            throw std::invalid_argument(
+                "--lookup-base-drafts/--lookup-deep-drafts must not exceed --draft-tokens");
+        }
+    }
     if (!std::isfinite(router.draft_cost) || router.draft_cost < 0.0F ||
         !std::isfinite(router.prior_acceptance) || router.prior_acceptance < 0.0F ||
         router.prior_acceptance > 1.0F || !std::isfinite(router.prior_weight) ||
