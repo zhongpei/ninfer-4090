@@ -169,6 +169,20 @@ void speculative_select_accepted_hidden_launch(const Tensor& hidden, const Tenso
     CUDA_CHECK(cudaGetLastError());
 }
 
+void speculative_make_one_hot_sparse_proposal_launch(
+    const Tensor& drafts, const Tensor& current_extents, Tensor& candidate_ids,
+    Tensor& proposal_q, std::int32_t token_domain, cudaStream_t stream) {
+    const dim3 grid(static_cast<unsigned int>(drafts.ne[0]),
+                    static_cast<unsigned int>(drafts.ne[1]));
+    speculative_make_one_hot_sparse_proposal_kernel
+        <<<grid, kSparseSpeculativeCandidates, 0, stream>>>(
+            static_cast<const std::int32_t*>(drafts.data),
+            static_cast<const std::int32_t*>(current_extents.data),
+            static_cast<std::int32_t*>(candidate_ids.data),
+            static_cast<float*>(proposal_q.data), drafts.ne[0], token_domain);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void proposal_remap_token_ids_launch(Tensor& proposal_tokens, const std::int32_t* id_map,
                                      std::int32_t n, cudaStream_t stream) {
     constexpr int kBlock = 256;
