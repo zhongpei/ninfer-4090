@@ -78,6 +78,10 @@ struct DFlashDecodeIngress {
     std::array<std::int32_t, kMaximumConcurrency> proposal_extents{};
     std::array<std::int32_t, kMaximumConcurrency> target_valid_columns{};
     std::array<std::int32_t, kMaximumConcurrency> proposal_valid_columns{};
+    // Host-selected copy proposals. lookup_extents[b]==0 leaves the neural DFlash proposal intact.
+    // The fixed maximum storage keeps the ingress ABI independent of startup K.
+    std::array<std::int32_t, kMaximumConcurrency> lookup_extents{};
+    std::array<TokenId, kMaximumConcurrency * kDFlashDecodeMaximumDrafts> lookup_drafts{};
     // DFlash uses logical positions for its own attention. Target verification carries a separate
     // continuation RoPE position so multimodal rows retain their per-sequence rope_delta.
     std::array<std::int32_t, kMaximumConcurrency * kDFlashDecodeMaximumWidth>
@@ -263,6 +267,8 @@ struct DFlashDecodeState {
     Tensor proposal_extents;
     Tensor target_valid_columns;
     Tensor proposal_valid_columns;
+    Tensor lookup_extents;
+    Tensor lookup_drafts;
     Tensor target_rope_positions;
     Tensor text_kv_table_rows;
     Tensor dflash_kv_table_rows;
