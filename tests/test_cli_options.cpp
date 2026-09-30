@@ -108,6 +108,18 @@ int main() {
                                        "--lookup-ngram", "8", "--lookup-dflash", "skip"});
                       }),
                       "CLI accepted DFlash lookup takeover without vote strategy");
+    const auto recent16 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "mtp",
+               "--draft-tokens", "3", "--lookup-ngram", "16"});
+    failures += check(recent16.speculative.lookup_ngram == 16 &&
+                          recent16.speculative.lookup.strategy == ninfer::LookupDraftStrategy::Recent,
+                      "historical recent --lookup-ngram 16 no longer parses");
+    const auto clamped_deep =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "dflash2",
+               "--draft-tokens", "7", "--lookup-ngram", "5", "--lookup-strategy", "vote",
+               "--lookup-dflash", "skip", "--lookup-deep-drafts", "15"});
+    failures += check(clamped_deep.speculative.lookup.deep_drafts == 15,
+                      "lookup deep policy could not exceed startup K for runtime clamping");
     for (const auto k : {0U, 16U}) {
         failures +=
             check(rejects([&] {
