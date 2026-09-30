@@ -642,7 +642,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         normal_extents[row] = std::min(
             {policy_extent, max_by_budget, capacity - sequence.execution_frontier - 1U});
 
-        if (lookup_enabled && request.sampling_host.temperature <= 0.0F) {
+        if (lookup_enabled) {
             ++request.speculative_stats.lookup_queries;
             const bool deep =
                 lookup_options.deep_after != 0 &&
