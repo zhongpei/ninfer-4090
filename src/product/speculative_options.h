@@ -128,8 +128,10 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         lookup.corpus_weight < 0.0F || lookup.corpus_samples == 0) {
         throw std::invalid_argument("invalid context-lookup drafting parameter");
     }
-    if (options.lookup_ngram != 0 && options.lookup_ngram > lookup.max_order) {
-        throw std::invalid_argument("--lookup-ngram must not exceed --lookup-max-order");
+    if (lookup.strategy == LookupDraftStrategy::Vote && options.lookup_ngram != 0 &&
+        options.lookup_ngram > lookup.max_order) {
+        throw std::invalid_argument(
+            "--lookup-ngram must not exceed --lookup-max-order with --lookup-strategy vote");
     }
     if (lookup.dflash_mode != LookupDFlashMode::Off) {
         if (options.lookup_ngram == 0 || lookup.strategy != LookupDraftStrategy::Vote) {
@@ -141,10 +143,8 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
             throw std::invalid_argument(
                 "--lookup-dflash replace|skip requires --spec dflash|dflash2");
         }
-        if (lookup.base_drafts > options.draft_tokens || lookup.deep_drafts > options.draft_tokens) {
-            throw std::invalid_argument(
-                "--lookup-base-drafts/--lookup-deep-drafts must not exceed --draft-tokens");
-        }
+        // Copy widths are policy maxima. The runtime clamps both to the startup DFlash K, request
+        // budget and remaining context so one A/B profile can compare K7 and K15 artifacts.
     }
     if (!std::isfinite(router.draft_cost) || router.draft_cost < 0.0F ||
         !std::isfinite(router.prior_acceptance) || router.prior_acceptance < 0.0F ||
