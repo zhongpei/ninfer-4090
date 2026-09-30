@@ -125,7 +125,10 @@ std::string usage_text(const char* argv0) {
            "       [--spec-router fixed|stair] [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
            "       [--spec-stair-draft-cost F] [--spec-stair-prior F] [--spec-stair-prior-weight F]\n"
            "       [--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F]\n"
-           "       [--lookup-ngram N]\n"
+           "       [--lookup-ngram N] [--lookup-strategy recent|vote] [--lookup-dflash off|replace|skip]\n"
+           "       [--lookup-max-order N] [--lookup-max-matches N] [--lookup-min-support N] [--lookup-min-confidence F]\n"
+           "       [--lookup-base-drafts N] [--lookup-deep-after N] [--lookup-deep-drafts N]\n"
+           "       [--lookup-persistent-tokens N] [--lookup-corpus-prefix PATH] [--lookup-corpus-weight F] [--lookup-corpus-samples N]\n"
            "       [--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4]\n"
            "       [--gdn-state-fp16] [--mlp-a8-decode] [--no-prefill-a8]\n"
            "       [--prefill-cublas [--no-prefill-cublas-projections]]\n"
@@ -163,9 +166,10 @@ std::string usage_text(const char* argv0) {
            "--spec-router stair keeps the configured DFlash/DFlash2 drafter at maximum K while "
            "choosing the target-verify extent from an explicit measured cost staircase; fixed is "
            "the default and all Stair parameters are exposed for A/B calibration.\n"
-           "--lookup-ngram N adds context-lookup drafting alongside --spec: the last N tokens are "
-           "matched against the sequence so far and what followed is proposed. It is exact, and 0 "
-           "(the default) disables it.\n"
+           "--lookup-ngram N enables exact copy drafting. recent preserves the old nearest hit; "
+           "vote counts same-order continuations from the request, optional process history and a "
+           "static suffix corpus. --lookup-dflash replace isolates proposal quality; skip also "
+           "removes the neural DFlash proposal on an all-lane confident hit.\n"
            "--kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom.\n"
@@ -262,6 +266,37 @@ Options parse_options(int argc, char** argv) {
             options.prefill_a8 = false;
         } else if (arg == "--lookup-ngram") {
             options.speculative.lookup_ngram = parse_u32(value("--lookup-ngram"), "lookup-ngram");
+        } else if (arg == "--lookup-strategy") {
+            options.speculative.lookup.strategy = product::parse_lookup_draft_strategy(value(arg));
+        } else if (arg == "--lookup-dflash") {
+            options.speculative.lookup.dflash_mode = product::parse_lookup_dflash_mode(value(arg));
+        } else if (arg == "--lookup-max-order") {
+            options.speculative.lookup.max_order = parse_u32(value(arg), "lookup-max-order");
+        } else if (arg == "--lookup-max-matches") {
+            options.speculative.lookup.max_matches = parse_u32(value(arg), "lookup-max-matches");
+        } else if (arg == "--lookup-min-support") {
+            options.speculative.lookup.min_support = parse_u32(value(arg), "lookup-min-support");
+        } else if (arg == "--lookup-min-confidence") {
+            options.speculative.lookup.min_confidence =
+                parse_float(value(arg), "lookup-min-confidence", 0.0F, 1.0F);
+        } else if (arg == "--lookup-base-drafts") {
+            options.speculative.lookup.base_drafts = parse_u32(value(arg), "lookup-base-drafts");
+        } else if (arg == "--lookup-deep-after") {
+            options.speculative.lookup.deep_after =
+                parse_u32(value(arg), "lookup-deep-after", true);
+        } else if (arg == "--lookup-deep-drafts") {
+            options.speculative.lookup.deep_drafts = parse_u32(value(arg), "lookup-deep-drafts");
+        } else if (arg == "--lookup-persistent-tokens") {
+            options.speculative.lookup.persistent_tokens =
+                parse_u32(value(arg), "lookup-persistent-tokens", true);
+        } else if (arg == "--lookup-corpus-prefix") {
+            options.speculative.lookup.corpus_prefix = value(arg);
+        } else if (arg == "--lookup-corpus-weight") {
+            options.speculative.lookup.corpus_weight =
+                parse_float(value(arg), "lookup-corpus-weight", 0.0F, 1000.0F);
+        } else if (arg == "--lookup-corpus-samples") {
+            options.speculative.lookup.corpus_samples =
+                parse_u32(value(arg), "lookup-corpus-samples");
         } else if (arg == "--prefill-cublas") {
             options.prefill_cublas = true;
         } else if (arg == "--no-prefill-cublas-projections") {
