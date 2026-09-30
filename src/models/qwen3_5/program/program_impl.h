@@ -16,7 +16,7 @@
 #include "models/qwen3_5/program/storage/state_store.h"
 #include "models/qwen3_5/program/prefix_identity.h"
 #include "models/qwen3_5/program/speculative/stair_router.h"
-#include "models/qwen3_5/program/speculative/lookup_vote.h"
+#include "models/qwen3_5/program/speculative/lookup_draft.h"
 #include "models/qwen3_5/program/planning/resource_projection.h"
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
@@ -409,8 +409,6 @@ struct RequestControl {
     StairRouterState stair_router;
     struct LookupRoundState {
         std::uint32_t full_accept_run = 0;
-        std::uint32_t last_extent = 0;
-        bool last_used = false;
     } lookup_round;
     detail::PhysicalResources active_resources;
     detail::PhysicalResources optional_resources;
