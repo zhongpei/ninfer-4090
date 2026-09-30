@@ -89,6 +89,11 @@ std::string serve_usage_text(const char* argv0) {
            "[--spec-stair-costs A,B,C,D] [--spec-stair-draft-cost F] "
            "[--spec-stair-prior F] [--spec-stair-prior-weight F] "
            "[--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F] "
+           "[--lookup-strategy recent|vote] [--lookup-dflash off|replace|skip] "
+           "[--lookup-max-order N] [--lookup-max-matches N] [--lookup-min-support N] "
+           "[--lookup-min-confidence F] [--lookup-base-drafts N] [--lookup-deep-after N] "
+           "[--lookup-deep-drafts N] [--lookup-persistent-tokens N] "
+           "[--lookup-corpus-prefix PATH] [--lookup-corpus-weight F] [--lookup-corpus-samples N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-residency resident|overlay] [--vision-max-merged N] "
            "[--no-cuda-graph] [--no-prefix-reuse] [--auto-prefix-grid] [--devices N,M] "
@@ -426,6 +431,46 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--lookup-ngram") {
             options.speculative.lookup_ngram = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--lookup-ngram"), "lookup-ngram"));
+        } else if (arg == "--lookup-strategy") {
+            options.speculative.lookup.strategy =
+                product::parse_lookup_draft_strategy(require_value("--lookup-strategy"));
+        } else if (arg == "--lookup-dflash") {
+            options.speculative.lookup.dflash_mode =
+                product::parse_lookup_dflash_mode(require_value("--lookup-dflash"));
+        } else if (arg == "--lookup-max-order") {
+            options.speculative.lookup.max_order = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--lookup-max-order"), "lookup-max-order"));
+        } else if (arg == "--lookup-max-matches") {
+            options.speculative.lookup.max_matches = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--lookup-max-matches"), "lookup-max-matches"));
+        } else if (arg == "--lookup-min-support") {
+            options.speculative.lookup.min_support = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--lookup-min-support"), "lookup-min-support"));
+        } else if (arg == "--lookup-min-confidence") {
+            options.speculative.lookup.min_confidence = parse_float_in(
+                require_value("--lookup-min-confidence"), "lookup-min-confidence", 0.0F, 1.0F);
+        } else if (arg == "--lookup-base-drafts") {
+            options.speculative.lookup.base_drafts = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--lookup-base-drafts"), "lookup-base-drafts"));
+        } else if (arg == "--lookup-deep-after") {
+            options.speculative.lookup.deep_after = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--lookup-deep-after"), "lookup-deep-after"));
+        } else if (arg == "--lookup-deep-drafts") {
+            options.speculative.lookup.deep_drafts = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--lookup-deep-drafts"), "lookup-deep-drafts"));
+        } else if (arg == "--lookup-persistent-tokens") {
+            options.speculative.lookup.persistent_tokens = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--lookup-persistent-tokens"),
+                                      "lookup-persistent-tokens"));
+        } else if (arg == "--lookup-corpus-prefix") {
+            options.speculative.lookup.corpus_prefix = require_value("--lookup-corpus-prefix");
+        } else if (arg == "--lookup-corpus-weight") {
+            options.speculative.lookup.corpus_weight = parse_float_in(
+                require_value("--lookup-corpus-weight"), "lookup-corpus-weight", 0.0F, 1000.0F);
+        } else if (arg == "--lookup-corpus-samples") {
+            options.speculative.lookup.corpus_samples = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--lookup-corpus-samples"),
+                                      "lookup-corpus-samples"));
         } else if (arg == "--prefill-cublas") {
             options.prefill_cublas = true;
         } else if (arg == "--no-prefill-cublas-projections") {
