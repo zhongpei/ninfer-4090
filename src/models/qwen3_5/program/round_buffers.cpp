@@ -339,6 +339,10 @@ DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeState
         ingress_tensor(offsetof(DFlashDecodeIngress, target_valid_columns), DType::I32, {batch});
     proposal_valid_columns =
         ingress_tensor(offsetof(DFlashDecodeIngress, proposal_valid_columns), DType::I32, {batch});
+    lookup_extents =
+        ingress_tensor(offsetof(DFlashDecodeIngress, lookup_extents), DType::I32, {batch});
+    lookup_drafts = ingress_tensor(offsetof(DFlashDecodeIngress, lookup_drafts), DType::I32,
+                                   {drafts, batch});
     verify_positions = layout.verify_positions.bind(backing);
     if (layout.candidate_ids) { candidate_ids = layout.candidate_ids->bind(backing); }
     if (layout.proposal_q) { proposal_q = layout.proposal_q->bind(backing); }
