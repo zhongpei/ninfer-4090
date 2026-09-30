@@ -521,6 +521,13 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.metrics.speculative_fallback_steps  = result.speculative.fallback_steps;
     outcome.metrics.speculative_accepted_per_position =
         std::move(result.speculative.accepted_per_position);
+    outcome.metrics.lookup_queries          = result.speculative.lookup_queries;
+    outcome.metrics.lookup_hits             = result.speculative.lookup_hits;
+    outcome.metrics.lookup_rounds           = result.speculative.lookup_rounds;
+    outcome.metrics.lookup_replace_rounds   = result.speculative.lookup_replace_rounds;
+    outcome.metrics.lookup_head_skip_rounds = result.speculative.lookup_head_skip_rounds;
+    outcome.metrics.lookup_draft_tokens     = result.speculative.lookup_drafted_tokens;
+    outcome.metrics.lookup_accepted_tokens  = result.speculative.lookup_accepted_tokens;
 
     outcome.tool_calls      = std::move(result.tool_calls);
     outcome.tool_call_parse = result.tool_call_parse;
