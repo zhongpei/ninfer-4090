@@ -809,7 +809,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                     } else {
                         ++request.speculative_stats.lookup_replace_rounds;
                     }
-                     if (extent != 0 && accepted_i == static_cast<std::int32_t>(extent)) {
+                    if (extent != 0 && accepted_i == static_cast<std::int32_t>(extent)) {
                         ++request.lookup_round.full_accept_run;
                     } else {
                         request.lookup_round.full_accept_run = 0;
