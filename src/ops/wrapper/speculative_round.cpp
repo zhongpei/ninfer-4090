@@ -237,6 +237,18 @@ void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& sele
     detail::speculative_select_accepted_hidden_launch(hidden, selectors, out, stream);
 }
 
+void speculative_override_drafts(Tensor& drafts, const Tensor& overrides,
+                                 const Tensor& override_extents, cudaStream_t stream) {
+    constexpr const char* op = "speculative_override_drafts";
+    if (drafts.ne[0] <= 0 || drafts.ne[1] <= 0) {
+        throw std::invalid_argument("speculative_override_drafts: K and B must be positive");
+    }
+    require_matrix(drafts, DType::I32, drafts.ne[0], drafts.ne[1], op, "drafts");
+    require_matrix(overrides, DType::I32, drafts.ne[0], drafts.ne[1], op, "overrides");
+    require_vector(override_extents, DType::I32, drafts.ne[1], op, "override_extents");
+    detail::speculative_override_drafts_launch(drafts, overrides, override_extents, stream);
+}
+
 void proposal_remap_token_ids(Tensor& proposal_tokens, const std::int32_t* id_map, std::int32_t n,
                               cudaStream_t stream) {
     constexpr const char* op = "proposal_remap_token_ids";
