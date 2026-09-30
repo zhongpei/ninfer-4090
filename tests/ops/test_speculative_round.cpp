@@ -1368,6 +1368,78 @@ int batched_select_hidden_case(int width, int batch) {
     return failures;
 }
 
+int one_hot_sparse_proposal_case(int k, int batch) {
+    constexpr int token_domain = kSparseTokenDomain;
+    std::vector<std::int32_t> drafts(static_cast<std::size_t>(k) * batch);
+    std::vector<std::int32_t> extents(batch);
+    std::vector<std::int32_t> candidates(
+        static_cast<std::size_t>(kSparseCandidates) * k * batch, -77);
+    std::vector<float> proposal_q(candidates.size(), -3.0F);
+
+    for (int row = 0; row < batch; ++row) {
+        extents[row] = (row * 5 + k / 2) % (k + 1);
+        for (int col = 0; col < k; ++col) {
+            drafts[static_cast<std::size_t>(row) * k + col] =
+                1000 + row * 101 + col * 17;
+        }
+    }
+    const auto expected_candidates = [&] {
+        auto out = candidates;
+        for (int row = 0; row < batch; ++row)
+            for (int col = 0; col < extents[row]; ++col) {
+                const int token = drafts[static_cast<std::size_t>(row) * k + col];
+                const std::size_t base =
+                    (static_cast<std::size_t>(row) * k + col) * kSparseCandidates;
+                out[base] = token;
+                for (int candidate = 1; candidate < kSparseCandidates; ++candidate)
+                    out[base + candidate] = (token + candidate) % token_domain;
+            }
+        return out;
+    }();
+    const auto expected_q = [&] {
+        auto out = proposal_q;
+        for (int row = 0; row < batch; ++row)
+            for (int col = 0; col < extents[row]; ++col) {
+                const std::size_t base =
+                    (static_cast<std::size_t>(row) * k + col) * kSparseCandidates;
+                out[base] = 1.0F;
+                for (int candidate = 1; candidate < kSparseCandidates; ++candidate)
+                    out[base + candidate] = 0.0F;
+            }
+        return out;
+    }();
+
+    DeviceBuffer d_drafts = to_device(drafts);
+    DeviceBuffer d_extents = to_device(extents);
+    GuardedDeviceBuffer d_candidates(candidates.size() * sizeof(std::int32_t));
+    GuardedDeviceBuffer d_q(proposal_q.size() * sizeof(float));
+    initialize(d_candidates, candidates);
+    initialize(d_q, proposal_q);
+    Tensor draft_tensor(d_drafts.p, DType::I32, {k, batch});
+    Tensor extent_tensor(d_extents.p, DType::I32, {batch});
+    Tensor candidate_tensor(d_candidates.data(), DType::I32, {kSparseCandidates, k, batch});
+    Tensor q_tensor(d_q.data(), DType::FP32, {kSparseCandidates, k, batch});
+
+    ops::speculative_make_one_hot_sparse_proposal(
+        draft_tensor, extent_tensor, candidate_tensor, q_tensor, token_domain, nullptr);
+    cuda_synchronize();
+
+    const std::string label =
+        "one-hot sparse proposal K=" + std::to_string(k) + " B=" + std::to_string(batch);
+    int failures = verify_exact((label + " candidates").c_str(),
+                                read<std::int32_t>(d_candidates, candidates.size()),
+                                expected_candidates);
+    failures += verify_exact((label + " q").c_str(),
+                             read<float>(d_q, proposal_q.size()), expected_q);
+    failures += verify_exact((label + " drafts readonly").c_str(),
+                             from_device<std::int32_t>(d_drafts, drafts.size()), drafts);
+    failures += verify_exact((label + " extents readonly").c_str(),
+                             from_device<std::int32_t>(d_extents, extents.size()), extents);
+    failures += d_candidates.verify_guards((label + " candidates guards").c_str());
+    failures += d_q.verify_guards((label + " q guards").c_str());
+    return failures;
+}
+
 int remap_case(int token_count) {
     constexpr int map_size = 131072;
     std::vector<std::int32_t> id_map(map_size);
@@ -1411,6 +1483,8 @@ int transforms_conformance() {
     failures += select_hidden_case(5120, 6, 0);
     failures += select_hidden_case(5120, 6, 5);
     failures += select_hidden_case(2048, 16, 7);
+    for (int k : {1, 7, 15})
+        for (int batch : {1, 8}) failures += one_hot_sparse_proposal_case(k, batch);
     failures += remap_case(1);
     failures += remap_case(15);
     failures += remap_case(120);
