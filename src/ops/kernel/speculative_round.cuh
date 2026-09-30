@@ -928,6 +928,28 @@ __global__ void speculative_override_drafts_kernel(std::int32_t* drafts,
     if (col < extent) { drafts[row * k + col] = overrides[row * k + col]; }
 }
 
+__global__ void speculative_override_sparse_proposal_kernel(
+    std::int32_t* candidate_ids, float* proposal_q, const std::int32_t* overrides,
+    const std::int32_t* extents, std::int32_t k, std::int32_t token_domain) {
+    const int row = static_cast<int>(blockIdx.z);
+    const int col = static_cast<int>(blockIdx.y);
+    const int candidate = static_cast<int>(threadIdx.x);
+    if (col >= k || candidate >= kSparseSpeculativeCandidates) { return; }
+    const int extent = max(0, min(k, extents[row]));
+    if (col >= extent) { return; }
+    const int token = overrides[row * k + col];
+    const int off = (row * k + col) * kSparseSpeculativeCandidates + candidate;
+    if (candidate == 0) {
+        candidate_ids[off] = token;
+        proposal_q[off] = 1.0F;
+    } else {
+        // token_domain is much larger than 16 on every registered DFlash2 target, so these are
+        // distinct valid filler ids with zero q and never alias candidate 0.
+        candidate_ids[off] = (token + candidate) % token_domain;
+        proposal_q[off] = 0.0F;
+    }
+}
+
 __global__ void proposal_remap_token_ids_kernel(std::int32_t* proposal_tokens,
                                                 std::int32_t proposal_count,
                                                 const std::int32_t* id_map, std::int32_t n) {
