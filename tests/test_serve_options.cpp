@@ -179,6 +179,18 @@ int main() {
                           lookup.speculative.lookup.max_order == 12 &&
                           lookup.speculative.lookup.persistent_tokens == 262144,
                       "serve options did not preserve multi-source lookup controls");
+    const ServeOptions recent16 =
+        parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3",
+               "--lookup-ngram", "16"});
+    failures += check(recent16.speculative.lookup_ngram == 16 &&
+                          recent16.speculative.lookup.strategy == ninfer::LookupDraftStrategy::Recent,
+                      "serve no longer accepts historical recent --lookup-ngram 16");
+    const ServeOptions clamped_deep =
+        parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "7",
+               "--lookup-ngram", "5", "--lookup-strategy", "vote", "--lookup-dflash", "skip",
+               "--lookup-deep-drafts", "15"});
+    failures += check(clamped_deep.speculative.lookup.deep_drafts == 15,
+                      "serve lookup deep policy could not exceed startup K for runtime clamping");
 
     for (const auto k : {1U, 2U, 7U, 15U}) {
         const auto options = parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",
