@@ -175,6 +175,15 @@ void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& sele
                                         cudaStream_t stream);
 
 /**
+ * Replace the live prefix of each speculative draft row with a host-selected copy proposal.
+ * drafts/overrides are contiguous I32 [K,B], override_extents is I32 [B]. Row b copies columns
+ * [0,override_extents[b]); zero leaves the neural proposal untouched. The Op is graph-safe and
+ * has no workspace.
+ */
+void speculative_override_drafts(Tensor& drafts, const Tensor& overrides,
+                                 const Tensor& override_extents, cudaStream_t stream);
+
+/**
  * Op: proposal_remap_token_ids
  *
  * Math / indexing:
