@@ -88,6 +88,26 @@ int main() {
                                        "--spec-stair-widths", "1,2,3,3"});
                       }),
                       "CLI accepted Stair routing on MTP or invalid width ordering");
+    const auto lookup = parse(
+        {"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "dflash2",
+         "--draft-tokens", "15", "--lookup-ngram", "8", "--lookup-strategy", "vote",
+         "--lookup-dflash", "skip", "--lookup-max-order", "12", "--lookup-max-matches", "48",
+         "--lookup-min-support", "2", "--lookup-min-confidence", "0.7",
+         "--lookup-base-drafts", "7", "--lookup-deep-after", "2", "--lookup-deep-drafts", "15",
+         "--lookup-persistent-tokens", "262144", "--lookup-corpus-prefix", "corpus/qwen",
+         "--lookup-corpus-weight", "0.4", "--lookup-corpus-samples", "32"});
+    failures += check(lookup.speculative.lookup.strategy == ninfer::LookupDraftStrategy::Vote &&
+                          lookup.speculative.lookup.dflash_mode == ninfer::LookupDFlashMode::HeadSkip &&
+                          lookup.speculative.lookup.max_order == 12 &&
+                          lookup.speculative.lookup.persistent_tokens == 262144 &&
+                          lookup.speculative.lookup.corpus_prefix == "corpus/qwen",
+                      "CLI did not preserve multi-source lookup controls");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--spec", "dflash2", "--draft-tokens", "15",
+                                       "--lookup-ngram", "8", "--lookup-dflash", "skip"});
+                      }),
+                      "CLI accepted DFlash lookup takeover without vote strategy");
     for (const auto k : {0U, 16U}) {
         failures +=
             check(rejects([&] {
@@ -122,7 +142,8 @@ int main() {
                           route.speculative.draft_tokens == 3,
                       "CLI did not parse the cuBLAS prefill and context-lookup controls");
     for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections", "--lookup-ngram",
-                             "--spec-router", "--spec-stair-widths", "--spec-stair-costs"}) {
+                             "--spec-router", "--spec-stair-widths", "--spec-stair-costs",
+                             "--lookup-strategy", "--lookup-dflash", "--lookup-corpus-prefix"}) {
         failures += check(help.find(flag) != std::string::npos,
                           "CLI help omits an accepted prefill or drafting control");
     }
