@@ -917,6 +917,17 @@ __global__ void speculative_select_accepted_hidden_kernel(const __nv_bfloat16* h
         hidden[(static_cast<std::int64_t>(batch) * cols + col) * rows + row];
 }
 
+__global__ void speculative_override_drafts_kernel(std::int32_t* drafts,
+                                                    const std::int32_t* overrides,
+                                                    const std::int32_t* extents,
+                                                    std::int32_t k) {
+    const int row = static_cast<int>(blockIdx.y);
+    const int col = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (col >= k) { return; }
+    const int extent = max(0, min(k, extents[row]));
+    if (col < extent) { drafts[row * k + col] = overrides[row * k + col]; }
+}
+
 __global__ void proposal_remap_token_ids_kernel(std::int32_t* proposal_tokens,
                                                 std::int32_t proposal_count,
                                                 const std::int32_t* id_map, std::int32_t n) {
