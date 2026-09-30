@@ -616,6 +616,10 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                                    append_counts, state.execution.device.stream);
         append_context_impl(state, compact_features, append_positions, append_counts,
                             state_destinations, dflash_rows, envelopes.append);
+        // append_context_impl has consumed compact_features on the same stream. Release its
+        // logical workspace before either the neural proposal or direct lookup verification.
+        // The neural path also resets internally; the explicit reset is essential for head-skip.
+        state.execution.work.reset();
 
         if (run_drafter) {
             propose_batch_impl(state, frame, batch_size, k, envelopes);
