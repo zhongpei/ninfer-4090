@@ -917,6 +917,29 @@ __global__ void speculative_select_accepted_hidden_kernel(const __nv_bfloat16* h
         hidden[(static_cast<std::int64_t>(batch) * cols + col) * rows + row];
 }
 
+__global__ void speculative_make_one_hot_sparse_proposal_kernel(
+    const std::int32_t* drafts, const std::int32_t* extents, std::int32_t* candidate_ids,
+    float* proposal_q, std::int32_t k, std::int32_t token_domain) {
+    const int row = static_cast<int>(blockIdx.y);
+    const int col = static_cast<int>(blockIdx.x);
+    const int candidate = static_cast<int>(threadIdx.x);
+    if (col >= k || candidate >= kSparseSpeculativeCandidates) { return; }
+    const int extent = max(0, min(k, extents[row]));
+    if (col >= extent) { return; }
+
+    const int token = drafts[row * k + col];
+    const int off = (row * k + col) * kSparseSpeculativeCandidates + candidate;
+    if (candidate == 0) {
+        candidate_ids[off] = token;
+        proposal_q[off] = 1.0F;
+    } else {
+        // Zero-mass entries only need distinct valid ids. The registered token domain is far
+        // larger than the 16-candidate selector width.
+        candidate_ids[off] = (token + candidate) % token_domain;
+        proposal_q[off] = 0.0F;
+    }
+}
+
 __global__ void proposal_remap_token_ids_kernel(std::int32_t* proposal_tokens,
                                                 std::int32_t proposal_count,
                                                 const std::int32_t* id_map, std::int32_t n) {
