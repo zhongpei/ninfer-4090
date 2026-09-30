@@ -175,22 +175,6 @@ void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& sele
                                         cudaStream_t stream);
 
 /**
- * Replace the live prefix of each speculative draft row with a host-selected copy proposal.
- * drafts/overrides are contiguous I32 [K,B], override_extents is I32 [B]. Row b copies columns
- * [0,override_extents[b]); zero leaves the neural proposal untouched. The Op is graph-safe and
- * has no workspace.
- */
-void speculative_override_drafts(Tensor& drafts, const Tensor& overrides,
-                                 const Tensor& override_extents, cudaStream_t stream);
-
-// Convert overridden DFlash2 positions into an exact one-hot proposal distribution. candidate_ids
-// is I32 [16,K,B], proposal_q FP32 [16,K,B], overrides I32 [K,B], extents I32 [B].
-void speculative_override_sparse_proposal(Tensor& candidate_ids, Tensor& proposal_q,
-                                          const Tensor& overrides,
-                                          const Tensor& override_extents,
-                                          std::int32_t token_domain, cudaStream_t stream);
-
-/**
  * Op: proposal_remap_token_ids
  *
  * Math / indexing:
