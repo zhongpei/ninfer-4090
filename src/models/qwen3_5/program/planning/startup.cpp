@@ -912,6 +912,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->lookup_options      = inputs.lookup_options;
     impl->speculative_routing = inputs.speculative_routing;
     impl->speculative_tree    = inputs.speculative_tree;
+    impl->dflash_teacher      = inputs.dflash_teacher;
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
     impl->features            = inputs.features;
@@ -1010,6 +1011,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .lookup_options      = options.speculative.lookup,
         .speculative_routing = options.speculative.routing,
         .speculative_tree    = options.speculative.tree,
+        .dflash_teacher      = options.speculative.teacher,
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,
