@@ -766,10 +766,10 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
         state.execution.replay_records == nullptr) {
         throw std::invalid_argument("DFlash2 tree decode received an unsupported runtime profile");
     }
-    if (state.host_ingress.sampling[0].temperature > 0.0F ||
-        state.host_ingress.sampling[0].presence_penalty != 0.0F ||
+    if (state.host_ingress.sampling[0].presence_penalty != 0.0F ||
         state.host_ingress.sampling[0].frequency_penalty != 0.0F) {
-        throw std::invalid_argument("DFlash2 tree decode currently requires raw greedy sampling");
+        throw std::invalid_argument(
+            "DFlash2 tree sampling currently requires presence/frequency penalties disabled");
     }
 
     qwen3_5::DFlashDecodeState& frame = state.frame;
@@ -877,8 +877,22 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
     Tensor licensed_tokens = frame.licensed_tokens.slice(1, 0, 1);
     Tensor licensed_counts = frame.licensed_counts.slice(0, 0, 1);
     Tensor accepted_drafts = frame.accepted_drafts.slice(0, 0, 1);
+    Tensor accept_tokens = target_tokens;
+    if (state.host_ingress.sampling[0].temperature > 0.0F) {
+        state.execution.work.reset();
+        Tensor sampled = state.execution.work.alloc(DType::I32, {live_width});
+        Tensor sample_logits =
+            target_logits_live.view({target_logits_live.ne[0], live_width});
+        Tensor sample_positions = target_positions_live.view({live_width});
+        ops::sample_broadcast_config(
+            sample_logits, sampled,
+            dimension(state.execution.parameters.model.resources().public_token_count),
+            frame.sampling, sample_positions, ops::kSamplePurposeDecode,
+            state.execution.work, stream);
+        accept_tokens = sampled;
+    }
     ops::speculative_tree_accept_greedy(
-        target_tokens, target_logits, verify_ids, parents, live_width,
+        accept_tokens, target_logits, verify_ids, parents, live_width,
         dimension(state.execution.parameters.model.resources().public_token_count),
         path_nodes, licensed_tokens, licensed_counts, accepted_drafts,
         frame.tree_path_count, append_counts, stream);
