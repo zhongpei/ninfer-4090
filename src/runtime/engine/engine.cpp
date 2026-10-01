@@ -281,6 +281,37 @@ std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32
     return result;
 }
 
+DFlashTeacherCapture Engine::record_dflash_teacher(
+    std::vector<TokenId> tokens, std::vector<std::uint32_t> target_layer_ids) {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    if (impl_->options.purpose != EnginePurpose::CausalScoring) {
+        throw std::logic_error("record_dflash_teacher requires a CausalScoring Engine");
+    }
+    if (tokens.size() < 2 || tokens.size() > impl_->options.max_context ||
+        target_layer_ids.empty()) {
+        throw std::invalid_argument("invalid DFlash teacher capture input");
+    }
+    PreparedPrompt prompt = prepare_tokens(std::move(tokens), false);
+    DFlashTeacherCapture result = std::visit(
+        [&](auto& core) -> DFlashTeacherCapture {
+            using CoreState = std::remove_cvref_t<decltype(core)>;
+            if constexpr (std::is_same_v<CoreState, std::unique_ptr<Impl::ScoringCore>>) {
+                return core->teacher(std::move(prompt.impl_->value), target_layer_ids);
+            } else {
+                throw std::logic_error("Engine scoring core is unavailable");
+            }
+        },
+        impl_->core);
+    const std::size_t expected_top =
+        static_cast<std::size_t>(result.predictor_count) * result.top_k;
+    if (result.predictor_count + 1U != result.token_ids.size() ||
+        result.labels.size() != result.predictor_count ||
+        result.top_ids.size() != expected_top || result.top_logits.size() != expected_top) {
+        throw std::logic_error("invalid DFlash teacher capture result");
+    }
+    return result;
+}
+
 std::uint32_t Engine::count_tokens(PromptInput input, const PreparationControl& control) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     return impl_->active->frontend.count_tokens(std::move(input), control);
