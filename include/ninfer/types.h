@@ -119,6 +119,7 @@ enum class LookupDFlashMode : std::uint8_t {
     Off,
     Replace,
     HeadSkip,
+    MergeTree,
 };
 
 enum class SpeculativeTreeMode : std::uint8_t {
@@ -152,6 +153,9 @@ struct LookupDraftOptions {
     std::uint32_t base_drafts    = 7;
     std::uint32_t deep_after     = 2;
     std::uint32_t deep_drafts    = 15;
+    // In merge mode, reserve at most this many of the <=15 tree nodes for the voted copy spine;
+    // the remainder stays available to the DFlash2 lattice.
+    std::uint32_t merge_nodes     = 4;
     // Zero disables process-persistent lookup history. When non-zero, completed request ledgers
     // are retained up to this many tokens and indexed by n-gram hash.
     std::uint32_t persistent_tokens = 0;
