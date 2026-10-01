@@ -805,9 +805,11 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
                         state_destinations, dflash_rows, envelopes.append);
     state.execution.work.reset();
 
-    Tensor lattice = frame.lattice_scores.slice(3, 0, 1);
-    propose_batch_impl(state, frame, 1, k, envelopes, &lattice);
-    Tensor candidates = frame.candidate_ids.slice(2, 0, 1);
+    Tensor lattice_full = frame.lattice_scores.slice(3, 0, 1);
+    propose_batch_impl(state, frame, 1, k, envelopes, &lattice_full);
+    Tensor lattice = lattice_full.slice(2, 0, static_cast<std::int32_t>(options.nodes));
+    Tensor candidates = frame.candidate_ids.slice(2, 0, 1)
+                            .slice(1, 0, static_cast<std::int32_t>(options.nodes));
 
     const std::int32_t frontier = state.host_ingress.execution_frontiers[0];
     const std::int32_t rope_delta = state.host_ingress.target_rope_positions[0] - frontier;
@@ -817,8 +819,9 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
     Tensor parents = frame.tree_parents.slice(0, 0, width);
     Tensor depths = frame.tree_depths.slice(0, 0, width);
     ops::speculative_tree_build_device(
-        candidates, lattice, state.host_ingress.anchors[0], static_cast<std::int32_t>(k),
-        static_cast<std::int32_t>(options.nodes), static_cast<std::int32_t>(options.spine),
+        candidates, lattice, state.host_ingress.anchors[0],
+        static_cast<std::int32_t>(options.nodes), static_cast<std::int32_t>(options.nodes),
+        static_cast<std::int32_t>(options.spine),
         frontier, rope_delta, verify_ids, target_positions, target_rope, parents, depths, stream);
 
     const std::int32_t lane = state.host_ingress.active_lanes[0];
