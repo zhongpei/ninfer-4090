@@ -88,6 +88,7 @@ struct SequencePlanningInputs {
     LookupDraftOptions lookup_options;
     SpeculativeRoutingOptions speculative_routing;
     SpeculativeTreeOptions speculative_tree;
+    DFlashTeacherOptions dflash_teacher;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
@@ -116,6 +117,7 @@ struct SequencePlanImpl {
     LookupDraftOptions lookup_options;
     SpeculativeRoutingOptions speculative_routing;
     SpeculativeTreeOptions speculative_tree;
+    DFlashTeacherOptions dflash_teacher;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
