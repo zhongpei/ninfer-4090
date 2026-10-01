@@ -170,6 +170,11 @@ int main() {
     failures += check(server.at("artifact").at("size_bytes") == 123456, "artifact size missing");
     failures += check(server.at("engine").at("max_context") == 262144, "max context missing");
     failures += check(server.at("engine").at("kv_capacity") == 524288, "KV capacity missing");
+    failures +=
+        check(server.at("engine").at("speculative_tree").at("mode") == "off" &&
+                  server.at("engine").at("speculative_tree").at("nodes") == 15 &&
+                  server.at("engine").at("speculative_tree").at("spine") == 7,
+              "resolved speculative tree startup parameters missing");
     failures += check(server.at("engine").at("kv_capacity_mode") == "explicit" &&
                           server.at("engine").at("kv_capacity_page_groups") == 8192 &&
                           server.at("engine").at("kv_capacity_max_page_groups") == 16384,
