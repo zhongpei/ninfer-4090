@@ -960,13 +960,12 @@ __device__ __forceinline__ void speculative_tree_frontier_push(
 __global__ void speculative_tree_build_plan_kernel(
     const std::int32_t* candidate_ids, const float* lattice, const std::int32_t* anchors,
     const std::int32_t* frontiers, const std::int32_t* rope_starts, int steps, int node_budget,
-    int spine, std::int32_t* tree_tokens, std::int32_t* parents, std::int32_t* depths,
+    int spine, int physical_width, std::int32_t* tree_tokens, std::int32_t* parents, std::int32_t* depths,
     std::int32_t* cache_positions, std::int32_t* rope_positions) {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     constexpr int MaxRows = 16;
     constexpr int Candidates = 16;
     constexpr int MaxFrontier = 256;
-    const int physical_width = steps + 1;
     const int anchor = anchors[0];
     const int frontier_position = frontiers[0];
     const int rope_delta = rope_starts[0] - frontier_position;

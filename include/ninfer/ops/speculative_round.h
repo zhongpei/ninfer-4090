@@ -190,8 +190,10 @@ void speculative_tree_gather_bf16_dynamic(const Tensor& source, const Tensor& pa
  * Build a C1 DFlash2 verify tree entirely on device.
  *
  * candidate_ids is I32 [16,K], lattice_scores FP32 [16,16,K]. anchors/frontiers/rope_starts are
- * I32[1]. node_budget is 1..K and spine is 1..node_budget. Outputs are physical vectors of
- * width K+1; the live prefix [0,node_budget] is DFS preorder and the suffix is neutral.
+ * I32[1]. K is the supplied active lattice depth; node_budget is 1..K and spine is 1..node_budget.
+ * Outputs share a physical width W in [K+1,16], preserving the startup reservation when inputs
+ * are sliced to active depths. The live prefix [0,node_budget] is DFS preorder; every remaining
+ * physical output is neutral.
  * cache_positions[i]=frontier+depth[i], rope_positions adds the round's existing rope delta.
  */
 void speculative_tree_build_plan(const Tensor& candidate_ids, const Tensor& lattice_scores,

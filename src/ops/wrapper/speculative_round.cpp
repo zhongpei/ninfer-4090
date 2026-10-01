@@ -299,7 +299,10 @@ void speculative_tree_build_plan(
     require_vector(anchors, DType::I32, 1, op, "anchors");
     require_vector(frontiers, DType::I32, 1, op, "frontiers");
     require_vector(rope_starts, DType::I32, 1, op, "rope_starts");
-    const std::int32_t width = steps + 1;
+    const std::int32_t width = tree_tokens.ne[0];
+    if (width < steps + 1 || width > 16) {
+        throw std::invalid_argument("speculative_tree_build_plan: invalid physical width");
+    }
     require_vector(tree_tokens, DType::I32, width, op, "tree_tokens");
     require_vector(parents, DType::I32, width, op, "parents");
     require_vector(depths, DType::I32, width, op, "depths");

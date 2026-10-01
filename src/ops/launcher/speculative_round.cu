@@ -208,7 +208,7 @@ void speculative_tree_build_plan_launch(
         static_cast<const std::int32_t*>(anchors.data),
         static_cast<const std::int32_t*>(frontiers.data),
         static_cast<const std::int32_t*>(rope_starts.data),
-        candidate_ids.ne[1], node_budget, spine,
+        candidate_ids.ne[1], node_budget, spine, tree_tokens.ne[0],
         static_cast<std::int32_t*>(tree_tokens.data),
         static_cast<std::int32_t*>(parents.data),
         static_cast<std::int32_t*>(depths.data),

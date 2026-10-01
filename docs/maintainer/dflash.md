@@ -219,13 +219,13 @@ path:
 --spec dflash2 --draft-tokens 15 --spec-tree lattice --spec-tree-nodes 15 --spec-tree-spine 7
 ```
 
-The first runtime implementation deliberately has a narrow execution contract:
+The runtime tree has the following execution contract:
 
 - one request row (`C1`);
-- greedy target sampling with no presence/frequency penalty;
+- greedy or positive-temperature target sampling with no presence/frequency penalty;
 - no lookup takeover in the same round;
-- `--spec-tree-nodes` equals `--draft-tokens`, so the physical ReplaySSM record width remains
-  `K+1 <= 16`;
+- `--spec-tree-nodes` is at most `--draft-tokens`; the physical ReplaySSM width remains
+  startup `K+1 <= 16` while the active tree can be narrower;
 - the tree arm is not CUDA-Graph captured yet. Unsupported rounds use the existing chain path and
   increment `tree_fallback_rounds`.
 
@@ -252,11 +252,11 @@ The target is hybrid, so a tree is not just an attention mask:
 4. **DFlash target taps.** Target feature layers are captured in tree-node order and gathered into
    accepted-path order before the round returns, preserving the existing pending-feature contract.
 
-This correctness-first implementation performs two stream synchronizations: one after selector
-lattice production for host tree construction and one after target logits for host path walking.
-Those costs are intentional A/B-visible overhead. A later optimization can move tree construction
-and acceptance to device code and add fixed node-budget graph families without changing the state
-contract above.
+Tree construction and target-token acceptance now run as tiny device control kernels on the same
+decode stream, removing both mid-round host synchronizations. The physical allocation remains one
+K15/16-row family. When `--spec-router stair` is enabled, Tree-StairCut varies only the active
+target-tree width across the configured tiers (default 3/7/11/15 nodes); it does not allocate a
+second drafter or wider resident buffers.
 
 ## Target verification and committed prefix
 

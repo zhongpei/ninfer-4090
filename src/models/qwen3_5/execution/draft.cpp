@@ -808,10 +808,12 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
 
     // Always run the one resident wide drafter. Only the target tree budget changes; no second
     // b8 checkpoint or wider persistent tree buffer is required on a 24GB card.
-    Tensor lattice = frame.lattice_scores.slice(3, 0, 1);
-    propose_batch_impl(state, frame, 1, k, envelopes, &lattice);
-
-    Tensor candidates       = frame.candidate_ids.slice(2, 0, 1);
+    Tensor lattice_full = frame.lattice_scores.slice(3, 0, 1);
+    propose_batch_impl(state, frame, 1, k, envelopes, &lattice_full);
+    // Plan only active draft depths while retaining the startup K+1 output vectors.
+    Tensor lattice = lattice_full.slice(2, 0, static_cast<std::int32_t>(options.nodes));
+    Tensor candidates = frame.candidate_ids.slice(2, 0, 1)
+                            .slice(1, 0, static_cast<std::int32_t>(options.nodes));
     Tensor verify_ids       = frame.verify_ids.slice(1, 0, 1);
     Tensor target_positions = frame.verify_positions.slice(1, 0, 1);
     Tensor target_rope      = frame.target_rope_positions.slice(1, 0, 1);
