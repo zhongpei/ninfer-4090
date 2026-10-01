@@ -184,6 +184,10 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         lookup.corpus_weight < 0.0F || lookup.corpus_samples == 0) {
         throw std::invalid_argument("invalid context-lookup drafting parameter");
     }
+    if (!lookup.persistent_path.empty() && lookup.persistent_tokens == 0) {
+        throw std::invalid_argument(
+            "--lookup-persistent-path requires --lookup-persistent-tokens > 0");
+    }
     if (lookup.strategy == LookupDraftStrategy::Vote && options.lookup_ngram != 0 &&
         options.lookup_ngram > lookup.max_order) {
         throw std::invalid_argument(
