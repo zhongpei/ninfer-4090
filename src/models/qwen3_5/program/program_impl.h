@@ -18,6 +18,7 @@
 #include "models/qwen3_5/program/speculative/stair_router.h"
 #include "models/qwen3_5/program/speculative/lookup_draft.h"
 #include "models/qwen3_5/program/speculative/tree_plan.h"
+#include "models/qwen3_5/program/speculative/teacher_trace.h"
 #include "models/qwen3_5/program/planning/resource_projection.h"
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
@@ -413,6 +414,7 @@ struct RequestControl {
     struct LookupRoundState {
         std::uint32_t full_accept_run = 0;
     } lookup_round;
+    std::uint64_t teacher_trace_id = 0;
     detail::PhysicalResources active_resources;
     detail::PhysicalResources optional_resources;
     bool publish_continuation = true;
@@ -592,6 +594,8 @@ public:
     ::ninfer::qwen3_5::LookupCorpusStore lookup_corpus;
     StairRouterState engine_stair_router;
     TreeStairRouterState engine_tree_stair_router;
+    std::unique_ptr<DFlashTeacherTraceWriter> dflash_teacher_trace;
+    std::uint64_t next_teacher_trace_id = 1;
     const float rope_scaling_factor;
     const std::uint32_t rope_scaling_original_context;
 
