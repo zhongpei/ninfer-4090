@@ -13,12 +13,14 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include <spdlog/logger.h>
+#include <nlohmann/json.hpp>
 
 namespace {
 
@@ -72,6 +74,41 @@ void write_teacher_capture(const std::filesystem::path& prefix,
     if (!meta) {
         throw std::runtime_error("failed writing teacher metadata: " + metadata_path.string());
     }
+}
+
+std::string teacher_safe_name(std::string_view input, std::size_t index) {
+    std::ostringstream out;
+    out << std::setfill('0') << std::setw(6) << index;
+    if (!input.empty()) out << '-';
+    for (char ch : input) {
+        const unsigned char value = static_cast<unsigned char>(ch);
+        if ((value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+            (value >= '0' && value <= '9') || ch == '-' || ch == '_') {
+            out << ch;
+        } else {
+            out << '_';
+        }
+    }
+    return out.str();
+}
+
+void write_teacher_manifest(const std::filesystem::path& prefix,
+                            const nlohmann::ordered_json& records) {
+    auto path = prefix;
+    path += ".manifest.json";
+    const auto parent = path.parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent);
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) throw std::runtime_error("cannot create teacher manifest: " + path.string());
+    nlohmann::ordered_json manifest = {
+        {"version", 1},
+        {"source", "ninfer-target"},
+        {"tap_semantics", "after-layer-residual"},
+        {"distribution", "top16-renormalized"},
+        {"records", records},
+    };
+    out << manifest.dump(2) << '\n';
+    if (!out) throw std::runtime_error("failed writing teacher manifest: " + path.string());
 }
 
 std::string format_seconds(double seconds) {
@@ -343,12 +380,15 @@ int main(int argc, char** argv) {
 
     try {
 
-        ninfer::PromptInput input =
-            cli.messages_path.empty()
-                ? ninfer::product::prompt_from_text(cli.prompt, cli.enable_thinking)
-                : ninfer::product::prompt_from_messages(cli.messages_path, cli.enable_thinking,
-                                                        cli.enable_vision);
-        input.options.reasoning_effort = cli.reasoning_effort;
+        std::optional<ninfer::PromptInput> input;
+        if (cli.teacher_jsonl.empty()) {
+            input.emplace(
+                cli.messages_path.empty()
+                    ? ninfer::product::prompt_from_text(cli.prompt, cli.enable_thinking)
+                    : ninfer::product::prompt_from_messages(
+                          cli.messages_path, cli.enable_thinking, cli.enable_vision));
+            input->options.reasoning_effort = cli.reasoning_effort;
+        }
 
         ninfer::RequestOptions request;
         request.execution.sampling                = cli.sampling;
@@ -404,17 +444,66 @@ int main(int argc, char** argv) {
         engine.reset_memory_peaks();
 
         if (!cli.teacher_out.empty()) {
-            std::vector<ninfer::TokenId> tokens = engine.tokenize_text(cli.prompt);
-            const ninfer::DFlashTeacherCapture capture =
-                engine.record_dflash_teacher(std::move(tokens));
-            write_teacher_capture(cli.teacher_out, capture);
-            std::cerr << "teacher capture: " << capture.predictor_count
-                      << " predictors, top" << capture.top_k
-                      << ", prefix=" << cli.teacher_out.string() << '\n';
+            if (cli.teacher_jsonl.empty()) {
+                std::vector<ninfer::TokenId> tokens = engine.tokenize_text(cli.prompt);
+                const ninfer::DFlashTeacherCapture capture =
+                    engine.record_dflash_teacher(std::move(tokens));
+                write_teacher_capture(cli.teacher_out, capture);
+                std::cerr << "teacher capture: " << capture.predictor_count
+                          << " predictors, top" << capture.top_k
+                          << ", prefix=" << cli.teacher_out.string() << '\n';
+                return 0;
+            }
+
+            std::ifstream source(cli.teacher_jsonl);
+            if (!source) {
+                throw std::runtime_error(
+                    "cannot open teacher JSONL: " + cli.teacher_jsonl.string());
+            }
+            nlohmann::ordered_json manifest = nlohmann::ordered_json::array();
+            std::string line;
+            std::size_t row = 0;
+            while (std::getline(source, line)) {
+                if (line.empty()) continue;
+                const nlohmann::ordered_json value = nlohmann::ordered_json::parse(line);
+                const std::string text_value =
+                    value.is_string() ? value.get<std::string>()
+                                      : value.value("text", std::string{});
+                if (text_value.empty()) {
+                    throw std::invalid_argument(
+                        "teacher JSONL row has no non-empty text");
+                }
+                const std::string name =
+                    value.is_object() ? value.value("name", std::string{}) : std::string{};
+                const std::string safe = teacher_safe_name(name, row);
+                auto item_prefix = cli.teacher_out;
+                item_prefix += "." + safe;
+                std::vector<ninfer::TokenId> tokens = engine.tokenize_text(text_value);
+                const ninfer::DFlashTeacherCapture capture =
+                    engine.record_dflash_teacher(std::move(tokens));
+                write_teacher_capture(item_prefix, capture);
+
+                nlohmann::ordered_json item = {
+                    {"name", name.empty() ? safe : name},
+                    {"prefix", item_prefix.filename().string()},
+                    {"kind", value.is_object() ? value.value("kind", "corpus") : "corpus"},
+                    {"topic", value.is_object() ? value.value("topic", "prose") : "prose"},
+                    {"split", value.is_object() ? value.value("split", "train") : "train"},
+                    {"tokens", capture.token_ids.size()},
+                    {"predictors", capture.predictor_count},
+                };
+                manifest.push_back(std::move(item));
+                ++row;
+                std::cerr << "teacher row " << row << ": "
+                          << capture.predictor_count << " predictors\n";
+            }
+            write_teacher_manifest(cli.teacher_out, manifest);
+            std::cerr << "teacher manifest: " << row << " records, prefix="
+                      << cli.teacher_out.string() << '\n';
             return 0;
         }
 
-        ninfer::PreparedPrompt prompt = engine.prepare(std::move(input));
+        ninfer::PreparedPrompt prompt = engine.prepare(std::move(*input));
 
         StreamingSink sink;
         ninfer::GenerationHandle generation = engine.submit(std::move(prompt), std::move(request),
