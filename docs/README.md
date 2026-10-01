@@ -53,6 +53,7 @@ other references own narrower contracts:
 | [Qwen3.5 model](maintainer/qwen3_5-model.md) | Dense/MoE mathematics, instance config, logical parameters, MTP, Vision and state semantics |
 | [DFlash and DFlash2](maintainer/dflash.md) | conditioning, masked draft computation, proposal distributions and backend state |
 | [DFlash2 training](maintainer/dflash2-training.md) | teacher taps, offline CE+KL distillation, b8/b16 export and speculative-tree calibration |
+| [Runtime DFlash2 tree verification](maintainer/runtime-tree-verification.md) | lattice tree proposal, DFS KV reuse, ancestor-aware ReplaySSM and accepted-path commit |
 | [Adaptive speculative routing](maintainer/speculative-routing.md) | fixed-vs-Stair A/B policy, verify-cost calibration and per-request online learning |
 | [Multi-source lookup drafting](maintainer/lookup-drafting.md) | recent/vote suffix memory, persistent/corpus sources, DFlash replace/head-skip and deep copy |
 | [Resource scheduling and context cache](maintainer/resource-scheduling-and-context-cache.md) | candidate selection, retention, materialization and Device/Host checkpoint policy |
