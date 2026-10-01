@@ -1137,7 +1137,21 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
             z.view({dimension(config_.gdn->value_width()), width, active_sequence_batch_});
         Tensor conv_states = state_.layer_view(static_cast<std::uint32_t>(gidx)).conv;
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
-        if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
+        if (active_tree_parents_ != nullptr) {
+            if (gdn_state_action_ != GdnStateAction::RecordForReplay || replay_records_ == nullptr ||
+                active_sequence_batch_ != 1) {
+                throw std::logic_error("Tree GDN requires C1 ReplaySSM record mode");
+            }
+            // Materialize the parent projection once, then apply the convolution along each
+            // node's ancestor chain rather than along DFS storage order.
+            Tensor raw_qkv = workspace::gdn_prefill_conv(work_, config_, T);
+            Tensor z_flat = z.view({dimension(config_.gdn->value_width), T});
+            gdn_projection(h, p, raw_qkv, z_flat, work_, s, projection_basis);
+            GdnReplayRecordLayer records = replay_records_->layer(gidx, 1);
+            ops::gdn_projected_tree_conv_record(
+                raw_qkv, p.convolution, conv_states, *active_linear_state_source_slots_,
+                *active_tree_parents_, records.conv, query_output, key_output, value_output, s);
+        } else if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
             if (replay_records_ == nullptr) {
                 throw std::logic_error("Replay-record GDN has no record storage");
             }
@@ -1196,12 +1210,21 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
         if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
             GdnReplayRecordLayer records = replay_records_->layer(gidx, active_sequence_batch_);
-            ops::gated_delta_net_replay_record(
-                q_batch, k_batch, v_batch, g_batch, beta_batch,
-                static_cast<float>(
-                    1.0 / std::sqrt(static_cast<double>(config_.gdn->linear_key_head_dim))),
-                recurrent_states, valid, *active_linear_state_source_slots_, records.key,
-                records.value, records.gate, out_batch, s);
+            if (active_tree_parents_ != nullptr) {
+                ops::gated_delta_net_tree_replay_record(
+                    q_batch, k_batch, v_batch, g_batch, beta_batch,
+                    static_cast<float>(
+                        1.0 / std::sqrt(static_cast<double>(config_.gdn->linear_key_head_dim))),
+                    recurrent_states, *active_linear_state_source_slots_, *active_tree_parents_,
+                    records.key, records.value, records.gate, out_batch, s);
+            } else {
+                ops::gated_delta_net_replay_record(
+                    q_batch, k_batch, v_batch, g_batch, beta_batch,
+                    static_cast<float>(
+                        1.0 / std::sqrt(static_cast<double>(config_.gdn->linear_key_head_dim))),
+                    recurrent_states, valid, *active_linear_state_source_slots_, records.key,
+                    records.value, records.gate, out_batch, s);
+            }
         } else {
             ops::gated_delta_net_batch_update(
                 q_batch, k_batch, v_batch, g_batch, beta_batch,
