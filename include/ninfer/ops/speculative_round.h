@@ -211,7 +211,7 @@ void speculative_tree_accept_greedy(const Tensor& target_tokens, const Tensor& t
                                     const Tensor& parents, std::int32_t live_rows,
                                     Tensor& path_nodes, Tensor& licensed_tokens,
                                     Tensor& licensed_counts, Tensor& accepted_drafts,
-                                    Tensor& path_count, Tensor& last_node, cudaStream_t stream);
+                                    Tensor& path_count, Tensor& compact_last_index, cudaStream_t stream);
 
 /**
  * Rewrite the live DFlash2 proposal distribution as q=1 on the supplied draft token.
