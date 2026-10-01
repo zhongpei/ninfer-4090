@@ -16,3 +16,7 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/sliding_window/launch.cu"
 )
 
+# Parallelize NVCC optimization for the large small-T template unit without
+# multiplying compiler threads for every CUDA job in a parallel build.
+set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/small_t.cu"
+  APPEND PROPERTY COMPILE_OPTIONS "$<$<CUDA_COMPILER_ID:NVIDIA>:--split-compile=8>")
