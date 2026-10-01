@@ -231,6 +231,17 @@ void print_generation_summary(const ninfer::GenerationResult& result,
             }
             print_metric(backend + " accepted by pos", positions.str());
         }
+        if (speculative.tree_rounds != 0 || speculative.tree_fallback_rounds != 0) {
+            print_metric("tree rounds", std::to_string(speculative.tree_rounds));
+            print_metric("tree fallback rounds",
+                         std::to_string(speculative.tree_fallback_rounds));
+            print_metric("tree nodes", std::to_string(speculative.tree_nodes));
+            print_metric("tree accepted drafts",
+                         std::to_string(speculative.tree_accepted_drafts));
+            print_metric("tree acceptance rate",
+                         format_percent(speculative.tree_accepted_drafts,
+                                        speculative.tree_nodes));
+        }
         if (speculative.lookup_queries != 0) {
             print_metric("lookup queries", std::to_string(speculative.lookup_queries));
             print_metric("lookup hits", std::to_string(speculative.lookup_hits));
