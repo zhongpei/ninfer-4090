@@ -126,9 +126,9 @@ std::string usage_text(const char* argv0) {
            "       [--spec-tree off|lattice] [--spec-tree-nodes N] [--spec-tree-spine N]\n"
            "       [--spec-stair-draft-cost F] [--spec-stair-prior F] [--spec-stair-prior-weight F]\n"
            "       [--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F]\n"
-           "       [--lookup-ngram N] [--lookup-strategy recent|vote] [--lookup-dflash off|replace|skip]\n"
+           "       [--lookup-ngram N] [--lookup-strategy recent|vote] [--lookup-dflash off|replace|skip|merge]\n"
            "       [--lookup-max-order N] [--lookup-max-matches N] [--lookup-min-support N] [--lookup-min-confidence F]\n"
-           "       [--lookup-base-drafts N] [--lookup-deep-after N] [--lookup-deep-drafts N]\n"
+           "       [--lookup-base-drafts N] [--lookup-deep-after N] [--lookup-deep-drafts N] [--lookup-merge-nodes N]\n"
            "       [--lookup-persistent-tokens N] [--lookup-persistent-path PATH] [--lookup-corpus-prefix PATH] [--lookup-corpus-weight F] [--lookup-corpus-samples N]\n"
            "       [--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4]\n"
            "       [--gdn-state-fp16] [--mlp-a8-decode] [--no-prefill-a8]\n"
@@ -299,6 +299,8 @@ Options parse_options(int argc, char** argv) {
                 parse_u32(value(arg), "lookup-deep-after", true);
         } else if (arg == "--lookup-deep-drafts") {
             options.speculative.lookup.deep_drafts = parse_u32(value(arg), "lookup-deep-drafts");
+        } else if (arg == "--lookup-merge-nodes") {
+            options.speculative.lookup.merge_nodes = parse_u32(value(arg), "lookup-merge-nodes");
         } else if (arg == "--lookup-persistent-tokens") {
             options.speculative.lookup.persistent_tokens =
                 parse_u32(value(arg), "lookup-persistent-tokens", true);
