@@ -642,7 +642,7 @@ DFlashTeacherCapture ProgramImpl::causal_teacher(
         throw std::invalid_argument("causal teacher target layer list is empty or too large");
     }
     const auto layer_count = static_cast<std::uint32_t>(
-        parameters.model.config().text.blocks.size());
+        parameters.model.config().text.num_hidden_layers);
     std::uint32_t previous = 0;
     for (std::size_t i = 0; i < target_layer_ids.size(); ++i) {
         const std::uint32_t layer = target_layer_ids[i];
