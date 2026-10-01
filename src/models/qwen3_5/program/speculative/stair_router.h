@@ -72,6 +72,53 @@ struct PersistentSpecRouterState {
     TreeStairRouterState tree;
 };
 
+inline void merge_stair_router_delta(StairRouterState& aggregate,
+                                     const StairRouterState& current,
+                                     const StairRouterState& seed) noexcept {
+    aggregate.rounds += current.rounds - seed.rounds;
+    for (std::size_t i = 0; i < aggregate.attempted.size(); ++i) {
+        aggregate.attempted[i] += current.attempted[i] - seed.attempted[i];
+        aggregate.accepted[i] += current.accepted[i] - seed.accepted[i];
+    }
+    for (std::size_t i = 0; i < aggregate.selected.size(); ++i) {
+        aggregate.selected[i] += current.selected[i] - seed.selected[i];
+    }
+    if (current.rounds != seed.rounds) { aggregate.last_extent = current.last_extent; }
+}
+
+inline void merge_tree_stair_router_delta(TreeStairRouterState& aggregate,
+                                          const TreeStairRouterState& current,
+                                          const TreeStairRouterState& seed) noexcept {
+    aggregate.rounds += current.rounds - seed.rounds;
+    for (std::size_t i = 0; i < aggregate.observed.size(); ++i) {
+        aggregate.observed[i] += current.observed[i] - seed.observed[i];
+        aggregate.committed_tokens[i] += current.committed_tokens[i] - seed.committed_tokens[i];
+        aggregate.selected[i] += current.selected[i] - seed.selected[i];
+    }
+    if (current.rounds != seed.rounds) { aggregate.last_extent = current.last_extent; }
+}
+
+// An admitted request owns a frozen engine snapshot plus its own observations. Only successful
+// completion publishes those observations. All counters grow monotonically from the seed.
+struct RequestSpecRouterState {
+    PersistentSpecRouterState current;
+    PersistentSpecRouterState seed;
+
+    void begin(SpeculativeRouterScope scope, const PersistentSpecRouterState& aggregate) noexcept {
+        current = scope == SpeculativeRouterScope::Engine ? aggregate : PersistentSpecRouterState{};
+        seed = current;
+    }
+
+    void finish(SpeculativeRouterScope scope, PersistentSpecRouterState& aggregate,
+                bool successful) noexcept {
+        if (!successful || scope != SpeculativeRouterScope::Engine) { return; }
+        merge_stair_router_delta(aggregate.chain, current.chain, seed.chain);
+        merge_tree_stair_router_delta(aggregate.tree, current.tree, seed.tree);
+        // The request's snapshot stays fixed; advancing the publication seed makes retries inert.
+        seed = current;
+    }
+};
+
 inline bool load_persistent_spec_router_state(const std::filesystem::path& path,
                                               PersistentSpecRouterState& state) {
     if (path.empty() || !std::filesystem::exists(path)) { return false; }

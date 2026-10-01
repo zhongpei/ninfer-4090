@@ -36,7 +36,7 @@ serves, not an assumed BF16/HF target. The CLI can record the five DFlash target
 prepared target head's stable top-16 during root prefill:
 
 ```bash
-ninfer-cli out/bonsai2-dflash2-b16.ninfer \
+ninfer out/bonsai2-dflash2-b16.ninfer \
   --prompt "$(cat corpus.txt)" \
   --spec dflash2 --draft-tokens 15 \
   --dflash-teacher-out train/native-teacher \

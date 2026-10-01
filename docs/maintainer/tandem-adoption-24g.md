@@ -48,7 +48,7 @@ For Ternary Bonsai / T2 / mixed Q5 artifacts, collect supervision from the artif
 actually serve:
 
 ```bash
-ninfer-cli MODEL.ninfer \
+ninfer MODEL.ninfer \
   --prompt "$(cat corpus.txt)" \
   --spec dflash2 --draft-tokens 15 \
   --dflash-teacher-out train/native-teacher \

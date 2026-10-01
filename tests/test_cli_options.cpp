@@ -158,6 +158,11 @@ int main() {
                           parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
                                  "--spec-router-state", "state/router.bin"});
                       }), "CLI accepted router persistence with request scope");
+    for (const char* removed : {"--spec-stair-profile", "--lookup-history-path"}) {
+        failures += check(rejects([&] {
+                              parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", removed, "state.bin"});
+                          }), "CLI accepted a superseded persistence interface");
+    }
     const ninfer::cli::Options route =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "mtp", "--draft-tokens",
                "3", "--lookup-ngram", "5", "--prefill-cublas", "--no-prefill-cublas-projections"});

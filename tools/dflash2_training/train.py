@@ -325,6 +325,22 @@ def main():
     print("accept/block before " +
           " ".join(f"{k}={v:.3f}" for k, v in sorted(before.items())), flush=True)
     if args.eval_only:
+        out_dir = Path(args.out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with open(out_dir / "training_metrics.json", "w", encoding="utf-8") as f:
+            json.dump({
+                "version": 1,
+                "mode": "eval-only",
+                "block": args.block,
+                "train": args.train,
+                "optimizer": args.optimizer,
+                "data_fingerprint": data_fp,
+                "before": before,
+                "final": before,
+                "best": float(before["ALL"]),
+                "drafter": args.drafter,
+                "target": args.target,
+            }, f, indent=2)
         return
 
     optimizer = make_optimizer(params, args)
@@ -398,6 +414,23 @@ def main():
     print("accept/block final " +
           " ".join(f"{k}={v:.3f}" for k, v in sorted(final.items())), flush=True)
     print(f"best={best:.3f} checkpoint={args.out}", flush=True)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(out_dir / "training_metrics.json", "w", encoding="utf-8") as f:
+        json.dump({
+            "version": 1,
+            "mode": "train",
+            "block": args.block,
+            "train": args.train,
+            "optimizer": args.optimizer,
+            "steps": args.steps,
+            "data_fingerprint": data_fp,
+            "before": before,
+            "final": final,
+            "best": best,
+            "drafter": args.drafter,
+            "target": args.target,
+        }, f, indent=2)
     if args.resume:
         save_resume(args.resume, module, optimizer, args.steps, best, rng, data_fp, args)
 

@@ -9,7 +9,9 @@ ninfer-serve MODEL.ninfer \
   --spec-router stair \
   --spec-stair-widths 3,7,11,15 \
   --spec-stair-costs 1.00,1.02,1.05,1.10 \
-  --spec-stair-draft-cost 0.25
+  --spec-stair-draft-cost 0.25 \
+  --spec-router-scope engine \
+  --spec-router-state profiles/qwen38-4090.state
 ```
 
 Without `--spec-router stair`, routing is `fixed` and the previous maximum-K behavior is
@@ -101,6 +103,22 @@ fixed baseline with the adaptive policy on model-generated text and records outp
 acceptance, tokens/round and decode throughput.
 
 For each intended context class, measure at least the configured rungs and convert the median target
-verify times to one common relative scale. Draft cost must include the actual wide DFlash2 proposal
-path. A/B comparisons should hold model artifact, prompt, KV format, sampling and CUDA Graph mode
-constant.
+verify times to one common relative scale. A/B comparisons should hold model artifact, prompt, KV
+format, sampling and CUDA Graph mode constant.
+
+For the K15/24 GB path, `scripts/sweeps/dflash2-stair-cost-calibration.ps1` holds the neural
+DFlash2 proposal at K15 and forces each 3/7/11/15 target rung independently. Feed its CSV to:
+
+```bash
+python -m tools.dflash2_training.calibrate_4090 sweep.csv --out profiles/4090-stair.json
+```
+
+The calibrator uses median total seconds/round as the effective routing cost and therefore emits
+`--spec-stair-draft-cost 0` so the common wide-drafter cost is not counted twice. It also refuses
+to emit a profile if greedy output hashes differ across forced rungs.
+
+With `--spec-router-scope engine --spec-router-state PATH`, chain and tree counters are loaded
+at startup. Each request snapshots the corresponding counters at admission and learns locally.
+Only the statistics added by a successfully finished request are merged into the Engine state;
+concurrent requests do not alter each other’s current decisions. The snapshot is advisory
+performance state; a save failure does not turn a completed generation into a failure.

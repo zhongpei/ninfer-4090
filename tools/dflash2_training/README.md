@@ -26,6 +26,20 @@ python -m tools.dflash2_training.export_ninfer \
 python -m tools.dflash2_training.record_lattice \
   --drafter DFLASH2_B16 --target MODEL --data DATA --out lattice.jsonl
 python -m tools.dflash2_training.calibrate_tree lattice.jsonl
+
+# 5. Gate and convert a trained b16 drafter. Thresholds are operator policy.
+python -m tools.dflash2_training.production_gate \
+  --model MODEL --drafter DFLASH2_B16 --out qwen38-b16.ninfer \
+  --min-best 2.0 --min-improvement 0.1
+
+# Optional exact greedy-output gate against the same target without speculation:
+python -m tools.dflash2_training.production_gate \
+  --model MODEL --drafter DFLASH2_B16 --out qwen38-b16.ninfer \
+  --ninfer ./build-ninja/apps/ninfer --baseline-artifact qwen38-target.ninfer
+
+# RTX 4090 Stair-cost conversion after running the forced-rung PowerShell sweep:
+python -m tools.dflash2_training.calibrate_4090 profiles/sweeps/staircost.csv \
+  --out profiles/4090-stair.json
 ```
 
 See `docs/maintainer/dflash2-training.md` for the tap contract, loss, block-16 rationale, memory
@@ -38,7 +52,7 @@ state transaction.
 For a quantized/Ternary target, prefer collecting teacher distributions from the actual artifact:
 
 ```bash
-ninfer-cli MODEL.ninfer \
+ninfer MODEL.ninfer \
   --prompt "$(cat corpus.txt)" \
   --spec dflash2 --draft-tokens 15 \
   --dflash-teacher-out train/native-teacher \

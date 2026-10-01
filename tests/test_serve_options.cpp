@@ -42,6 +42,12 @@ int main() {
         parse({"ninfer-serve", "model.ninfer", "--spec-router-state", "state/router.bin"});
     } catch (const std::invalid_argument&) { request_persistence_rejected = true; }
     failures += check(request_persistence_rejected, "serve accepted router persistence with request scope");
+    for (const char* removed : {"--spec-stair-profile", "--lookup-history-path"}) {
+        bool rejected = false;
+        try { parse({"ninfer-serve", "model.ninfer", removed, "state.bin"}); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "serve accepted a superseded persistence interface");
+    }
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");
