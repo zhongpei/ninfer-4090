@@ -41,7 +41,8 @@ void speculative_tree_gather_bf16_dynamic_launch(const Tensor& source,
                                                  cudaStream_t stream);
 void speculative_tree_build_plan_launch(
     const Tensor& candidate_ids, const Tensor& lattice_scores, const Tensor& anchors,
-    const Tensor& frontiers, const Tensor& rope_starts, std::int32_t node_budget,
+    const Tensor& frontiers, const Tensor& rope_starts, const Tensor& lookup_tokens,
+    std::int32_t lookup_count, float lookup_confidence, std::int32_t node_budget,
     std::int32_t spine, Tensor& tree_tokens, Tensor& parents, Tensor& depths,
     Tensor& cache_positions, Tensor& rope_positions, cudaStream_t stream);
 void speculative_tree_accept_greedy_launch(
