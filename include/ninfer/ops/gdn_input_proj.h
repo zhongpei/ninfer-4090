@@ -314,4 +314,17 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& query_key_value_z
                                 Tensor& conv_record, Tensor& query, Tensor& key, Tensor& value,
                                 Tensor& z, WorkspaceArena& workspace, cudaStream_t stream);
 
+/**
+ * Tree convolution over an already materialized q/k/v projection [C,T], T<=16, B=1.
+ * parents is I32 [T] in topological/DFS order with parents[0]=-1. Each node uses the last three
+ * projected inputs on its own ancestor path plus the immutable source convolution history. The
+ * current projected column is written to conv_record [C,T,1].
+ */
+void gdn_projected_tree_conv_record(const Tensor& projected, const Tensor& conv_weight,
+                                    const Tensor& conv_states,
+                                    const Tensor& initial_state_slots,
+                                    const Tensor& parents, Tensor& conv_record,
+                                    Tensor& query, Tensor& key, Tensor& value,
+                                    cudaStream_t stream);
+
 } // namespace ninfer::ops
