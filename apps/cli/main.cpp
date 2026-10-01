@@ -9,15 +9,70 @@
 
 #include <cstdint>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <spdlog/logger.h>
 
 namespace {
+
+template <class T>
+void write_teacher_array(const std::filesystem::path& prefix, std::string_view suffix,
+                         const std::vector<T>& values) {
+    auto path = prefix;
+    path += suffix;
+    const auto parent = path.parent_path();
+    if (!parent.empty()) { std::filesystem::create_directories(parent); }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) { throw std::runtime_error("cannot create teacher array: " + path.string()); }
+    if (!values.empty()) {
+        out.write(reinterpret_cast<const char*>(values.data()),
+                  static_cast<std::streamsize>(values.size() * sizeof(T)));
+    }
+    if (!out) { throw std::runtime_error("failed writing teacher array: " + path.string()); }
+}
+
+void write_teacher_capture(const std::filesystem::path& prefix,
+                           const ninfer::DFlashTeacherCapture& capture) {
+    write_teacher_array(prefix, ".tokens.i32", capture.token_ids);
+    write_teacher_array(prefix, ".features.bf16", capture.fused_bf16);
+    write_teacher_array(prefix, ".labels.i32", capture.labels);
+    write_teacher_array(prefix, ".top_ids.i32", capture.top_ids);
+    write_teacher_array(prefix, ".top_logits.f32", capture.top_logits);
+
+    auto metadata_path = prefix;
+    metadata_path += ".json";
+    const auto parent = metadata_path.parent_path();
+    if (!parent.empty()) { std::filesystem::create_directories(parent); }
+    std::ofstream meta(metadata_path, std::ios::trunc);
+    if (!meta) {
+        throw std::runtime_error("cannot create teacher metadata: " + metadata_path.string());
+    }
+    meta << "{\n"
+         << "  \"version\": 1,\n"
+         << "  \"source\": \"ninfer-target\",\n"
+         << "  \"tap_semantics\": \"after-layer-residual\",\n"
+         << "  \"distribution\": \"top16-renormalized\",\n"
+         << "  \"token_count\": " << capture.token_ids.size() << ",\n"
+         << "  \"predictor_count\": " << capture.predictor_count << ",\n"
+         << "  \"hidden_size\": " << capture.hidden_size << ",\n"
+         << "  \"top_k\": " << capture.top_k << ",\n"
+         << "  \"target_layer_ids\": [";
+    for (std::size_t i = 0; i < capture.target_layer_ids.size(); ++i) {
+        if (i != 0) meta << ',';
+        meta << capture.target_layer_ids[i];
+    }
+    meta << "]\n}\n";
+    if (!meta) {
+        throw std::runtime_error("failed writing teacher metadata: " + metadata_path.string());
+    }
+}
 
 std::string format_seconds(double seconds) {
     return ninfer::product::format_pretty_duration(seconds);
@@ -336,9 +391,28 @@ int main(int argc, char** argv) {
         engine_options.context_cache.host_kv_capacity_bytes = 0;
         engine_options.startup_observer                     = startup_log.observer();
 
+        if (!cli.teacher_out.empty()) {
+            engine_options.purpose = ninfer::EnginePurpose::CausalScoring;
+            engine_options.use_cuda_graph = false;
+            engine_options.context_cache.enabled = false;
+            engine_options.context_cache.host_state_slots = 0;
+            engine_options.context_cache.host_kv_capacity_bytes = 0;
+        }
+
         ninfer::Engine engine(std::move(engine_options));
         startup_log.engine_ready(engine.load_summary());
         engine.reset_memory_peaks();
+
+        if (!cli.teacher_out.empty()) {
+            std::vector<ninfer::TokenId> tokens = engine.tokenize_text(cli.prompt);
+            const ninfer::DFlashTeacherCapture capture =
+                engine.record_dflash_teacher(std::move(tokens));
+            write_teacher_capture(cli.teacher_out, capture);
+            std::cerr << "teacher capture: " << capture.predictor_count
+                      << " predictors, top" << capture.top_k
+                      << ", prefix=" << cli.teacher_out.string() << '\n';
+            return 0;
+        }
 
         ninfer::PreparedPrompt prompt = engine.prepare(std::move(input));
 
