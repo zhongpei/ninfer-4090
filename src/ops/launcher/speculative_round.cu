@@ -189,7 +189,8 @@ void speculative_tree_build_device_launch(const Tensor& candidates, const Tensor
 void speculative_tree_accept_device_launch(const Tensor& verify_ids, const Tensor& parents,
                                            const Tensor& target_tokens, Tensor& path_nodes,
                                            Tensor& licensed_tokens, Tensor& licensed_counts,
-                                           Tensor& accepted_drafts, cudaStream_t stream) {
+                                           Tensor& accepted_drafts, Tensor& last_node,
+                                           cudaStream_t stream) {
     speculative_tree_accept_device_kernel<<<1, 1, 0, stream>>>(
         static_cast<const std::int32_t*>(verify_ids.data),
         static_cast<const std::int32_t*>(parents.data),
@@ -197,7 +198,22 @@ void speculative_tree_accept_device_launch(const Tensor& verify_ids, const Tenso
         static_cast<std::int32_t*>(path_nodes.data),
         static_cast<std::int32_t*>(licensed_tokens.data),
         static_cast<std::int32_t*>(licensed_counts.data),
-        static_cast<std::int32_t*>(accepted_drafts.data));
+        static_cast<std::int32_t*>(accepted_drafts.data),
+        static_cast<std::int32_t*>(last_node.data));
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void speculative_tree_gather_bf16_counted_launch(const Tensor& source, const Tensor& path_nodes,
+                                                 const Tensor& count, Tensor& destination,
+                                                 cudaStream_t stream) {
+    constexpr int kBlock = 256;
+    const dim3 grid(static_cast<unsigned>(std::max(1, div_up(source.ne[0], kBlock))),
+                    static_cast<unsigned>(source.ne[1]));
+    speculative_tree_gather_bf16_counted_kernel<<<grid, kBlock, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(source.data),
+        static_cast<const std::int32_t*>(path_nodes.data),
+        static_cast<const std::int32_t*>(count.data),
+        static_cast<__nv_bfloat16*>(destination.data), source.ne[0], source.ne[1]);
     CUDA_CHECK(cudaGetLastError());
 }
 
