@@ -764,10 +764,10 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
         state.execution.replay_records == nullptr) {
         throw std::invalid_argument("DFlash2 tree decode received an unsupported runtime profile");
     }
-    if (state.host_ingress.sampling[0].temperature > 0.0F ||
-        state.host_ingress.sampling[0].presence_penalty != 0.0F ||
+    if (state.host_ingress.sampling[0].presence_penalty != 0.0F ||
         state.host_ingress.sampling[0].frequency_penalty != 0.0F) {
-        throw std::invalid_argument("DFlash2 tree decode currently requires raw greedy sampling");
+        throw std::invalid_argument(
+            "DFlash2 tree decode requires zero presence/frequency penalties");
     }
 
     qwen3_5::DFlashDecodeState& frame = state.frame;
