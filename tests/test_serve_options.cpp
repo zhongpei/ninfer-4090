@@ -169,6 +169,13 @@ int main() {
                           tree.speculative.tree.spine == 7,
                       "serve options did not preserve runtime tree controls");
 
+    const ServeOptions tree_cut = parse(
+        {"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "15",
+         "--spec-tree", "lattice", "--spec-tree-nodes", "7", "--spec-tree-spine", "5"});
+    failures += check(tree_cut.speculative.tree.nodes == 7 &&
+                          tree_cut.speculative.tree.spine == 5,
+                      "serve rejected a tree budget below the resident DFlash2 width");
+
     bool tree_mismatch_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "7",
@@ -176,7 +183,7 @@ int main() {
                      "--spec-tree-spine", "7"});
     } catch (const std::invalid_argument&) { tree_mismatch_rejected = true; }
     failures += check(tree_mismatch_rejected,
-                      "serve accepted a runtime tree node budget that differs from draft K");
+                      "serve accepted a runtime tree node budget above draft K");
 
     bool tree_mtp_rejected = false;
     try {
@@ -198,11 +205,13 @@ int main() {
          "--lookup-ngram", "8", "--lookup-strategy", "vote", "--lookup-dflash", "skip",
          "--lookup-max-order", "12", "--lookup-min-confidence", "0.7",
          "--lookup-base-drafts", "7", "--lookup-deep-after", "2", "--lookup-deep-drafts", "15",
-         "--lookup-persistent-tokens", "262144", "--lookup-corpus-prefix", "corpus/qwen"});
+         "--lookup-persistent-tokens", "262144", "--lookup-persistent-path", "state/lookup.bin",
+         "--lookup-corpus-prefix", "corpus/qwen"});
     failures += check(lookup.speculative.lookup.strategy == ninfer::LookupDraftStrategy::Vote &&
                           lookup.speculative.lookup.dflash_mode == ninfer::LookupDFlashMode::HeadSkip &&
                           lookup.speculative.lookup.max_order == 12 &&
-                          lookup.speculative.lookup.persistent_tokens == 262144,
+                          lookup.speculative.lookup.persistent_tokens == 262144 &&
+                          lookup.speculative.lookup.persistent_path == "state/lookup.bin",
                       "serve options did not preserve multi-source lookup controls");
     const ServeOptions recent16 =
         parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3",
