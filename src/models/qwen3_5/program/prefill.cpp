@@ -5,6 +5,7 @@
 #include "models/qwen3_5/execution/linear.h"
 #include "core/device.h"
 #include "ninfer/ops/gdn_replay.h"
+#include "ninfer/ops/linear_topk.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scalar.h"
 #include "ninfer/ops/scatter.h"
@@ -77,8 +78,18 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     const std::span<const int> prompt(ids.data(), ids.size());
     if (state.dflash != nullptr) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
-        return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, finalize_at_end,
-                                  sink);
+        const std::uint32_t begin = state.text_kv_base;
+        PrefillChunkResult result =
+            card.prefill_chunk(prompt, begin, nominal_length, finalize_at_end, sink);
+        if (state.dflash_teacher_consumer && result.processed_tokens != 0) {
+            const auto count = static_cast<std::int32_t>(result.processed_tokens);
+            state.dflash_teacher_consumer(
+                ids.subspan(begin, result.processed_tokens), begin,
+                dflash_state(state).prefill_features.slice(1, 0, count),
+                dflash_state(state).prefill_positions.slice(0, 0, count),
+                state.execution.prefill_hidden.slice(1, 0, count));
+        }
+        return result;
     }
     return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, finalize_at_end);
 }
@@ -99,8 +110,18 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
                                                    : -1);
     if (state.dflash != nullptr) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
-        return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, vision,
-                                  finalize_at_end, sink);
+        const std::uint32_t begin = state.text_kv_base;
+        PrefillChunkResult result =
+            card.prefill_chunk(prompt, begin, nominal_length, vision, finalize_at_end, sink);
+        if (state.dflash_teacher_consumer && result.processed_tokens != 0) {
+            const auto count = static_cast<std::int32_t>(result.processed_tokens);
+            state.dflash_teacher_consumer(
+                std::span<const TokenId>(prompt.token_ids).subspan(begin, result.processed_tokens),
+                begin, dflash_state(state).prefill_features.slice(1, 0, count),
+                dflash_state(state).prefill_positions.slice(0, 0, count),
+                state.execution.prefill_hidden.slice(1, 0, count));
+        }
+        return result;
     }
     return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, vision, finalize_at_end);
 }
