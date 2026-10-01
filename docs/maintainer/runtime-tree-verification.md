@@ -8,7 +8,7 @@ target state remains exact:
 - one active request (C1);
 - raw greedy target sampling (temperature <= 0, no presence/frequency penalty);
 - at most 15 draft nodes / 16 target rows;
-- node budget equals startup `--draft-tokens`;
+- one wide drafter remains resident; node budget may be cut below startup `--draft-tokens`;
 - opt-in; all unsupported rounds fall back to the existing chain path.
 
 Enable it with:
@@ -219,3 +219,34 @@ When a tree request falls back to chain, the existing chain Stair policy remains
 The tree proposal and recurrent-state approach adapts the DFlash2 lattice/tree and DFS recurrent
 verification ideas from 0xBakeer/TandemLLM. NInfer reimplements the state transaction around its
 Paged KV, ReplaySSM, StateImage, Frontend commit, and DFlash context contracts.
+
+
+## 24GB performance path
+
+The 24GB optimization keeps the memory ceiling fixed:
+
+```text
+one b16 DFlash2 drafter
+one <=16-row target tree buffer
+no b8 companion
+no 24/32-row target tree allocation
+```
+
+When `--spec-router stair` is enabled, the tree router chooses an active node prefix such as
+3/7/11/15 from the same physical 16-row allocation. The neural drafter still runs once at the
+configured maximum width, so changing the tree cut does not make a second model resident.
+
+Tree build and greedy tree acceptance now execute on device. Accepted-path hidden/tap compaction
+and target D256 KV republish consume the device acceptance count directly. The tree transaction
+therefore no longer needs the two intermediate lattice/argmax D2H synchronizations from the
+correctness-first implementation; the Program's normal end-of-round synchronization remains the
+single host boundary.
+
+The Tree-Stair estimator is separate from chain survival statistics. It learns committed
+tokens/round for each tree node rung and scores:
+
+```text
+expected committed tokens / (wide draft cost + measured tree verify cost)
+```
+
+using the existing Stair cost/prior/hysteresis parameters.
