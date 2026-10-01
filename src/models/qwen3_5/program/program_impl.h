@@ -619,6 +619,7 @@ public:
     const bool vision_enabled;
     const bool use_cuda_graph;
     const bool causal_scoring;
+    const bool teacher_trace_enabled;
     const std::size_t kv_payload_bytes;
     const std::size_t graph_allowance_bytes;
     const WorkspacePlan workspace_plan;
