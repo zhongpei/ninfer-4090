@@ -85,7 +85,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
-           "[--spec-router fixed|stair] [--spec-stair-widths A,B,C,D] "
+           "[--spec-router fixed|stair] [--spec-router-scope request|engine] "
+           "[--spec-router-state PATH] [--spec-stair-widths A,B,C,D] "
            "[--spec-tree off|lattice] [--spec-tree-nodes N] [--spec-tree-spine N] "
            "[--spec-stair-costs A,B,C,D] [--spec-stair-draft-cost F] "
            "[--spec-stair-prior F] [--spec-stair-prior-weight F] "
@@ -135,6 +136,8 @@ std::string serve_usage_text(const char* argv0) {
            "input projections off that route\n"
            "       --spec-tree lattice enables C1 greedy DFlash2 runtime tree verification; "
            "nodes is a maximum budget that Tree-Stair may cut inside the same 16-row buffer; off remains the default\n"
+           "       --spec-router-scope engine reuses learned Stair economics across requests; "
+           "--spec-router-state also persists them across clean restarts\n"
            "       --spec-router stair adaptively cuts DFlash/DFlash2 target verification using "
            "four explicit width/cost rungs; fixed remains the default for A/B comparisons\n"
            "       --lookup-ngram N adds context-lookup drafting alongside --spec: the last N tokens "
@@ -361,6 +364,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--spec-router") {
             options.speculative.routing.mode =
                 product::parse_speculative_routing_mode(require_value("--spec-router"));
+        } else if (arg == "--spec-router-scope") {
+            options.speculative.routing.scope =
+                product::parse_speculative_router_scope(require_value("--spec-router-scope"));
+        } else if (arg == "--spec-router-state") {
+            options.speculative.routing.state_path = require_value("--spec-router-state");
         } else if (arg == "--spec-stair-widths") {
             product::parse_speculative_stair_widths(require_value("--spec-stair-widths"),
                                                     options.speculative.routing);
