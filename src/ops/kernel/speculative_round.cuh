@@ -946,6 +946,17 @@ __device__ __forceinline__ float speculative_tree_edge_logp(
     return row[candidate] - maximum - logf(total);
 }
 
+__device__ __forceinline__ void speculative_tree_frontier_push(
+    float* frontier_lp, int* frontier_parent, int* frontier_step, int* frontier_rank,
+    int* frontier_count, int capacity, float lp, int parent, int step, int rank) {
+    if (*frontier_count >= capacity) return;
+    const int index = (*frontier_count)++;
+    frontier_lp[index] = lp;
+    frontier_parent[index] = parent;
+    frontier_step[index] = step;
+    frontier_rank[index] = rank;
+}
+
 __global__ void speculative_tree_build_plan_kernel(
     const std::int32_t* candidate_ids, const float* lattice, const std::int32_t* anchors,
     const std::int32_t* frontiers, const std::int32_t* rope_starts, int steps, int node_budget,
@@ -983,15 +994,6 @@ __global__ void speculative_tree_build_plan_kernel(
     node_score[0] = 1.0F;
     int node_count = 1;
 
-    const auto push_frontier = [&](float lp, int parent, int step, int rank) {
-        if (frontier_count >= MaxFrontier) return;
-        frontier_lp[frontier_count] = lp;
-        frontier_parent[frontier_count] = parent;
-        frontier_step[frontier_count] = step;
-        frontier_rank[frontier_count] = rank;
-        ++frontier_count;
-    };
-
     int parent = 0;
     int predecessor = 0;
     float path_lp = 0.0F;
@@ -1019,8 +1021,11 @@ __global__ void speculative_tree_build_plan_kernel(
 
         for (int alt = 0; alt < Candidates; ++alt) {
             if (alt == selected) continue;
-            push_frontier(base_lp + speculative_tree_edge_logp(lattice, step, predecessor, alt),
-                          here, step, alt);
+            speculative_tree_frontier_push(
+                frontier_lp, frontier_parent, frontier_step, frontier_rank, &frontier_count,
+                MaxFrontier,
+                base_lp + speculative_tree_edge_logp(lattice, step, predecessor, alt),
+                here, step, alt);
         }
         predecessor = selected;
     }
@@ -1052,7 +1057,9 @@ __global__ void speculative_tree_build_plan_kernel(
         const int next_step = item_step + 1;
         if (next_step < steps) {
             for (int next = 0; next < Candidates; ++next) {
-                push_frontier(
+                speculative_tree_frontier_push(
+                    frontier_lp, frontier_parent, frontier_step, frontier_rank, &frontier_count,
+                    MaxFrontier,
                     lp + speculative_tree_edge_logp(lattice, next_step, item_rank, next),
                     node, next_step, next);
             }
