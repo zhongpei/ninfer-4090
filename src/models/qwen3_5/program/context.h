@@ -53,6 +53,10 @@ struct ExecutionCore {
     std::uint32_t rope_scaling_original_context = 262144;
 };
 
+using DFlashTeacherConsumer =
+    std::function<void(std::span<const TokenId>, std::uint32_t, const Tensor&, const Tensor&,
+                       const Tensor&)>;
+
 struct PrefillContext {
     ExecutionCore execution;
     qwen3_5::PagedKVCacheView text_kv;
@@ -67,6 +71,7 @@ struct PrefillContext {
     std::int32_t state_destination_slot                     = 0;
     std::uint32_t mtp_proposal_extent                       = 0;
     const qwen3_5::DFlashDecodeIngress* dflash_host_ingress = nullptr;
+    DFlashTeacherConsumer dflash_teacher_consumer;
 };
 
 struct OrdinaryBatchContext {
