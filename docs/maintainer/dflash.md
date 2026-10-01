@@ -252,11 +252,11 @@ The target is hybrid, so a tree is not just an attention mask:
 4. **DFlash target taps.** Target feature layers are captured in tree-node order and gathered into
    accepted-path order before the round returns, preserving the existing pending-feature contract.
 
-This correctness-first implementation performs two stream synchronizations: one after selector
-lattice production for host tree construction and one after target logits for host path walking.
-Those costs are intentional A/B-visible overhead. A later optimization can move tree construction
-and acceptance to device code and add fixed node-budget graph families without changing the state
-contract above.
+Tree construction and raw-greedy acceptance now run as tiny device control kernels on the same
+decode stream, removing both mid-round host synchronizations. The physical allocation remains one
+K15/16-row family. When `--spec-router stair` is enabled, Tree-StairCut varies only the active
+target-tree width across the configured tiers (default 3/7/11/15 nodes); it does not allocate a
+second drafter or wider resident buffers.
 
 ## Target verification and committed prefix
 
