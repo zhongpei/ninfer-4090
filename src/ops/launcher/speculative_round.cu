@@ -221,7 +221,7 @@ void speculative_tree_accept_greedy_launch(
     const Tensor& target_tokens, const Tensor& tree_tokens, const Tensor& parents,
     std::int32_t live_rows, Tensor& path_nodes, Tensor& licensed_tokens,
     Tensor& licensed_counts, Tensor& accepted_drafts, Tensor& path_count,
-    Tensor& last_node, cudaStream_t stream) {
+    Tensor& compact_last_index, cudaStream_t stream) {
     speculative_tree_accept_greedy_kernel<<<1, 1, 0, stream>>>(
         static_cast<const std::int32_t*>(target_tokens.data),
         static_cast<const std::int32_t*>(tree_tokens.data),
@@ -231,7 +231,7 @@ void speculative_tree_accept_greedy_launch(
         static_cast<std::int32_t*>(licensed_counts.data),
         static_cast<std::int32_t*>(accepted_drafts.data),
         static_cast<std::int32_t*>(path_count.data),
-        static_cast<std::int32_t*>(last_node.data));
+        static_cast<std::int32_t*>(compact_last_index.data));
     CUDA_CHECK(cudaGetLastError());
 }
 
