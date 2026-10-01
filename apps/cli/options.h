@@ -18,6 +18,8 @@ struct Options {
     std::filesystem::path chat_template_path;
     std::string prompt;
     std::filesystem::path messages_path;
+    // Offline exact-target DFlash teacher capture. Empty keeps the normal generation path.
+    std::filesystem::path teacher_out;
 
     std::uint32_t max_new        = 128;
     std::uint32_t max_context    = 2048;
