@@ -26,7 +26,7 @@ The default remains `--spec-tree off`.
 DFlash2 already computes a 16-candidate conditional lattice for the candidate selector. Tree mode
 retains those edge scores instead of discarding them after choosing one chain.
 
-The host planner:
+The device planner (one tiny control CTA on the decode stream):
 
 1. installs a greedy lattice spine;
 2. scores alternative edges by cumulative path probability;
@@ -155,9 +155,9 @@ Tree v1 falls back to chain verification when any of these is true:
 The request metrics expose `tree_rounds` and `tree_fallback_rounds` separately.
 
 Tree mode currently bypasses the neural target CUDA Graph because lattice-to-tree construction is
-data-dependent and has two small D2H control transfers (lattice and target argmax). Chain mode
-remains graphed. This is intentionally an A/B-correct first implementation; eliminating those host
-round trips is a later kernelization step.
+data-dependent. Tree construction and raw-greedy acceptance stay on device, so the runtime no longer
+performs the two mid-round D2H synchronizations used by the correctness-first implementation.
+Chain mode remains graphed.
 
 ## A/B profiles
 
@@ -187,11 +187,15 @@ same production-shaped prompt and records output hashes.
 Tree v1 is a separate A/B arm.
 
 - Strong lookup takeover continues to use the copy chain; it does not build a DFlash tree.
-- Tree-active rounds do not update the chain Stair router.
-- When a requested tree round falls back to chain, the existing Stair policy remains available.
+- With `--spec-router fixed`, tree mode uses the configured `--spec-tree-nodes` budget.
+- With `--spec-router stair`, the same measured Stair controller becomes **Tree-StairCut**:
+  the physical DFlash2/round state remains K15/16 rows, while target-tree verification snaps to
+  the largest admissible configured tier (default 3/7/11/15 nodes).
+- Tree acceptance feeds the Stair observation, so the next tree round can move between tiers.
+- When a requested tree round cannot run, the existing chain fallback remains available.
 
-A later Tree-StairCut can choose a node budget from a measured target-tree verification staircase
-after this runtime path has been profiled on RTX 4090.
+This is specifically intended for 24 GB cards: it changes verify compute, not resident model state,
+and does not allocate a second drafter or a 24/32-row tree buffer.
 
 ## Provenance
 
