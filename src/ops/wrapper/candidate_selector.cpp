@@ -1,5 +1,6 @@
 #include "ninfer/ops/candidate_selector.h"
 
+#include "ops/candidate_selector/bf16/candidate_selector_path_kernels.h"
 #include "ops/candidate_selector/bf16/candidate_selector_path_plan.h"
 
 #include <array>

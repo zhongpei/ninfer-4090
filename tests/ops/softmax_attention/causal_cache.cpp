@@ -830,15 +830,17 @@ void encode_rotated_fp8_key_row(std::span<const float> source, std::size_t sourc
     }
 }
 
-void encode_rotated_key_row(std::span<const float> source, std::size_t source_base,
-                            std::vector<std::int8_t>& codes, std::size_t code_base,
-                            std::vector<std::uint16_t>& scales, std::size_t scale_base,
-                            std::vector<float>& logical, std::size_t logical_base) {
+void encode_int8_key_row(std::span<const float> source, std::size_t source_base,
+                         std::vector<std::int8_t>& codes, std::size_t code_base,
+                         std::vector<std::uint16_t>& scales, std::size_t scale_base,
+                         std::vector<float>& logical, std::size_t logical_base, bool rotate) {
+    // Plain INT8 codes represent logical coordinates; rotated profiles decode before the
+    // inverse transform.
     std::array<float, kHeadDim> rotated{};
     for (std::int32_t d = 0; d < kHeadDim; ++d) {
         rotated[static_cast<std::size_t>(d)] = source[source_base + static_cast<std::size_t>(d)];
     }
-    normalized_hadamard_d256(rotated);
+    if (rotate) { normalized_hadamard_d256(rotated); }
     for (std::int32_t group = 0; group < kQuantGroups; ++group) {
         const std::size_t d = static_cast<std::size_t>(group * kQuantGroup);
         encode_group(rotated, d, codes, code_base + d, scales,
@@ -852,7 +854,7 @@ void encode_rotated_key_row(std::span<const float> source, std::size_t source_ba
         decoded[offset]          = static_cast<float>(codes[code_base + offset]) *
                           f16_bits_to_f32(scales[scale_base + group]);
     }
-    normalized_hadamard_d256(decoded);
+    if (rotate) { normalized_hadamard_d256(decoded); }
     for (std::int32_t d = 0; d < kHeadDim; ++d) {
         logical[logical_base + static_cast<std::size_t>(d)] = decoded[static_cast<std::size_t>(d)];
     }
@@ -924,8 +926,9 @@ HostCache make_cache(const Geometry& geometry, const CachePlan& plan, std::int32
         for (std::int32_t position = 0; position < logical_capacity; ++position) {
             const std::size_t code  = cache_index(geometry, logical_capacity, head, position, 0);
             const std::size_t scale = scale_index(geometry, logical_capacity, head, position, 0);
-            encode_rotated_key_row(logical_k, code, cache.k_i8, code, cache.k_scale, scale,
-                                   cache.logical_k_quantized, code);
+            encode_int8_key_row(logical_k, code, cache.k_i8, code, cache.k_scale, scale,
+                                cache.logical_k_quantized, code,
+                                storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64);
             if (profile.packed_int4_values()) {
                 for (std::int32_t group = 0; group < kRk8ValueGroups; ++group) {
                     const std::int32_t d = group * kRk8ValueGroup;
@@ -1086,8 +1089,8 @@ HostCache make_cache(const Geometry& geometry, KvCacheStorage storage, std::int3
         for (std::int32_t position = 0; position < logical_capacity; ++position) {
             const std::size_t code  = cache_index(geometry, logical_capacity, head, position, 0);
             const std::size_t scale = scale_index(geometry, logical_capacity, head, position, 0);
-            encode_rotated_key_row(logical_k, code, cache.k_i8, code, cache.k_scale, scale,
-                                   cache.logical_k_quantized, code);
+            encode_int8_key_row(logical_k, code, cache.k_i8, code, cache.k_scale, scale,
+                                cache.logical_k_quantized, code, false);
             for (std::int32_t group = 0; group < kQuantGroups; ++group) {
                 const std::int32_t d = group * kQuantGroup;
                 const std::size_t group_code =
@@ -1161,8 +1164,9 @@ void append_cache(HostCache& cache, const std::vector<float>& k, const std::vect
             }
             const std::size_t scale =
                 scale_index(geometry, cache.logical_capacity, head, position, 0);
-            encode_rotated_key_row(k, source, cache.k_i8, target, cache.k_scale, scale,
-                                   cache.logical_k_quantized, target);
+            encode_int8_key_row(k, source, cache.k_i8, target, cache.k_scale, scale,
+                                cache.logical_k_quantized, target,
+                                cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64);
             if (cache.packed_values()) {
                 for (std::int32_t group = 0; group < kRk8ValueGroups; ++group) {
                     const std::int32_t d = group * kRk8ValueGroup;

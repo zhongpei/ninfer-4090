@@ -164,6 +164,10 @@ ninfer_add_op_test(ninfer_gdn_replay_fold_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_gdn_replay_fold.cpp"
   LIBRARIES ninfer_ops)
 
+ninfer_add_op_test(ninfer_tree_branch_commit_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_tree_branch_commit.cpp"
+  LIBRARIES ninfer_ops)
+
 ninfer_add_op_test(ninfer_gdn_state_fp16_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_gdn_state_fp16.cpp"
   LIBRARIES ninfer_ops)
