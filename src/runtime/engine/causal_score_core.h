@@ -60,21 +60,24 @@ public:
     CausalScoreCore& operator=(const CausalScoreCore&) = delete;
 
     [[nodiscard]] std::vector<float> score(PreparedPrompt prompt, std::uint32_t first_target) {
-        // One synchronous public call owns the sole job slot until its result is delivered.
         std::scoped_lock call_lock(call_mutex_);
         auto job                               = std::make_unique<Job>();
+        job->kind                              = JobKind::Score;
         job->prompt                            = std::move(prompt);
         job->first_target                      = first_target;
-        std::future<std::vector<float>> result = job->promise.get_future();
-        {
-            std::lock_guard queue_lock(queue_mutex_);
-            if (stopping_) { throw std::runtime_error("causal scoring engine is stopping"); }
-            if (job_ != nullptr) {
-                throw std::logic_error("causal scoring core already has an in-flight job");
-            }
-            job_ = std::move(job);
-        }
-        queue_cv_.notify_one();
+        std::future<std::vector<float>> result = job->score_promise.get_future();
+        enqueue(std::move(job));
+        return result.get();
+    }
+
+    [[nodiscard]] TeacherTrace trace(PreparedPrompt prompt, TeacherTraceOptions options) {
+        std::scoped_lock call_lock(call_mutex_);
+        auto job                         = std::make_unique<Job>();
+        job->kind                        = JobKind::Trace;
+        job->prompt                      = std::move(prompt);
+        job->trace_options               = std::move(options);
+        std::future<TeacherTrace> result = job->trace_promise.get_future();
+        enqueue(std::move(job));
         return result.get();
     }
 
@@ -110,11 +113,31 @@ public:
     }
 
 private:
+    enum class JobKind : std::uint8_t {
+        Score,
+        Trace,
+    };
+
     struct Job {
+        JobKind kind = JobKind::Score;
         PreparedPrompt prompt;
         std::uint32_t first_target = 0;
-        std::promise<std::vector<float>> promise;
+        TeacherTraceOptions trace_options;
+        std::promise<std::vector<float>> score_promise;
+        std::promise<TeacherTrace> trace_promise;
     };
+
+    void enqueue(std::unique_ptr<Job> job) {
+        {
+            std::lock_guard queue_lock(queue_mutex_);
+            if (stopping_) { throw std::runtime_error("causal scoring engine is stopping"); }
+            if (job_ != nullptr) {
+                throw std::logic_error("causal scoring core already has an in-flight job");
+            }
+            job_ = std::move(job);
+        }
+        queue_cv_.notify_one();
+    }
 
     void worker_loop() noexcept {
         for (;;) {
@@ -129,16 +152,30 @@ private:
                 job = std::move(job_);
             }
             try {
-                std::vector<float> result;
-                {
-                    std::scoped_lock lock(execution_mutex_);
-                    result =
-                        instance_.program->causal_score(std::move(job->prompt), job->first_target);
+                if (job->kind == JobKind::Trace) {
+                    TeacherTrace result;
+                    {
+                        std::scoped_lock lock(execution_mutex_);
+                        result = instance_.program->teacher_trace(
+                            std::move(job->prompt), job->trace_options);
+                    }
+                    job->trace_promise.set_value(std::move(result));
+                } else {
+                    std::vector<float> result;
+                    {
+                        std::scoped_lock lock(execution_mutex_);
+                        result = instance_.program->causal_score(
+                            std::move(job->prompt), job->first_target);
+                    }
+                    job->score_promise.set_value(std::move(result));
                 }
-                job->promise.set_value(std::move(result));
             } catch (...) {
                 try {
-                    job->promise.set_exception(std::current_exception());
+                    if (job->kind == JobKind::Trace) {
+                        job->trace_promise.set_exception(std::current_exception());
+                    } else {
+                        job->score_promise.set_exception(std::current_exception());
+                    }
                 } catch (...) {}
             }
         }
