@@ -252,6 +252,18 @@ NINFER_TEST_ARTIFACT=out/qwen3_8_27b_nvfp4.ninfer \
 ```
 
 Arguments are K, Graph enabled, optimized head enabled, maximum B, target KV (`bf16` or `int8`),
-Vision enabled, and extra Device StateImage slots. Defaults are `15 1 1 8 bf16 0 3`. Run GPU
+Vision enabled, extra Device StateImage slots, and an optional scenario. The scenario defaults to
+`chain`; `tree-3`, `tree-7`, `tree-11`, `tree-15`, and `tree-stair` enable engine-scoped tree
+qualification while retaining the independent startup K. Tree scenarios check actual tree activity,
+output budgets, partial stop commits, retained continuations, sampling replay and penalty/batch
+fallback. For example:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+NINFER_TEST_ARTIFACT=$PWD/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  build/tests/ninfer_qwen3_5_dflash2_real_test 15 1 1 1 int8 0 3 tree-7
+```
+
+Defaults are `15 1 1 8 bf16 0 3 chain`. Run GPU
 integration tests serially. The individual Op suites remain the numerical/state-transition oracle;
 the fixed Engine fixture does not define bit parity across arbitrary floating-point routes.

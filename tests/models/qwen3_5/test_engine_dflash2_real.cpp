@@ -56,11 +56,135 @@ ninfer::PromptInput media_prompt(ninfer::MediaKind kind) {
     input.options.enable_thinking = false;
     return input;
 }
+
+void tree_scenario(ninfer::Engine& engine, const std::vector<ninfer::TokenId>& prompt,
+                   unsigned nodes, unsigned concurrency, bool stair) {
+    // This shared fixture checks exact retained E=64 after a cross-page partial commit.
+    ninfer::test::speculative_page_boundary(engine);
+    const auto first = engine.generate(engine.prepare_tokens(prompt), request(24));
+    valid(first, 24);
+    require(first.speculative.tree_rounds > 0 && first.speculative.tree_nodes > 0,
+            "tree scenario executed no actual tree round");
+    require(first.speculative.tree_accepted_drafts > 0,
+            "real tree fixture accepted no draft");
+    std::uint64_t observed_tree_rounds = first.speculative.tree_rounds;
+    if (stair) {
+        for (int repetition = 0; repetition < 3; ++repetition) {
+            const auto observed = engine.generate(engine.prepare_tokens(prompt), request(16));
+            valid(observed, 16);
+            observed_tree_rounds += observed.speculative.tree_rounds;
+        }
+        require(observed_tree_rounds > 4,
+                "engine-scope tree Stair did not execute beyond its four warmup rounds");
+    }
+    for (unsigned outputs : {1U, 2U, nodes + 1U}) {
+        const auto bounded = engine.generate(engine.prepare_tokens(prompt), request(outputs));
+        valid(bounded, outputs);
+        if (outputs <= 2) {
+            require(bounded.speculative.tree_rounds == 0,
+                    "tree verification exceeded the remaining output budget");
+        }
+    }
+
+    const auto retained = engine.generate(engine.prepare_tokens(prompt), request(12, true));
+    valid(retained, 12);
+    auto follow = prompt;
+    follow.insert(follow.end(), retained.generated_token_ids.begin(), retained.generated_token_ids.end());
+    follow.push_back(198);
+    const auto reused = engine.generate(engine.prepare_tokens(follow), request(8, true));
+    const auto fresh = engine.generate(engine.prepare_tokens(follow), request(8));
+    const auto fresh_repeat = engine.generate(engine.prepare_tokens(follow), request(8));
+    valid(reused, 8); valid(fresh, 8); valid(fresh_repeat, 8);
+    require(reused.reused_prompt_tokens > 0 &&
+                reused.reused_prompt_tokens <= prompt.size() + retained.generated_token_ids.size() &&
+                fresh.reused_prompt_tokens == 0,
+            "tree continuation restored an uncommitted frontier");
+    // Compare the same execution route. Incremental restore and full prefill have different
+    // floating-point paths; the resource oracle above is the published retained frontier.
+    require(stair || fresh.generated_token_ids == fresh_repeat.generated_token_ids,
+            "fresh tree continuation did not reproduce its greedy route");
+
+    bool checked_partial = false;
+    const auto& reference = first.generated_token_ids;
+    for (std::size_t i = 1; i < reference.size(); ++i) {
+        if (std::find(reference.begin(), reference.begin() + i, reference[i]) != reference.begin() + i)
+            continue;
+        auto stopped_options = request(24, true);
+        stopped_options.stop.token_ids.push_back(reference[i]);
+        const auto stopped = engine.generate(engine.prepare_tokens(prompt), stopped_options);
+        const auto licensed = 1 + stopped.speculative.rounds + stopped.speculative.accepted_tokens +
+                              stopped.speculative.fallback_steps;
+        if (stopped.generated_token_ids.size() >= licensed) continue;
+        require(stopped.finish_reason == ninfer::FinishReason::StopToken &&
+                    stopped.speculative.tree_rounds > 0 &&
+                    (stair || stopped.generated_token_ids.size() <= i + 1),
+                "tree partial terminal did not honor its stop token");
+        auto continuation = prompt;
+        continuation.insert(continuation.end(), stopped.generated_token_ids.begin(), stopped.generated_token_ids.end());
+        continuation.push_back(198);
+        const auto stop_reused = engine.generate(engine.prepare_tokens(continuation), request(8, true));
+        const auto stop_fresh = engine.generate(engine.prepare_tokens(continuation), request(8));
+        valid(stop_reused, 8); valid(stop_fresh, 8);
+        require(stop_reused.reused_prompt_tokens > 0 &&
+                    stop_reused.reused_prompt_tokens <= prompt.size() + stopped.generated_token_ids.size() &&
+                    stop_fresh.reused_prompt_tokens == 0,
+                "tree stop retained an uncommitted branch suffix");
+        checked_partial = true;
+        break;
+    }
+    require(checked_partial, "real tree fixture did not exercise a partial terminal commit");
+
+    auto sampled = request(16);
+    sampled.execution.sampling.temperature = 0.8F;
+    sampled.execution.sampling.top_p = 0.9F;
+    sampled.execution.sampling.top_k = 20;
+    sampled.execution.sampling.seed = 42;
+    const auto sample1 = engine.generate(engine.prepare_tokens(prompt), sampled);
+    const auto sample2 = engine.generate(engine.prepare_tokens(prompt), sampled);
+    valid(sample1, 16); valid(sample2, 16);
+    require(sample1.speculative.tree_rounds > 0 && sample2.speculative.tree_rounds > 0 &&
+                (stair || sample1.generated_token_ids == sample2.generated_token_ids),
+            "same tree route and seed did not reproduce sampled tokens");
+
+    auto penalty = request(16);
+    penalty.execution.sampling.presence_penalty = 0.5F;
+    penalty.execution.sampling.frequency_penalty = 0.25F;
+    const auto penalized = engine.generate(engine.prepare_tokens(prompt), penalty);
+    valid(penalized, 16);
+    require(penalized.speculative.tree_rounds == 0 && penalized.speculative.tree_fallback_rounds > 0,
+            "target penalties did not select the tree chain fallback");
+
+    std::uint64_t batched_fallbacks = 0;
+    if (concurrency > 1) {
+        std::vector<ninfer::GenerationHandle> handles;
+        for (unsigned row = 0; row < concurrency; ++row)
+            handles.push_back(engine.submit(engine.prepare_tokens(prompt), request(24 + row)));
+        for (unsigned row = 0; row < concurrency; ++row) {
+            const auto result = handles[row].wait();
+            valid(result, 24 + row);
+            batched_fallbacks += result.speculative.tree_fallback_rounds;
+        }
+        require(batched_fallbacks > 0, "multiple active rows did not select tree chain fallback");
+    }
+    const auto stats = engine.runtime_stats();
+    require(stats.device_backend_kv_occupied_pages == 0 && stats.backend_kv_d2h_bytes == 0 &&
+                stats.backend_kv_h2d_bytes == 0,
+            "tree DFlash2 allocated or transferred a full backend KV pool");
+    std::cout << "ok scenario=" << (stair ? "tree-stair" : "tree-" + std::to_string(nodes))
+              << " C=" << concurrency << " observed_tree_rounds=" << observed_tree_rounds
+              << " tree_rounds=" << first.speculative.tree_rounds
+              << " tree_accepted=" << first.speculative.tree_accepted_drafts
+              << " partial_terminal=" << checked_partial
+              << " penalty_fallbacks=" << penalized.speculative.tree_fallback_rounds
+              << " batch_fallbacks=" << batched_fallbacks << '\n';
+}
+
 } // namespace
 
 // Optional K, Graph, optimized-head, B and KV codec arguments select representative integration
 // routes without multiplying test binaries. The artifact supplies the actual weight
-// representations.
+// representations. Optional argument 8 selects tree-3/tree-7/tree-11/tree-15 or tree-stair.
+// Tree scenarios use engine router scope, default to C1, and retain startup K independently.
 int main(int argc, char** argv) {
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (!artifact || !*artifact) {
@@ -68,10 +192,21 @@ int main(int argc, char** argv) {
         return 77;
     }
     try {
+        const std::string scenario = argc > 8 ? argv[8] : "chain";
+        const bool stair = scenario == "tree-stair";
+        unsigned tree_nodes = 0;
+        if (scenario != "chain" && !stair) {
+            require(scenario == "tree-3" || scenario == "tree-7" ||
+                        scenario == "tree-11" || scenario == "tree-15",
+                    "scenario must be chain, tree-3/tree-7/tree-11/tree-15 or tree-stair");
+            tree_nodes = static_cast<unsigned>(std::stoul(scenario.substr(5)));
+        }
         const auto k         = argc > 1 ? static_cast<unsigned>(std::stoul(argv[1])) : 15U;
+        if (stair) tree_nodes = std::min(15U, k);
         const bool graph     = argc > 2 ? std::stoi(argv[2]) != 0 : true;
         const bool optimized = argc > 3 ? std::stoi(argv[3]) != 0 : true;
-        const auto batch     = argc > 4 ? static_cast<unsigned>(std::stoul(argv[4])) : 8U;
+        const auto batch     = argc > 4 ? static_cast<unsigned>(std::stoul(argv[4])) : (tree_nodes ? 1U : 8U);
+        require(tree_nodes <= k, "tree node budget exceeds startup draft K");
         ninfer::EngineOptions options;
         options.artifact_path   = artifact;
         options.max_context     = 2304;
@@ -91,8 +226,20 @@ int main(int argc, char** argv) {
         options.speculative.draft_tokens             = k;
         options.speculative.proposal_head =
             optimized ? ninfer::ProposalHead::Optimized : ninfer::ProposalHead::Full;
+        if (tree_nodes) {
+            options.speculative.tree.mode = ninfer::SpeculativeTreeMode::Lattice;
+            options.speculative.tree.nodes = tree_nodes;
+            options.speculative.tree.spine = std::min(7U, tree_nodes);
+            options.speculative.routing.mode = stair ? ninfer::SpeculativeRoutingMode::Stair
+                                                       : ninfer::SpeculativeRoutingMode::Fixed;
+            options.speculative.routing.scope = ninfer::SpeculativeRouterScope::Engine;
+        }
         ninfer::Engine engine(options);
         const auto prompt = engine.tokenize_text("Count from one to twenty: one, two, three,");
+        if (tree_nodes) {
+            tree_scenario(engine, prompt, tree_nodes, batch, stair);
+            return 0;
+        }
         ninfer::test::speculative_page_boundary(engine);
         const auto first = engine.generate(engine.prepare_tokens(prompt), request(24));
         valid(first, 24);

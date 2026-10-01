@@ -876,6 +876,187 @@ int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
     return failures;
 }
 
+// Independent nearest-point search over E8 = D8 union (D8 + 1/2). Enumerate
+// parity-restoring neighbours instead of reproducing the CUDA warp reduction.
+std::array<float, 8> nearest_e8(const std::array<float, 8>& x) {
+    std::array<float, 8> best{};
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (const float shift : {0.0f, 0.5f}) {
+        std::array<float, 8> rounded{};
+        int sum = 0;
+        for (int d = 0; d < 8; ++d) {
+            const int integer = round_even_to_i32(x[d] - shift);
+            rounded[d] = static_cast<float>(integer) + shift;
+            sum += integer;
+        }
+        // First dimension wins parity-repair ties; positive wins exact integer ties.
+        for (int candidate = 0; candidate < ((sum & 1) ? 16 : 1); ++candidate) {
+            auto point = rounded;
+            if (sum & 1) point[candidate / 2] += candidate % 2 == 0 ? 1.0f : -1.0f;
+            double distance = 0.0;
+            for (int d = 0; d < 8; ++d) {
+                const double error = static_cast<double>(x[d]) - point[d];
+                distance += error * error;
+            }
+            if (distance < best_distance) {
+                best_distance = distance;
+                best = point;
+            }
+        }
+    }
+    return best;
+}
+
+std::array<float, 64> hadamard64_oracle(const std::array<float, 64>& input) {
+    std::array<float, 64> output{};
+    for (unsigned row = 0; row < 64; ++row) {
+        double sum = 0.0;
+        for (unsigned col = 0; col < 64; ++col) {
+            unsigned overlap = row & col;
+            bool negative = false;
+            while (overlap != 0) { negative = !negative; overlap &= overlap - 1; }
+            sum += negative ? -input[col] : input[col];
+        }
+        output[row] = static_cast<float>(sum / 8.0);
+    }
+    return output;
+}
+
+void encode_prefix_e8_group(const std::vector<float>& input, std::size_t source,
+                             std::vector<std::uint8_t>& codes,
+                             std::vector<std::uint16_t>& scales, bool key, int group,
+                             int head, int position, int page, int kv_heads) {
+    std::array<float, 64> logical{};
+    std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(source), 64, logical.begin());
+    auto rotated = hadamard64_oracle(logical);
+    float maximum = 0.0f;
+    for (const float value : rotated) maximum = std::max(maximum, std::abs(value));
+    const auto scale_bits = f32_to_f16_bits(maximum / 7.0f);
+    const float scale = f16_bits_to_f32(scale_bits);
+    const float inverse = scale == 0.0f ? 0.0f : 1.0f / scale;
+    scales[full_cache_index(4, group, head, position, page, kv_heads)] = scale_bits;
+    for (int block = 0; block < 8; ++block) {
+        std::array<float, 8> represented{};
+        for (int d = 0; d < 8; ++d) represented[d] = rotated[block * 8 + d] * inverse;
+        if (key) represented = nearest_e8(represented);
+        for (int pair = 0; pair < 4; ++pair) {
+            // The stored format intentionally collapses the half coset by RNE,
+            // then packs signed i4. No coset bit is reconstructed by its decoder.
+            const int low = std::clamp(round_even_to_i32(represented[pair * 2]), key ? -8 : -7, 7);
+            const int high = std::clamp(round_even_to_i32(represented[pair * 2 + 1]), key ? -8 : -7, 7);
+            const int packed_d = group * 32 + block * 4 + pair;
+            codes[full_cache_index(128, packed_d, head, position, page, kv_heads)] =
+                static_cast<std::uint8_t>((low & 15) | ((high & 15) << 4));
+        }
+    }
+}
+
+int full_prefix_case(int kv_heads, KvCacheStorage storage, int committed) {
+    constexpr int tokens = 16, first_position = 63, physical_pages = 5;
+    const bool bf16 = storage == KvCacheStorage::BFloat16;
+    const bool e8 = storage == KvCacheStorage::RK4V4E8;
+    const int extent = e8 ? 128 : 256;
+    const std::size_t plane_count = static_cast<std::size_t>(extent) * 64 * kv_heads * physical_pages;
+    const std::size_t scale_count = static_cast<std::size_t>(4) * 64 * kv_heads * physical_pages;
+    const std::size_t input_count = static_cast<std::size_t>(256) * kv_heads * tokens;
+    std::vector<float> host_k(input_count), host_v(input_count);
+    fill_uniform(host_k, 191u, -0.75f, 0.75f);
+    fill_uniform(host_v, 811u, -1.25f, 1.25f);
+    round_to_bf16(host_k); round_to_bf16(host_v);
+    if (e8) {
+        // Dyadic represented vectors give exact H64 rotations and power-of-two scales, so
+        // lattice/coset ties are unambiguous under the documented tie policy.
+        for (int token = 0; token < tokens; ++token) for (int head = 0; head < kv_heads; ++head)
+            for (int group = 0; group < 4; ++group) {
+                std::array<float, 64> rotated{};
+                for (int d = 0; d < 64; ++d)
+                    rotated[d] = static_cast<float>((d * 3 + token + head + group) % 5 - 2) * 0.5f;
+                rotated[0] = 7.0f;
+                const float scale = std::ldexp(1.0f, (token + head + group) % 5 - 2);
+                for (float& value : rotated) value *= scale;
+                const auto logical = hadamard64_oracle(rotated);
+                const auto source = full_input_index(group * 64, head, token, kv_heads);
+                std::copy(logical.begin(), logical.end(), host_k.begin() + source);
+                std::copy(logical.begin(), logical.end(), host_v.begin() + source);
+            }
+    }
+    std::vector<std::uint16_t> input_k(input_count), input_v(input_count);
+    for (std::size_t i = 0; i < input_count; ++i) {
+        input_k[i] = f32_to_bf16(host_k[i]); input_v[i] = f32_to_bf16(host_v[i]);
+    }
+    // Row 1 has fragmented mapping; row 0 deliberately addresses other pages.
+    const std::vector<std::int32_t> tables{0, 2, 3, 1};
+    std::vector<std::int32_t> positions(tokens);
+    for (int token = 0; token < tokens; ++token) positions[token] = first_position + token;
+    auto d_k = to_device(input_k), d_v = to_device(input_v), d_positions = to_device(positions);
+    auto d_count = to_device<std::int32_t>({committed}), d_row = to_device<std::int32_t>({1});
+    auto d_tables = to_device(tables);
+    std::vector<std::uint8_t> expected_k(plane_count * (bf16 ? 2 : 1), 0x55);
+    std::vector<std::uint8_t> expected_v(expected_k.size(), 0xaa);
+    auto expected_ks = patterned_bits(scale_count, 17u), expected_vs = patterned_bits(scale_count, 19u);
+    GuardedDeviceBuffer cache_k(expected_k.size()), cache_v(expected_v.size());
+    GuardedDeviceBuffer scale_k(scale_count * 2), scale_v(scale_count * 2);
+    cache_k.copy_from_host(expected_k.data(), expected_k.size());
+    cache_v.copy_from_host(expected_v.data(), expected_v.size());
+    scale_k.copy_from_host(expected_ks.data(), scale_count * 2);
+    scale_v.copy_from_host(expected_vs.data(), scale_count * 2);
+    std::vector<std::int8_t> i8_k(plane_count, 0x55), i8_v(plane_count, static_cast<std::int8_t>(0xaa));
+    for (int token = 0; token < committed; ++token) {
+        const int position = positions[token], page = tables[2 + position / 64];
+        for (int head = 0; head < kv_heads; ++head) for (int group = 0; group < 4; ++group) {
+            const auto source = full_input_index(group * 64, head, token, kv_heads);
+            if (bf16) {
+                const auto target = full_cache_index(256, group * 64, head, position, page, kv_heads);
+                std::memcpy(expected_k.data() + target * 2, input_k.data() + source, 128);
+                std::memcpy(expected_v.data() + target * 2, input_v.data() + source, 128);
+            } else if (e8) {
+                encode_prefix_e8_group(host_k, source, expected_k, expected_ks, true, group, head, position, page, kv_heads);
+                encode_prefix_e8_group(host_v, source, expected_v, expected_vs, false, group, head, position, page, kv_heads);
+            } else {
+                encode_full_group(host_k, source, i8_k, head, position, page, group, kv_heads, expected_ks);
+                encode_full_group(host_v, source, i8_v, head, position, page, group, kv_heads, expected_vs);
+            }
+        }
+    }
+    if (!bf16 && !e8) {
+        std::memcpy(expected_k.data(), i8_k.data(), plane_count);
+        std::memcpy(expected_v.data(), i8_v.data(), plane_count);
+    }
+    const DType code_dtype = bf16 ? DType::BF16 : e8 ? DType::U8 : DType::I8;
+    PagedKVBatchLayerView cache{
+        .k_pages = Tensor(cache_k.data(), code_dtype, {extent, 64, kv_heads, physical_pages}),
+        .v_pages = Tensor(cache_v.data(), code_dtype, {extent, 64, kv_heads, physical_pages}),
+        .block_tables = Tensor(d_tables.p, DType::I32, {2, 2}),
+        .head_dim = 256, .num_kv_heads = kv_heads, .storage = storage,
+    };
+    if (!bf16) {
+        cache.k_scale_pages = Tensor(scale_k.data(), DType::FP16, {4, 64, kv_heads, physical_pages});
+        cache.v_scale_pages = Tensor(scale_v.data(), DType::FP16, {4, 64, kv_heads, physical_pages});
+    }
+    ops::kv_cache_append_full_prefix(Tensor(d_k.p, DType::BF16, {256, kv_heads, tokens, 1}),
+        Tensor(d_v.p, DType::BF16, {256, kv_heads, tokens, 1}), Tensor(d_positions.p, DType::I32, {tokens, 1}),
+        Tensor(d_count.p, DType::I32, {1}), Tensor(d_row.p, DType::I32, {1}), cache, nullptr);
+    cuda_synchronize();
+    const std::string label = "full prefix storage=" + std::to_string(static_cast<int>(storage)) +
+        " Hkv=" + std::to_string(kv_heads) + " count=" + std::to_string(committed);
+    int failures = verify_exact((label + " K plane/preserved tail").c_str(),
+        from_device<std::uint8_t>(cache_k.data(), expected_k.size()), expected_k);
+    failures += verify_exact((label + " V plane/preserved tail").c_str(),
+        from_device<std::uint8_t>(cache_v.data(), expected_v.size()), expected_v);
+    failures += verify_exact((label + " K scales/preserved tail").c_str(),
+        from_device<std::uint16_t>(scale_k.data(), scale_count), expected_ks);
+    failures += verify_exact((label + " V scales/preserved tail").c_str(),
+        from_device<std::uint16_t>(scale_v.data(), scale_count), expected_vs);
+    failures += verify_exact((label + " input K").c_str(), from_device<std::uint16_t>(d_k, input_count), input_k);
+    failures += verify_exact((label + " input V").c_str(), from_device<std::uint16_t>(d_v, input_count), input_v);
+    failures += verify_exact((label + " positions").c_str(), from_device<std::int32_t>(d_positions, tokens), positions);
+    failures += verify_exact((label + " counts").c_str(), from_device<std::int32_t>(d_count, 1), {committed});
+    failures += verify_exact((label + " row").c_str(), from_device<std::int32_t>(d_row, 1), {1});
+    failures += verify_exact((label + " tables").c_str(), from_device<std::int32_t>(d_tables, tables.size()), tables);
+    for (auto* buffer : {&cache_k, &cache_v, &scale_k, &scale_v}) failures += buffer->verify_guards(label.c_str());
+    return failures;
+}
+
 std::size_t input_index(int d, int head, int token) {
     return static_cast<std::size_t>(d) +
            static_cast<std::size_t>(kHeadDim) *
@@ -1563,6 +1744,11 @@ int main(int argc, char** argv) {
         failures += full_append_case(kv_heads, KvCacheStorage::Nvfp4Group16);
         failures += full_append_case(kv_heads, KvCacheStorage::Fp8KeyNvfp4Value);
     }
+    for (const int kv_heads : {2, 4})
+        for (const auto storage : {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64,
+                                   KvCacheStorage::RK4V4E8})
+            for (const int committed : {0, 1, 3, 7, 16})
+                failures += full_prefix_case(kv_heads, storage, committed);
     // rk8v4 exercises both append kernels: the general one, and at T>=128 with Hkv==2
     // the tiled page kernel. It packs two signed 4-bit codes per byte, which the generic
     // KvCacheStorage sweep above does not model, so it runs through its own oracle.
