@@ -1071,7 +1071,9 @@ __global__ void speculative_tree_accept_device_kernel(
     }
     licensed_counts[0] = count;
     accepted_drafts[0] = accepted;
-    last_node[0] = current;
+    // target_hidden is compacted into accepted-path order before continuation selection.
+    // Therefore the selector names the last compacted column, not the original DFS node id.
+    last_node[0] = count - 1;
 }
 
 __global__ void speculative_tree_gather_bf16_counted_kernel(
