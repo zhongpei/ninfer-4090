@@ -915,9 +915,11 @@ struct SpeculativeStats {
     std::uint64_t lookup_rounds           = 0;
     std::uint64_t lookup_replace_rounds   = 0;
     std::uint64_t lookup_head_skip_rounds = 0;
+    std::uint64_t lookup_merge_rounds     = 0;
     std::uint64_t lookup_drafted_tokens   = 0;
     std::uint64_t lookup_accepted_tokens  = 0;
     std::uint64_t tree_rounds              = 0;
+    std::uint64_t tree_sampled_rounds      = 0;
     std::uint64_t tree_fallback_rounds     = 0;
     std::uint64_t tree_nodes               = 0;
     std::uint64_t tree_accepted_drafts     = 0;
