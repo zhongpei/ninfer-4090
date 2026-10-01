@@ -150,6 +150,46 @@ private:
 
 } // namespace
 
+void TeacherTraceSink::begin(const Tensor& value) {
+    if (fused_bf16 == nullptr || layers.empty() || layers.size() > 32 || active_tokens <= 0 ||
+        hidden_size == 0 || value.dtype != DType::BF16 ||
+        value.ne[0] != static_cast<std::int32_t>(hidden_size) ||
+        value.ne[1] != active_tokens ||
+        fused_row_stride_elements != layers.size() * static_cast<std::size_t>(hidden_size)) {
+        throw std::logic_error("Teacher trace sink is incomplete");
+    }
+    captured_mask = 0;
+}
+
+void TeacherTraceSink::capture_layer(int layer, const Tensor& value, cudaStream_t stream) {
+    const auto it = std::find(layers.begin(), layers.end(), static_cast<std::uint32_t>(layer));
+    if (it == layers.end()) return;
+    const std::size_t index = static_cast<std::size_t>(it - layers.begin());
+    if (value.dtype != DType::BF16 || value.ne[0] != static_cast<std::int32_t>(hidden_size) ||
+        value.ne[1] != active_tokens) {
+        throw std::logic_error("Teacher trace layer capture shape is invalid");
+    }
+    auto* destination =
+        fused_bf16 + index * static_cast<std::size_t>(hidden_size);
+    const std::size_t width_bytes = static_cast<std::size_t>(hidden_size) * sizeof(std::uint16_t);
+    const std::size_t destination_pitch =
+        fused_row_stride_elements * sizeof(std::uint16_t);
+    const std::size_t source_pitch = static_cast<std::size_t>(value.nb[1]);
+    CUDA_CHECK(cudaMemcpy2DAsync(destination, destination_pitch, value.data, source_pitch,
+                                 width_bytes, static_cast<std::size_t>(active_tokens),
+                                 cudaMemcpyDeviceToHost, stream));
+    captured_mask |= 1U << index;
+}
+
+void TeacherTraceSink::capture_positions(const Tensor& source, cudaStream_t) {
+    const std::uint32_t complete =
+        layers.size() == 32 ? ~0U : ((1U << layers.size()) - 1U);
+    if (captured_mask != complete || source.dtype != DType::I32 ||
+        source.ne[0] != active_tokens) {
+        throw std::logic_error("Teacher trace did not capture every requested target layer");
+    }
+}
+
 void DFlashTreeFeatureSink::begin(const Tensor& value) {
     if (features == nullptr || layers.empty() || layers.size() > 32 || active_tokens <= 0 ||
         value.dtype != DType::BF16 || value.ne[1] != active_tokens ||
@@ -1745,6 +1785,18 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
 PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std::uint32_t begin,
                                               std::uint32_t nominal_length, bool finalize_at_end,
                                               DFlashFeatureSink& sink) {
+    if (begin >= full_ids.size() || nominal_length == 0 ||
+        nominal_length > full_ids.size() - begin) {
+        throw std::invalid_argument("text prefill chunk is outside the prompt");
+    }
+    const TextPrefill text_prefill{full_ids, begin};
+    return prefill_impl(full_ids.subspan(begin, nominal_length), &text_prefill, nullptr, sink,
+                        finalize_at_end);
+}
+
+PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std::uint32_t begin,
+                                              std::uint32_t nominal_length, bool finalize_at_end,
+                                              TeacherTraceSink& sink) {
     if (begin >= full_ids.size() || nominal_length == 0 ||
         nominal_length > full_ids.size() - begin) {
         throw std::invalid_argument("text prefill chunk is outside the prompt");
