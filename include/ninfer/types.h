@@ -105,6 +105,11 @@ enum class SpeculativeRoutingMode : std::uint8_t {
     Stair,
 };
 
+enum class SpeculativeRouterScope : std::uint8_t {
+    Request,
+    Engine,
+};
+
 enum class LookupDraftStrategy : std::uint8_t {
     Recent,
     Vote,
@@ -150,6 +155,8 @@ struct LookupDraftOptions {
     // Zero disables process-persistent lookup history. When non-zero, completed request ledgers
     // are retained up to this many tokens and indexed by n-gram hash.
     std::uint32_t persistent_tokens = 0;
+    // Optional on-disk snapshot for process history. Empty keeps process-only behavior.
+    std::filesystem::path persistent_path;
     // Optional static suffix corpus. PREFIX names PREFIX.tokens.i32 and PREFIX.suffix.u32.
     std::filesystem::path corpus_prefix;
     float corpus_weight          = 0.50F;
@@ -164,6 +171,10 @@ inline constexpr std::size_t kSpeculativeStairLevels = 4;
 // its own verify staircase. Fixed mode is the default and preserves the pre-router behavior.
 struct SpeculativeRoutingOptions {
     SpeculativeRoutingMode mode = SpeculativeRoutingMode::Fixed;
+    // Request preserves the original A/B behavior. Engine reuses observed chain/tree economics
+    // across requests. A nonempty state_path also restores/saves that engine state across restarts.
+    SpeculativeRouterScope scope = SpeculativeRouterScope::Request;
+    std::filesystem::path state_path;
     std::array<std::uint32_t, kSpeculativeStairLevels> widths{3, 7, 11, 15};
     std::array<float, kSpeculativeStairLevels> verify_costs{1.00F, 1.02F, 1.05F, 1.10F};
     float draft_cost       = 0.25F;
@@ -265,6 +276,14 @@ enum class VisionResidency : std::uint8_t {
     Overlay,  // tower host-pinned; each image borrows device memory inside a bounded window
 };
 
+struct DFlashTeacherOptions {
+    // Empty disables native teacher recording. Enabled recording emits one .ndft file per logical
+    // prefill sequence. The data comes from the exact loaded .ninfer target and its prepared head.
+    std::filesystem::path output_directory;
+
+    [[nodiscard]] bool enabled() const noexcept { return !output_directory.empty(); }
+};
+
 struct EngineOptions {
     std::filesystem::path artifact_path;
     std::filesystem::path chat_template_path;
@@ -283,6 +302,7 @@ struct EngineOptions {
     std::uint32_t prefill_chunk        = 1024;
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
+    DFlashTeacherOptions dflash_teacher;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;
     // Zero selects a bounded worker count from the detected host concurrency.

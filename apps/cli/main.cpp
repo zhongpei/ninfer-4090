@@ -313,6 +313,7 @@ int main(int argc, char** argv) {
         engine_options.prefill_chunk            = cli.prefill_chunk;
         engine_options.kv_cache                 = cli.kv_cache;
         engine_options.speculative              = cli.speculative;
+        engine_options.dflash_teacher.output_directory = cli.dflash_teacher_out;
         engine_options.enable_vision            = cli.enable_vision;
         engine_options.vision_residency         = cli.vision_residency;
         engine_options.vision_max_merged_tokens = cli.vision_max_merged_tokens;

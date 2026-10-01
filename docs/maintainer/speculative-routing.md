@@ -15,6 +15,34 @@ ninfer-serve MODEL.ninfer \
 Without `--spec-router stair`, routing is `fixed` and the previous maximum-K behavior is
 unchanged.
 
+## Lifetime and persistence
+
+The original A/B behavior is request-local:
+
+```text
+--spec-router-scope request
+```
+
+To let serving traffic teach later requests, use:
+
+```bash
+--spec-router stair \
+--spec-router-scope engine
+```
+
+Chain Stair and 16-row Tree-Stair then share Engine lifetime rather than resetting for every
+request. To keep those small host-only counters across clean restarts, also set:
+
+```bash
+--spec-router-state /var/lib/ninfer/spec-router.state
+```
+
+The state contains only observed acceptance/committed-token counters and the last selected rung. It
+is an optimization hint, not model/KV/StateImage authority; failure to save during noexcept
+destruction never invalidates generated output. The default remains request-local for controlled
+A/B comparisons.
+
+
 ## Why the policy is a staircase
 
 Speculative verification is a small-M target forward. Its cost is not generally linear in the
@@ -51,6 +79,8 @@ oscillation from short-window noise.
 | CLI flag | Meaning | Default |
 |---|---|---:|
 | `--spec-router fixed\|stair` | routing mode | `fixed` |
+| `--spec-router-scope request\|engine` | statistics lifetime | `request` |
+| `--spec-router-state PATH` | optional engine-state snapshot | unset |
 | `--spec-stair-widths A,B,C,D` | four strictly increasing target draft extents | `3,7,11,15` |
 | `--spec-stair-costs A,B,C,D` | positive verify costs in any common relative unit | `1,1.02,1.05,1.10` |
 | `--spec-stair-draft-cost F` | one wide DFlash proposal cost in the same unit | `0.25` |

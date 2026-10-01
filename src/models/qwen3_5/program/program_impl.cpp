@@ -103,7 +103,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       speculative_backend(plan.speculative_backend),
       kv_storage(plan.kv_storage), proposal_head(plan.proposal_head),
       lookup_persistent(plan.lookup_options.persistent_tokens, plan.lookup_options.max_order,
-                        plan.lookup_options.max_matches),
+                        plan.lookup_options.max_matches, plan.lookup_options.persistent_path),
       lookup_corpus(plan.lookup_options.corpus_prefix),
       rope_scaling_factor(plan.rope_scaling_factor),
       rope_scaling_original_context(plan.rope_scaling_original_context),
@@ -143,6 +143,21 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
                                CudaEventTimer(device_in, device_in.transfer_stream)} {
     if (&parameters != plan.parameters || parameters.model.options() != plan.features) {
         throw std::invalid_argument("Program parameters do not match the frozen sequence plan");
+    }
+    if (speculative_routing.scope == SpeculativeRouterScope::Engine &&
+        !speculative_routing.state_path.empty()) {
+        (void)load_persistent_spec_router_state(speculative_routing.state_path,
+                                                engine_spec_router);
+    }
+    if (plan.dflash_teacher.enabled()) {
+        if (!parameters.draft || !parameters.model.config().draft) {
+            throw std::logic_error("native DFlash teacher recording lost draft configuration");
+        }
+        dflash_teacher_writer = std::make_unique<DFlashTeacherWriter>(
+            plan.dflash_teacher.output_directory,
+            dimension(parameters.draft->feature_projection.weight.k),
+            std::span<const std::uint32_t>(
+                parameters.model.config().draft->target_layer_ids));
     }
     // Hand `work` the extra ranks' storage. From here one arena serves every device: the layer loop
     // switches ranks alongside ScopedDeviceRank and every workspace call site is unchanged.
@@ -461,6 +476,16 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
 ProgramImpl::~ProgramImpl() noexcept {
     if (device.transfer_stream != nullptr) { (void)cudaStreamSynchronize(device.transfer_stream); }
     if (device.stream != nullptr) { (void)cudaStreamSynchronize(device.stream); }
+    if (speculative_routing.scope == SpeculativeRouterScope::Engine &&
+        !speculative_routing.state_path.empty()) {
+        try {
+            save_persistent_spec_router_state(speculative_routing.state_path,
+                                              engine_spec_router);
+        } catch (...) {
+            // Destruction is noexcept. Router persistence is an optimization hint, never model
+            // state authority, so failure to save must not terminate the process.
+        }
+    }
 }
 
 std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,

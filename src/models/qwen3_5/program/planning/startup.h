@@ -89,6 +89,7 @@ struct SequencePlanningInputs {
     SpeculativeRoutingOptions speculative_routing;
     SpeculativeTreeOptions speculative_tree;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
+    DFlashTeacherOptions dflash_teacher;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
     models::LoadOptions features;
@@ -117,6 +118,7 @@ struct SequencePlanImpl {
     SpeculativeRoutingOptions speculative_routing;
     SpeculativeTreeOptions speculative_tree;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
+    DFlashTeacherOptions dflash_teacher;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
     models::LoadOptions features;

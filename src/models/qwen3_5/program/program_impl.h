@@ -18,6 +18,7 @@
 #include "models/qwen3_5/program/speculative/stair_router.h"
 #include "models/qwen3_5/program/speculative/lookup_draft.h"
 #include "models/qwen3_5/program/speculative/tree_plan.h"
+#include "models/qwen3_5/program/speculative/teacher_record.h"
 #include "models/qwen3_5/program/planning/resource_projection.h"
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
@@ -585,6 +586,8 @@ public:
     const LookupDraftOptions lookup_options;
     const SpeculativeRoutingOptions speculative_routing;
     const SpeculativeTreeOptions speculative_tree;
+    PersistentSpecRouterState engine_spec_router;
+    std::unique_ptr<DFlashTeacherWriter> dflash_teacher_writer;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
@@ -1203,6 +1206,12 @@ private:
                                        std::span<const std::uint32_t> counts);
     void validate_licensed_tokens(std::span<const TokenId> tokens) const;
     void mark_workspace_usage(std::size_t phase_bytes) noexcept;
+    void record_dflash_teacher_chunk(std::uint64_t sequence_id,
+                                     std::span<const TokenId> ids,
+                                     std::uint32_t chunk_begin,
+                                     const Tensor& features,
+                                     const Tensor& positions,
+                                     const Tensor& hidden);
     [[nodiscard]] runtime::BatchedGeneratedRound
     decode_ordinary_batch(std::span<const std::uint32_t> lanes,
                           std::span<const runtime::RoundBudget> budgets,

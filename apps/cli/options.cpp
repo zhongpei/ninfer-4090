@@ -122,14 +122,17 @@ std::string usage_text(const char* argv0) {
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--devices N,M]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
-           "       [--spec-router fixed|stair] [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
+           "       [--dflash-teacher-out DIR]\n"
+           "       [--spec-router fixed|stair] [--spec-router-scope request|engine] [--spec-router-state PATH]\n"
+           "       [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
            "       [--spec-tree off|lattice] [--spec-tree-nodes N] [--spec-tree-spine N]\n"
            "       [--spec-stair-draft-cost F] [--spec-stair-prior F] [--spec-stair-prior-weight F]\n"
            "       [--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F]\n"
            "       [--lookup-ngram N] [--lookup-strategy recent|vote] [--lookup-dflash off|replace|skip]\n"
            "       [--lookup-max-order N] [--lookup-max-matches N] [--lookup-min-support N] [--lookup-min-confidence F]\n"
            "       [--lookup-base-drafts N] [--lookup-deep-after N] [--lookup-deep-drafts N]\n"
-           "       [--lookup-persistent-tokens N] [--lookup-corpus-prefix PATH] [--lookup-corpus-weight F] [--lookup-corpus-samples N]\n"
+           "       [--lookup-persistent-tokens N] [--lookup-persistent-path PATH] [--lookup-corpus-prefix PATH]\n"
+           "       [--lookup-corpus-weight F] [--lookup-corpus-samples N]\n"
            "       [--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4]\n"
            "       [--gdn-state-fp16] [--mlp-a8-decode] [--no-prefill-a8]\n"
            "       [--prefill-cublas [--no-prefill-cublas-projections]]\n"
@@ -164,9 +167,13 @@ std::string usage_text(const char* argv0) {
            "perplexity cost (docs/performance.md), off by default, and it wants a larger "
            "--prefill-chunk to pay. --no-prefill-cublas-projections keeps the attention and GDN "
            "input projections off that route.\n"
+           "--dflash-teacher-out DIR records teacher-forced target taps and stable target top-16 "
+           "from the loaded .ninfer artifact during prefill; this is an offline training tool.\n"
            "--spec-tree lattice enables C1 greedy DFlash2 runtime tree verification; "
            "--spec-tree-nodes caps the maximum at 15; Tree-Stair may choose a smaller active prefix, and --spec-tree-spine controls how much "
            "of the greedy lattice is installed before best-first alternatives.\n"
+           "--spec-router-scope engine reuses Stair evidence across requests; "
+           "--spec-router-state additionally restores/saves that host-only state across restarts.\n"
            "--spec-router stair keeps the configured DFlash/DFlash2 drafter at maximum K while "
            "choosing the target-verify extent from an explicit measured cost staircase; fixed is "
            "the default and all Stair parameters are exposed for A/B calibration.\n"
@@ -225,6 +232,8 @@ Options parse_options(int argc, char** argv) {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = parse_u32(value(arg), "draft-tokens");
+        } else if (arg == "--dflash-teacher-out") {
+            options.dflash_teacher_out = value(arg);
         } else if (arg == "--spec-tree") {
             options.speculative.tree.mode = product::parse_speculative_tree_mode(value(arg));
         } else if (arg == "--spec-tree-nodes") {
@@ -234,6 +243,11 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--spec-router") {
             options.speculative.routing.mode =
                 product::parse_speculative_routing_mode(value(arg));
+        } else if (arg == "--spec-router-scope") {
+            options.speculative.routing.scope =
+                product::parse_speculative_router_scope(value(arg));
+        } else if (arg == "--spec-router-state") {
+            options.speculative.routing.state_path = value(arg);
         } else if (arg == "--spec-stair-widths") {
             product::parse_speculative_stair_widths(value(arg), options.speculative.routing);
         } else if (arg == "--spec-stair-costs") {
@@ -299,6 +313,8 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--lookup-persistent-tokens") {
             options.speculative.lookup.persistent_tokens =
                 parse_u32(value(arg), "lookup-persistent-tokens", true);
+        } else if (arg == "--lookup-persistent-path") {
+            options.speculative.lookup.persistent_path = value(arg);
         } else if (arg == "--lookup-corpus-prefix") {
             options.speculative.lookup.corpus_prefix = value(arg);
         } else if (arg == "--lookup-corpus-weight") {

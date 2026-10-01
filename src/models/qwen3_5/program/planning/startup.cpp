@@ -480,6 +480,18 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 ops::sampling_workspace_capacity_bytes(
                     dimension(parameters.model.resources().public_token_count), 1, 1));
     }
+    if (plan.dflash_teacher.enabled()) {
+        // Native teacher recording projects one final-hidden column at a time. Its transient
+        // capacity is constant in prefill_chunk and therefore does not raise the 24GB memory floor
+        // as corpus sequences grow.
+        matrix(text_prefill, DType::I32, 16, 1);
+        matrix(text_prefill, DType::FP32, 16, 1);
+        const auto& head = parameters.text.output_head;
+        scratch(text_prefill, execution::rotated_workspace_bytes(
+                                  head.hadamard_signs, head.weight.k, 1,
+                                  ops::linear_topk_workspace_capacity_bytes(
+                                      head.weight.qtype, head.weight.n, head.weight.k, 1, 1)));
+    }
     out.text_prefill = finish(text_prefill);
 
     if (plan.causal_scoring) {
@@ -876,6 +888,20 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         break;
     }
+    if (options.dflash_teacher.enabled()) {
+        if (options.purpose != EnginePurpose::Generation ||
+            options.speculative.backend != SpeculativeBackend::DFlash2 ||
+            !parameters.draft || !parameters.model.config().draft ||
+            !parameters.model.config().draft->dflash2) {
+            throw std::invalid_argument(
+                "native DFlash teacher recording requires a Generation Engine with DFlash2");
+        }
+        if (options.context_cache.enabled) {
+            throw std::invalid_argument(
+                "native DFlash teacher recording requires context-cache disabled so every "
+                "teacher sequence starts at token zero");
+        }
+    }
     if (options.speculative.tree.mode != SpeculativeTreeMode::Off) {
         if (options.speculative.backend != SpeculativeBackend::DFlash2 ||
             options.speculative.tree.nodes == 0 || options.speculative.tree.nodes > 15 ||
@@ -913,6 +939,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->speculative_routing = inputs.speculative_routing;
     impl->speculative_tree    = inputs.speculative_tree;
     impl->speculative_backend = inputs.speculative_backend;
+    impl->dflash_teacher      = inputs.dflash_teacher;
     impl->proposal_head       = inputs.proposal_head;
     impl->features            = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
@@ -1011,6 +1038,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .speculative_routing = options.speculative.routing,
         .speculative_tree    = options.speculative.tree,
         .speculative_backend = options.speculative.backend,
+        .dflash_teacher      = options.dflash_teacher,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,
         .features            = models::load_options(options),

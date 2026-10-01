@@ -71,9 +71,17 @@ won unconditionally.
 
 ### Process history
 
-`--lookup-persistent-tokens N` retains at most N token ids across requests in the current
-server process. It does **not** replace the exact context cache and it is not model state. Restarting
-the process clears it.
+`--lookup-persistent-tokens N` retains at most N token ids across requests. With no path it is
+process-local, preserving the original A/B behavior. Add:
+
+```bash
+--lookup-persistent-path /var/lib/ninfer/lookup-history.bin
+```
+
+to restore/save the bounded token history across clean restarts. The index is rebuilt from the
+bounded token snapshot at startup. This remains a proposal hint only: it does **not** replace the
+exact context cache and it is never model-state authority. If the bounded store rolls over, older
+history is intentionally discarded rather than increasing host memory without limit.
 
 ### Static corpus
 
@@ -157,6 +165,7 @@ this cost on the target 4090 rather than assuming that head-skip is always profi
 | `--lookup-deep-after N` | 2 | consecutive full accepts before deep copy; 0 disables |
 | `--lookup-deep-drafts N` | 15 | deep copy policy maximum |
 | `--lookup-persistent-tokens N` | 0 | process-history token budget |
+| `--lookup-persistent-path PATH` | empty | optional cross-restart bounded history snapshot |
 | `--lookup-corpus-prefix PATH` | empty | static corpus prefix |
 | `--lookup-corpus-weight F` | 0.50 | static-corpus vote weight |
 | `--lookup-corpus-samples N` | 64 | sampled matching suffixes |

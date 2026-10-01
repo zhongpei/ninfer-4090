@@ -136,9 +136,14 @@ class LookupPersistentStore {
 public:
     LookupPersistentStore() = default;
     LookupPersistentStore(std::uint32_t max_tokens, std::uint32_t max_order,
-                          std::uint32_t max_matches)
-        : max_tokens_(max_tokens), max_order_(max_order), max_matches_(max_matches) {
-        if (max_tokens_ != 0) { tokens_.reserve(static_cast<std::size_t>(max_tokens_) + 1U); }
+                          std::uint32_t max_matches,
+                          std::filesystem::path snapshot_path = {})
+        : max_tokens_(max_tokens), max_order_(max_order), max_matches_(max_matches),
+          snapshot_path_(std::move(snapshot_path)) {
+        if (max_tokens_ != 0) {
+            tokens_.reserve(static_cast<std::size_t>(max_tokens_) + 1U);
+            load_snapshot();
+        }
     }
 
     [[nodiscard]] bool enabled() const noexcept { return max_tokens_ != 0; }
@@ -159,6 +164,7 @@ public:
             tokens_.push_back(sequence[source]);
             record_follow(follow);
         }
+        save_snapshot();
     }
 
     [[nodiscard]] lookup_detail::MatchSet
@@ -212,6 +218,83 @@ public:
     }
 
 private:
+    static constexpr std::uint64_t kSnapshotMagic = 0x31504655534c4b4eULL; // "NKLSUFP1"
+
+    void rebuild_index() {
+        index_.clear();
+        for (std::size_t follow = 1; follow < tokens_.size(); ++follow) {
+            if (tokens_[follow] == kLookupDocumentSeparator) continue;
+            record_follow(follow);
+        }
+    }
+
+    void load_snapshot() {
+        if (snapshot_path_.empty() || !std::filesystem::exists(snapshot_path_)) return;
+        std::ifstream input(snapshot_path_, std::ios::binary);
+        if (!input) {
+            throw std::runtime_error("cannot open lookup persistent snapshot: " +
+                                     snapshot_path_.string());
+        }
+        std::uint64_t magic = 0;
+        std::uint32_t count = 0;
+        input.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        input.read(reinterpret_cast<char*>(&count), sizeof(count));
+        if (!input || magic != kSnapshotMagic || count > max_tokens_) {
+            throw std::runtime_error("invalid lookup persistent snapshot: " +
+                                     snapshot_path_.string());
+        }
+        tokens_.resize(count);
+        if (count != 0) {
+            input.read(reinterpret_cast<char*>(tokens_.data()),
+                       static_cast<std::streamsize>(count * sizeof(TokenId)));
+        }
+        if (!input) {
+            throw std::runtime_error("truncated lookup persistent snapshot: " +
+                                     snapshot_path_.string());
+        }
+        rebuild_index();
+    }
+
+    void save_snapshot() const {
+        if (snapshot_path_.empty()) return;
+        const auto parent = snapshot_path_.parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent);
+        auto temp = snapshot_path_;
+        temp += ".tmp";
+        {
+            std::ofstream output(temp, std::ios::binary | std::ios::trunc);
+            if (!output) {
+                throw std::runtime_error("cannot write lookup persistent snapshot: " +
+                                         temp.string());
+            }
+            const std::uint64_t magic = kSnapshotMagic;
+            const auto count = static_cast<std::uint32_t>(tokens_.size());
+            output.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+            output.write(reinterpret_cast<const char*>(&count), sizeof(count));
+            if (count != 0) {
+                output.write(reinterpret_cast<const char*>(tokens_.data()),
+                             static_cast<std::streamsize>(count * sizeof(TokenId)));
+            }
+            output.flush();
+            if (!output) {
+                throw std::runtime_error("failed writing lookup persistent snapshot: " +
+                                         temp.string());
+            }
+        }
+        std::error_code ec;
+        std::filesystem::rename(temp, snapshot_path_, ec);
+        if (ec) {
+            std::filesystem::remove(snapshot_path_, ec);
+            ec.clear();
+            std::filesystem::rename(temp, snapshot_path_, ec);
+            if (ec) {
+                std::filesystem::remove(temp);
+                throw std::runtime_error("cannot publish lookup persistent snapshot: " +
+                                         snapshot_path_.string());
+            }
+        }
+    }
+
     void record_follow(std::size_t follow) {
         if (follow == 0) { return; }
         for (std::uint32_t order = 1; order <= max_order_ && follow >= order; ++order) {
@@ -233,6 +316,7 @@ private:
     std::uint32_t max_tokens_ = 0;
     std::uint32_t max_order_ = 0;
     std::uint32_t max_matches_ = 0;
+    std::filesystem::path snapshot_path_;
     std::vector<TokenId> tokens_;
     std::unordered_map<std::uint64_t, std::vector<std::size_t>> index_;
 };

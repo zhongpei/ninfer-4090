@@ -30,5 +30,10 @@ verification ideas. NInfer's implementation is specific to its hybrid target: DF
 reuse for temporary full-attention KV, ancestor-aware GDN convolution/recurrent evaluation, and
 accepted-path-only ReplaySSM/StateImage commit.
 
+The 24GB-oriented follow-up also adapts Tandem's persistent-router/persistent-suffix-memory
+operational ideas while retaining NInfer's own bounded host structures. Native teacher recording is
+an NInfer-specific extension: it records the target taps and top-k distribution from the exact
+loaded artifact so DFlash fine-tuning can follow quantized/Ternary target behavior.
+
 This notice covers code/design adapted from TandemLLM. Model weights and other third-party
 components retain their own licenses and notices.

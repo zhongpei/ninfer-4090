@@ -46,6 +46,13 @@ namespace ninfer::product {
     throw std::invalid_argument("invalid lookup DFlash mode: " + std::string(value));
 }
 
+[[nodiscard]] inline SpeculativeRouterScope
+parse_speculative_router_scope(std::string_view value) {
+    if (value == "request") { return SpeculativeRouterScope::Request; }
+    if (value == "engine") { return SpeculativeRouterScope::Engine; }
+    throw std::invalid_argument("invalid speculative router scope: " + std::string(value));
+}
+
 [[nodiscard]] inline SpeculativeRoutingMode
 parse_speculative_routing_mode(std::string_view value) {
     if (value == "fixed") { return SpeculativeRoutingMode::Fixed; }
@@ -163,6 +170,10 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         lookup.corpus_weight < 0.0F || lookup.corpus_samples == 0) {
         throw std::invalid_argument("invalid context-lookup drafting parameter");
     }
+    if (!lookup.persistent_path.empty() && lookup.persistent_tokens == 0) {
+        throw std::invalid_argument(
+            "--lookup-persistent-path requires --lookup-persistent-tokens > 0");
+    }
     if (lookup.strategy == LookupDraftStrategy::Vote && options.lookup_ngram != 0 &&
         options.lookup_ngram > lookup.max_order) {
         throw std::invalid_argument(
@@ -180,6 +191,9 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         }
         // Copy widths are policy maxima. The runtime clamps both to the startup DFlash K, request
         // budget and remaining context so one A/B profile can compare K7 and K15 artifacts.
+    }
+    if (!router.state_path.empty() && router.scope != SpeculativeRouterScope::Engine) {
+        throw std::invalid_argument("--spec-router-state requires --spec-router-scope engine");
     }
     if (!std::isfinite(router.draft_cost) || router.draft_cost < 0.0F ||
         !std::isfinite(router.prior_acceptance) || router.prior_acceptance < 0.0F ||

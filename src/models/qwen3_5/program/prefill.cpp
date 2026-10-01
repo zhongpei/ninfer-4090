@@ -5,6 +5,7 @@
 #include "models/qwen3_5/execution/linear.h"
 #include "core/device.h"
 #include "ninfer/ops/gdn_replay.h"
+#include "ninfer/ops/linear_topk.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scalar.h"
 #include "ninfer/ops/scatter.h"
@@ -20,6 +21,7 @@
 #include <span>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace ninfer::models::qwen3_5::execution {
 namespace {
@@ -77,8 +79,18 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     const std::span<const int> prompt(ids.data(), ids.size());
     if (state.dflash != nullptr) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
-        return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, finalize_at_end,
-                                  sink);
+        const std::uint32_t begin = state.text_kv_base;
+        PrefillChunkResult result =
+            card.prefill_chunk(prompt, begin, nominal_length, finalize_at_end, sink);
+        if (state.dflash_teacher_consumer && result.processed_tokens != 0) {
+            const auto count = static_cast<std::int32_t>(result.processed_tokens);
+            state.dflash_teacher_consumer(
+                ids.subspan(begin, result.processed_tokens), begin,
+                dflash_state(state).prefill_features.slice(1, 0, count),
+                dflash_state(state).prefill_positions.slice(0, 0, count),
+                state.execution.prefill_hidden.slice(1, 0, count));
+        }
+        return result;
     }
     return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, finalize_at_end);
 }
@@ -99,8 +111,18 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
                                                    : -1);
     if (state.dflash != nullptr) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
-        return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, vision,
-                                  finalize_at_end, sink);
+        const std::uint32_t begin = state.text_kv_base;
+        PrefillChunkResult result =
+            card.prefill_chunk(prompt, begin, nominal_length, vision, finalize_at_end, sink);
+        if (state.dflash_teacher_consumer && result.processed_tokens != 0) {
+            const auto count = static_cast<std::int32_t>(result.processed_tokens);
+            state.dflash_teacher_consumer(
+                std::span<const TokenId>(prompt.token_ids).subspan(begin, result.processed_tokens),
+                begin, dflash_state(state).prefill_features.slice(1, 0, count),
+                dflash_state(state).prefill_positions.slice(0, 0, count),
+                state.execution.prefill_hidden.slice(1, 0, count));
+        }
+        return result;
     }
     return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, vision, finalize_at_end);
 }
@@ -1003,6 +1025,71 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     return timing.finish();
 }
 
+void ProgramImpl::record_dflash_teacher_chunk(
+    std::uint64_t sequence_id, std::span<const TokenId> ids, std::uint32_t chunk_begin,
+    const Tensor& features, const Tensor& positions, const Tensor& hidden) {
+    if (!dflash_teacher_writer || ids.empty()) { return; }
+    const auto tokens = static_cast<std::int32_t>(ids.size());
+    if (features.dtype != DType::BF16 || features.ne[1] != tokens ||
+        positions.dtype != DType::I32 || positions.ne[0] != tokens ||
+        hidden.dtype != DType::BF16 ||
+        hidden.ne[0] != dimension(parameters.model.config().text.hidden_size) ||
+        hidden.ne[1] != tokens) {
+        throw std::logic_error("native DFlash teacher chunk has invalid target tensors");
+    }
+
+    std::vector<std::uint16_t> host_features(
+        static_cast<std::size_t>(features.ne[0]) * ids.size());
+    std::vector<std::int32_t> host_positions(ids.size());
+    std::vector<TokenId> host_top_ids(
+        static_cast<std::size_t>(DFlashTeacherWriter::kTopK) * ids.size());
+    std::vector<float> host_top_scores(
+        static_cast<std::size_t>(DFlashTeacherWriter::kTopK) * ids.size());
+
+    CUDA_CHECK(cudaMemcpyAsync(host_features.data(), features.data,
+                               host_features.size() * sizeof(std::uint16_t),
+                               cudaMemcpyDeviceToHost, device.stream));
+    CUDA_CHECK(cudaMemcpyAsync(host_positions.data(), positions.data,
+                               host_positions.size() * sizeof(std::int32_t),
+                               cudaMemcpyDeviceToHost, device.stream));
+
+    const auto& head = parameters.text.output_head;
+    for (std::int32_t column = 0; column < tokens; ++column) {
+        work.reset();
+        Tensor top_ids = work.alloc(DType::I32, {static_cast<std::int32_t>(
+                                                     DFlashTeacherWriter::kTopK),
+                                                 1});
+        Tensor top_scores = work.alloc(DType::FP32, {static_cast<std::int32_t>(
+                                                         DFlashTeacherWriter::kTopK),
+                                                     1});
+        Tensor input = hidden.slice(1, column, 1);
+        Tensor projected =
+            execution::rotated_input(input, head.hadamard_signs, work, device.stream);
+        ops::linear_topk(
+            projected, head.weight,
+            dimension(parameters.model.resources().public_token_count),
+            top_ids, top_scores, work, device.stream);
+        CUDA_CHECK(cudaMemcpyAsync(
+            host_top_ids.data() +
+                static_cast<std::size_t>(column) * DFlashTeacherWriter::kTopK,
+            top_ids.data, DFlashTeacherWriter::kTopK * sizeof(TokenId),
+            cudaMemcpyDeviceToHost, device.stream));
+        CUDA_CHECK(cudaMemcpyAsync(
+            host_top_scores.data() +
+                static_cast<std::size_t>(column) * DFlashTeacherWriter::kTopK,
+            top_scores.data, DFlashTeacherWriter::kTopK * sizeof(float),
+            cudaMemcpyDeviceToHost, device.stream));
+    }
+    device.synchronize();
+    work.reset();
+
+    dflash_teacher_writer->write_chunk(
+        sequence_id, chunk_begin, ids, host_positions,
+        std::span<const std::uint16_t>(host_features),
+        std::span<const TokenId>(host_top_ids),
+        std::span<const float>(host_top_scores));
+}
+
 runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                                                         RequestControl& request,
                                                         runtime::ExecutionTiming* failed_timing) {
@@ -1060,6 +1147,18 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             selectors.destination,
             staged.initial_mtp_extent,
             dflash_host_ingress};
+
+        if (dflash_teacher_writer) {
+            const std::uint64_t sequence_id =
+                (lane_epochs[sequence.lane] << 8U) | static_cast<std::uint64_t>(sequence.lane);
+            schedule_state.dflash_teacher_consumer =
+                [this, sequence_id](std::span<const TokenId> chunk_ids,
+                                    std::uint32_t chunk_begin, const Tensor& features,
+                                    const Tensor& positions, const Tensor& hidden) {
+                    record_dflash_teacher_chunk(sequence_id, chunk_ids, chunk_begin,
+                                                features, positions, hidden);
+                };
+        }
 
         if (staged.mtp_bridge == MtpBridgeMode::BeforeSuffix) {
             if (staged.cursor != staged.base || staged.base == 0 ||
