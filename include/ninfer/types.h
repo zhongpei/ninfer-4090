@@ -150,6 +150,8 @@ struct LookupDraftOptions {
     // Zero disables process-persistent lookup history. When non-zero, completed request ledgers
     // are retained up to this many tokens and indexed by n-gram hash.
     std::uint32_t persistent_tokens = 0;
+    // Optional bounded restart-persistent history snapshot. Empty keeps process-only behavior.
+    std::filesystem::path history_path;
     // Optional static suffix corpus. PREFIX names PREFIX.tokens.i32 and PREFIX.suffix.u32.
     std::filesystem::path corpus_prefix;
     float corpus_weight          = 0.50F;
@@ -174,6 +176,9 @@ struct SpeculativeRoutingOptions {
     // observations about later proposal positions.
     std::uint32_t probe_period = 16;
     float switch_margin = 0.02F;
+    // Optional restart-persistent survival/selection statistics. Empty preserves per-request-only
+    // learning; a configured path is loaded at startup and atomically rewritten after completion.
+    std::filesystem::path profile_path;
 };
 
 struct SpeculativeOptions {
