@@ -23,6 +23,10 @@ struct RoundStateSpec {
     std::uint32_t batch_capacity = 1;
     std::uint32_t draft_window   = 0;
     SpeculativeBackend backend   = SpeculativeBackend::None;
+    bool tree_verify             = false;
+    std::int32_t attention_head_dim = 0;
+    std::int32_t attention_kv_heads = 0;
+    std::int32_t full_attention_layers = 0;
     bool causal_scoring          = false;
 };
 
@@ -94,6 +98,10 @@ struct DFlashDecodeEgress {
     std::array<TokenId, kMaximumConcurrency * kDFlashDecodeMaximumWidth> licensed_tokens{};
     std::array<std::int32_t, kMaximumConcurrency> licensed_counts{};
     std::array<std::int32_t, kMaximumConcurrency> accepted_drafts{};
+    // Tree mode is C1 in the first runtime implementation. path_nodes selects the root plus every
+    // accepted draft input row; path_count equals licensed_counts[0].
+    std::array<std::int32_t, kDFlashDecodeMaximumWidth> tree_path_nodes{};
+    std::int32_t tree_path_count = 0;
 };
 
 struct OrdinaryDecodeStateLayout {
@@ -142,6 +150,12 @@ struct DFlashDecodeStateLayout {
     TensorRegion verify_positions;
     std::optional<TensorRegion> candidate_ids;
     std::optional<TensorRegion> proposal_q;
+    std::optional<TensorRegion> lattice_scores;
+    std::optional<TensorRegion> tree_parents;
+    std::optional<TensorRegion> tree_depths;
+    std::optional<TensorRegion> tree_path_nodes;
+    std::optional<TensorRegion> tree_kv_key;
+    std::optional<TensorRegion> tree_kv_value;
     TensorRegion append_positions;
     TensorRegion append_counts;
     TensorRegion draft_tokens;
@@ -278,6 +292,12 @@ struct DFlashDecodeState {
     Tensor verify_positions;
     Tensor candidate_ids;
     Tensor proposal_q;
+    Tensor lattice_scores;
+    Tensor tree_parents;
+    Tensor tree_depths;
+    Tensor tree_path_nodes;
+    Tensor tree_kv_key;
+    Tensor tree_kv_value;
     Tensor append_positions;
     Tensor append_counts;
     Tensor draft_tokens;
