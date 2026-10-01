@@ -68,7 +68,7 @@ TestCacheLayout test_cache_layout(KvCacheStorage storage) {
         return {{DType::FP8_E4M3FN, kFullHeadDim, DType::FP16, kFullFp8Groups},
                 {DType::U8, kFullNvfp4CodeBytes, DType::U8, kFullNvfp4Groups}};
     case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
-        // rk8v4's value plane packs two signed 4-bit codes per byte over a 32-value group, which
+        // rk8v4's value plane packs two signed 4-bit codes per byte after H64 rotation, which
         // this generic layout table does not model; full_append_case_rk8v4 covers it directly.
         throw std::invalid_argument("test_cache_layout: rk8v4 uses full_append_case_rk8v4");
     }
@@ -368,10 +368,10 @@ void encode_full_group(const std::vector<float>& source, std::size_t source_base
         scale_bits;
 }
 
-// Independent CPU oracle for the rk8v4 value coding: FP16-RNE(absmax/7) scale over a 32-value
+// Independent CPU oracle for the current rk8v4 coding: FP16-RNE(absmax/7) over a 64-value
 // group, RNE-even codes clamped to +-7, and two codes per byte with dimension d in the low nibble
 // of byte d/2 when d is even and the high nibble when d is odd.
-constexpr int kFullValueGroup  = 32;
+constexpr int kFullValueGroup  = 64;
 constexpr int kFullValueGroups = kFullHeadDim / kFullValueGroup;
 
 void encode_full_group_i4(const std::vector<float>& source, std::size_t source_base,
@@ -406,9 +406,9 @@ void encode_full_group_i4(const std::vector<float>& source, std::size_t source_b
         scale_bits;
 }
 
-// rk8v4: rotated INT8 keys with a half-width packed signed int4 value plane. Keys are a paired
-// physical representation and are not standalone-verifiable, so this checks the value plane and
-// its scales against the oracle, exactly as the INT8 case does.
+// The public rk8v4 storage has H64-rotated K/V with G64 scales. This is distinct
+// from the legacy dtype-only G32 unrotated-value profile.
+std::array<float, 64> hadamard64_oracle(const std::array<float, 64>& input);
 int full_append_case_rk8v4(int kv_heads, int tokens = 3) {
     const int first_position = tokens >= 128 ? 61 : 63;
     const int logical_pages  = (first_position + tokens + kPage - 1) / kPage;
@@ -462,11 +462,11 @@ int full_append_case_rk8v4(int kv_heads, int tokens = 3) {
     GuardedDeviceBuffer scale_k(scale_count * sizeof(std::uint16_t));
     GuardedDeviceBuffer scale_v(value_scale_count * sizeof(std::uint16_t));
 
-    std::vector<std::int8_t> initial_k(code_count, static_cast<std::int8_t>(0x55));
+    std::vector<std::int8_t> expected_k(code_count, static_cast<std::int8_t>(0x55));
     std::vector<std::uint8_t> expected_v(packed_count, 0xa5U);
     auto expected_scale_k = patterned_bits(scale_count, 0x01234567u);
     auto expected_scale_v = patterned_bits(value_scale_count, 0x89abcdefu);
-    cache_k.copy_from_host(initial_k.data(), initial_k.size());
+    cache_k.copy_from_host(expected_k.data(), expected_k.size());
     cache_v.copy_from_host(expected_v.data(), expected_v.size());
     scale_k.copy_from_host(expected_scale_k.data(),
                            expected_scale_k.size() * sizeof(std::uint16_t));
@@ -488,14 +488,23 @@ int full_append_case_rk8v4(int kv_heads, int tokens = 3) {
         .storage      = KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
     };
 
+    auto rotated_k = host_k;
+    auto rotated_v = host_v;
     for (int token = 0; token < tokens; ++token) {
         const int position = positions[static_cast<std::size_t>(token)];
         const int page     = mapping[static_cast<std::size_t>(position / kPage)];
         for (int head = 0; head < kv_heads; ++head) {
             for (int group = 0; group < kFullValueGroups; ++group) {
-                const auto source =
-                    full_input_index(group * kFullValueGroup, head, token, kv_heads);
-                encode_full_group_i4(host_v, source, expected_v, head, position, page, group,
+                const auto source = full_input_index(group * kFullValueGroup, head, token, kv_heads);
+                for (auto* values : {&rotated_k, &rotated_v}) {
+                    std::array<float, 64> logical{};
+                    std::copy_n(values->begin() + static_cast<std::ptrdiff_t>(source), 64, logical.begin());
+                    const auto rotated = hadamard64_oracle(logical);
+                    std::copy(rotated.begin(), rotated.end(), values->begin() + static_cast<std::ptrdiff_t>(source));
+                }
+                encode_full_group(rotated_k, source, expected_k, head, position, page, group,
+                                   kv_heads, expected_scale_k);
+                encode_full_group_i4(rotated_v, source, expected_v, head, position, page, group,
                                      kv_heads, expected_scale_v);
             }
         }
@@ -507,7 +516,10 @@ int full_append_case_rk8v4(int kv_heads, int tokens = 3) {
     const std::string label = "kv_cache_append full rk8v4 Hkv=" + std::to_string(kv_heads) +
                               " T=" + std::to_string(tokens) +
                               " P=" + std::to_string(first_position);
-    int failures = 0;
+    int failures = verify_exact((label + " k codes").c_str(),
+                                from_device<std::int8_t>(cache_k.data(), code_count), expected_k);
+    failures += verify_exact((label + " k scales").c_str(),
+                             from_device<std::uint16_t>(scale_k.data(), scale_count), expected_scale_k);
     failures += verify_exact((label + " v codes").c_str(),
                              from_device<std::uint8_t>(cache_v.data(), packed_count), expected_v);
     failures += verify_exact((label + " v scales").c_str(),

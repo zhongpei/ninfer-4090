@@ -45,13 +45,13 @@ struct KVCacheAppendPrefixExecutionEnvelope {
  *           code[i]    = E4M3FN_RNE_SATFINITE(FP32(x[i]) * inv)
  *   decode[i] = FP32(E4M3FN(code[i])) * s.
  *
- * A cache whose value plane is DType::U8 selects the rk8v4 profile: keys keep the INT8-G64
- * encoding above and values are stored as signed 4-bit codes, two per byte, in a value plane of
+ * cache.storage selects the representation; plane dtypes alone do not identify its codec.
+ * RotatedInt8KeyInt4ValueGroup64 applies the normalized H64/8 transform separately to each
+ * contiguous 64-value group of both K and V. Prepared keys use the INT8-G64 encoding above;
+ * prepared values are stored as signed 4-bit codes, two per byte, in a value plane of
  * half the head dimension. Dimension d occupies the low nibble of byte d/2 when d is even and the
- * high nibble when d is odd. Values use a 32-value group rather than the key plane's 64, so their
- * scale plane has twice the key plane's leading extent: four bits resolve a group to 15 levels, so
- * one outlier would otherwise set the step for 64 neighbours. The group encoding is the INT8 one
- * with 7 in place of 127, over that 32-value group:
+ * high nibble when d is odd. Both planes use G64 and four FP16 scales per D256 row. The value
+ * group encoding is the INT8 one with 7 in place of 127, over that 64-value group:
  *
  *   a          = max_i abs(FP32(x[i]))
  *   scale_bits = FP16_RNE(a / 7)
@@ -60,13 +60,12 @@ struct KVCacheAppendPrefixExecutionEnvelope {
  *   code[i]    = s == 0 ? 0 : I4(clamp(RNE_even(FP32(x[i]) * inv), -7, 7))
  *   decode[i]  = FP32(code[i]) * s.
  *
- * V uses represented BF16 source values directly as x under every profile, including rk8v4: values
- * are never rotated, so no inverse preparation is applied to the attention output. For every
- * quantized profile, K is a paired physical representation for causal Attention: its
- * implementation-owned fixed orthogonal preparation selects x, and the causal consumer applies the
- * matching private Q preparation. The transform and raw K code/scale bytes are not standalone
- * mathematical outputs. Standalone and
- * fused append produce the same consumable K representation. Every addressed code/value and scale
+ * Int8Group64 uses represented BF16 K/V source values directly as x. Other quantized profiles
+ * use their fixed orthogonal K preparation before encoding, paired with matching Q preparation
+ * in the causal consumer. Profiles that rotate V also apply inverse V preparation after
+ * attention. The transform and raw K code/scale bytes are not standalone mathematical outputs.
+ * Standalone and fused append produce the same consumable K representation. Every addressed
+ * code/value and scale
  * is overwritten, and no unrelated cache row is read or written. Inputs and every cache
  * plane/table are pairwise non-overlapping. The Op owns no persistent allocation, frontier,
  * request identity, or commit authority.
@@ -74,7 +73,7 @@ struct KVCacheAppendPrefixExecutionEnvelope {
  * NVFP4-G16 and K8V4 KV-cache profiles are also ported on this fork: both planes use the e2m1
  * codec (Nvfp4Group16) or an FP8 key paired with an e2m1 value plane (Fp8KeyNvfp4Value), each with
  * a raw E4M3-byte group-16 scale on their e2m1 plane(s). See d256_kv_cache_profile's KvCacheStorage
- * overload for the exact per-plane encoding.
+ * overload for the exact per-plane encoding. These two profiles prepare K/V with H256/16.
  */
 void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
                      PagedKVLayerView cache, cudaStream_t stream);

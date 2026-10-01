@@ -32,9 +32,9 @@ constexpr std::int32_t kFp8QuantGroups   = 1;
 constexpr std::int32_t kNvfp4QuantGroup  = 16;
 constexpr std::int32_t kNvfp4QuantGroups = kHeadDim / kNvfp4QuantGroup;
 constexpr std::int32_t kNvfp4CodeBytes   = kHeadDim / 2;
-// The rk8v4 value plane groups 32 values per scale, not the key plane's 64 (see
-// D256KVCacheProfile); its packed byte holds the dimension pair (2p, 2p+1).
-constexpr std::int32_t kRk8ValueGroup  = 32;
+// The public rotated rk8v4 storage uses H64 for both K/V and one scale per G64.
+// The packed byte holds the dimension pair (2p, 2p+1).
+constexpr std::int32_t kRk8ValueGroup  = 64;
 constexpr std::int32_t kRk8ValueGroups = kHeadDim / kRk8ValueGroup;
 constexpr float kAttentionScale        = 0.0625f;
 constexpr std::uint16_t kOutputCanary  = 0x7fc1u;
@@ -143,7 +143,7 @@ TestCacheLayout test_cache_layout(KvCacheStorage storage) {
                 {DType::I8, kHeadDim, DType::FP16, kQuantGroups}};
     case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
         // rk8v4: the value plane packs two signed 4-bit codes per byte (U8, half the head
-        // dimension) over a finer 32-value group, so its scale plane is twice as wide.
+        // dimension) over G64, so its scale plane has the same extent as K.
         return {{DType::I8, kHeadDim, DType::FP16, kQuantGroups},
                 {DType::U8, kHeadDim / 2, DType::FP16, kRk8ValueGroups}};
     case KvCacheStorage::Fp8E4M3Row256:
@@ -582,6 +582,7 @@ struct HostCache {
     // Original-coordinate logical K after decoding the private rotated quantized representation.
     // This is fixture input to the independent Attention oracle, not a production staging oracle.
     std::vector<float> logical_k_quantized;
+    std::vector<double> logical_v_quantized;
     std::vector<float> rotated_k_quantized;
     std::vector<float> rotated_v_quantized;
 
@@ -830,6 +831,26 @@ void encode_rotated_fp8_key_row(std::span<const float> source, std::size_t sourc
     }
 }
 
+// Independent host H64 for each G64 group. Unlike the former H256 fixture,
+// the current public rotated storage keeps the four groups separate.
+template <typename T>
+void normalized_hadamard_d64_groups(std::array<T, kHeadDim>& values) {
+    for (int group = 0; group < kQuantGroups; ++group) {
+        const int group_base = group * kQuantGroup;
+        for (int stride = 1; stride < kQuantGroup; stride *= 2) {
+            for (int base = group_base; base < group_base + kQuantGroup; base += 2 * stride) {
+                for (int offset = 0; offset < stride; ++offset) {
+                    const T low = values[base + offset];
+                    const T high = values[base + offset + stride];
+                    values[base + offset] = low + high;
+                    values[base + offset + stride] = low - high;
+                }
+            }
+        }
+        for (int d = group_base; d < group_base + kQuantGroup; ++d) values[d] *= T{0.125};
+    }
+}
+
 void encode_int8_key_row(std::span<const float> source, std::size_t source_base,
                          std::vector<std::int8_t>& codes, std::size_t code_base,
                          std::vector<std::uint16_t>& scales, std::size_t scale_base,
@@ -840,7 +861,7 @@ void encode_int8_key_row(std::span<const float> source, std::size_t source_base,
     for (std::int32_t d = 0; d < kHeadDim; ++d) {
         rotated[static_cast<std::size_t>(d)] = source[source_base + static_cast<std::size_t>(d)];
     }
-    if (rotate) { normalized_hadamard_d256(rotated); }
+    if (rotate) { normalized_hadamard_d64_groups(rotated); }
     for (std::int32_t group = 0; group < kQuantGroups; ++group) {
         const std::size_t d = static_cast<std::size_t>(group * kQuantGroup);
         encode_group(rotated, d, codes, code_base + d, scales,
@@ -854,27 +875,46 @@ void encode_int8_key_row(std::span<const float> source, std::size_t source_base,
         decoded[offset]          = static_cast<float>(codes[code_base + offset]) *
                           f16_bits_to_f32(scales[scale_base + group]);
     }
-    if (rotate) { normalized_hadamard_d256(decoded); }
+    if (rotate) { normalized_hadamard_d64_groups(decoded); }
     for (std::int32_t d = 0; d < kHeadDim; ++d) {
         logical[logical_base + static_cast<std::size_t>(d)] = decoded[static_cast<std::size_t>(d)];
     }
 }
 
-// CachePlan overload: covers this fork's four originally-registered profiles, including rk8v4
-// (kPlanRk8v4), which the public KvCacheStorage enum did not distinguish from plain INT8 before
-// this fork added RotatedInt8KeyInt4ValueGroup64. cache.storage is still populated here (from
-// plan) so shared consumers below (DeviceCache, verify_cache) can dispatch on it uniformly
-// regardless of which overload built the HostCache.
+// Encode the current public rk8v4 V representation, then independently decode
+// stored signed nibbles and FP16 scales before the inverse H64 logical oracle.
+void encode_rotated_i4_value_row(std::span<const float> source, std::size_t source_base,
+                                  std::vector<std::uint8_t>& packed, std::size_t packed_base,
+                                  std::vector<std::uint16_t>& scales, std::size_t scale_base,
+                                  std::vector<double>& logical, std::size_t logical_base) {
+    std::array<float, kHeadDim> rotated{};
+    std::copy_n(source.begin() + static_cast<std::ptrdiff_t>(source_base), kHeadDim, rotated.begin());
+    normalized_hadamard_d64_groups(rotated);
+    for (int group = 0; group < kRk8ValueGroups; ++group) {
+        encode_group_i4(rotated, group * kRk8ValueGroup, packed,
+                         packed_base + group * (kRk8ValueGroup / 2), scales, scale_base + group);
+    }
+    std::array<double, kHeadDim> decoded{};
+    for (int d = 0; d < kHeadDim; ++d) {
+        const auto code = unpack_int4_code(packed[packed_base + d / 2], d & 1);
+        decoded[d] = static_cast<double>(code) *
+                     static_cast<double>(f16_bits_to_f32(scales[scale_base + d / kRk8ValueGroup]));
+    }
+    normalized_hadamard_d64_groups(decoded);
+    std::copy(decoded.begin(), decoded.end(), logical.begin() + static_cast<std::ptrdiff_t>(logical_base));
+}
+
+// CachePlan selects a public KvCacheStorage; use that profile rather than the
+// legacy dtype-only rk8v4 layout (G32 unrotated V), which is not this fixture's contract.
 HostCache make_cache(const Geometry& geometry, const CachePlan& plan, std::int32_t max_context,
                      std::uint32_t seed) {
-    const ops::D256KVCacheProfile profile =
-        ops::d256_kv_cache_profile(plan.dtype, plan.value_code_dtype);
+    const KvCacheStorage storage = cache_plan_storage(plan);
+    const ops::D256KVCacheProfile profile = ops::d256_kv_cache_profile(storage);
     const std::int32_t logical_capacity = align_up_page(max_context);
     const std::size_t elements          = cache_elements(geometry, logical_capacity);
     std::vector<float> logical_k        = make_bf16_values(elements, seed, -0.25f, 0.25f);
     std::vector<float> logical_v        = make_bf16_values(elements, seed + 1u, -1.0f, 1.0f);
 
-    const KvCacheStorage storage = cache_plan_storage(plan);
     HostCache cache{.geometry         = geometry,
                     .dtype            = plan.dtype,
                     .value_code_dtype = plan.value_code_dtype,
@@ -919,6 +959,7 @@ HostCache make_cache(const Geometry& geometry, const CachePlan& plan, std::int32
     cache.k_i8.assign(elements, 0);
     if (profile.packed_int4_values()) {
         cache.v_packed.assign(elements / 2, 0);
+        cache.logical_v_quantized.assign(elements, 0.0);
     } else {
         cache.v_i8.assign(elements, 0);
     }
@@ -930,19 +971,8 @@ HostCache make_cache(const Geometry& geometry, const CachePlan& plan, std::int32
                                 cache.logical_k_quantized, code,
                                 storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64);
             if (profile.packed_int4_values()) {
-                for (std::int32_t group = 0; group < kRk8ValueGroups; ++group) {
-                    const std::int32_t d = group * kRk8ValueGroup;
-                    const std::size_t group_code =
-                        cache_index(geometry, logical_capacity, head, position, d);
-                    const std::size_t group_packed =
-                        packed_cache_index(geometry, logical_capacity, head, position,
-                                           group * (kRk8ValueGroup / 2));
-                    const std::size_t group_scale =
-                        plane_scale_index(geometry, logical_capacity, head, position, group,
-                                          profile.value_scale_leading_extent);
-                    encode_group_i4(logical_v, group_code, cache.v_packed, group_packed,
-                                    cache.v_scale, group_scale);
-                }
+                encode_rotated_i4_value_row(logical_v, code, cache.v_packed, code / 2,
+                                             cache.v_scale, scale, cache.logical_v_quantized, code);
             } else {
                 for (std::int32_t group = 0; group < kQuantGroups; ++group) {
                     const std::int32_t d = group * kQuantGroup;
@@ -1168,20 +1198,10 @@ void append_cache(HostCache& cache, const std::vector<float>& k, const std::vect
                                 cache.logical_k_quantized, target,
                                 cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64);
             if (cache.packed_values()) {
-                for (std::int32_t group = 0; group < kRk8ValueGroups; ++group) {
-                    const std::int32_t d = group * kRk8ValueGroup;
-                    const std::size_t group_source = kv_input_index(geometry, head, d, token);
-                    const std::size_t group_target =
-                        cache_index(geometry, cache.logical_capacity, head, position, d);
-                    const std::size_t group_packed =
-                        packed_cache_index(geometry, cache.logical_capacity, head, position,
-                                           group * (kRk8ValueGroup / 2));
-                    const std::size_t group_scale =
-                        plane_scale_index(geometry, cache.logical_capacity, head, position, group,
-                                          cache.v_scale_extent());
-                    encode_group_i4(v, group_source, cache.v_packed, group_packed, cache.v_scale,
-                                    group_scale);
-                }
+                const std::size_t packed =
+                    packed_cache_index(geometry, cache.logical_capacity, head, position, 0);
+                encode_rotated_i4_value_row(v, source, cache.v_packed, packed, cache.v_scale, scale,
+                                             cache.logical_v_quantized, target);
             } else {
                 for (std::int32_t group = 0; group < kQuantGroups; ++group) {
                     const std::int32_t d           = group * kQuantGroup;
@@ -1215,17 +1235,7 @@ double cache_value(const HostCache& cache, bool key, std::int32_t head, std::int
                                    f16_bits_to_f32(cache.v_scale[scale]));
     }
 
-    if (cache.packed_values()) {
-        const std::size_t byte =
-            packed_cache_index(cache.geometry, cache.logical_capacity, head, position, d / 2);
-        const std::size_t scale =
-            plane_scale_index(cache.geometry, cache.logical_capacity, head, position,
-                              d / kRk8ValueGroup, cache.v_scale_extent());
-        const float decoded =
-            static_cast<float>(unpack_int4_code(cache.v_packed[byte], d & 1)) *
-            f16_bits_to_f32(cache.v_scale[scale]);
-        return static_cast<double>(decoded);
-    }
+    if (cache.packed_values()) { return cache.logical_v_quantized[code]; }
 
     const std::size_t scale =
         scale_index(cache.geometry, cache.logical_capacity, head, position, d / kQuantGroup);
@@ -3086,11 +3096,11 @@ int run_fp8_prompt_cases() {
 // small-T routes) needs direct oracle coverage here. Unlike FP8, INT4 packing needs no
 // arch feature, so these cases run on every build the INT8 cases run on.
 int run_rk8v4_cases() {
-    std::cout << "  rk8v4 (INT8-G64 rotated keys + packed INT4 G32 values):\n";
+    std::cout << "  rk8v4 (H64 INT8-G64 keys + H64 packed INT4-G64 values):\n";
     int failures = 0;
     for (const Geometry& geometry : kGeometries) {
         // T >= 7: prompt route over the packed cache; the append writes packed V and
-        // G32 scales that the prompt kernel then decodes (both static-smem T and the
+        // G64 scales that the prompt kernel then decodes (both static-smem T and the
         // dynamic-arena T >= 7 layout).
         failures += run_a1_case(geometry, kPlanRk8v4, {65, 63, 192, 611u},
                                 MappingPattern::Fragmented);
