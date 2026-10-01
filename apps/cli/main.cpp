@@ -233,6 +233,8 @@ void print_generation_summary(const ninfer::GenerationResult& result,
         }
         if (speculative.tree_rounds != 0 || speculative.tree_fallback_rounds != 0) {
             print_metric("tree rounds", std::to_string(speculative.tree_rounds));
+            print_metric("tree sampled rounds",
+                         std::to_string(speculative.tree_sampled_rounds));
             print_metric("tree fallback rounds",
                          std::to_string(speculative.tree_fallback_rounds));
             print_metric("tree nodes", std::to_string(speculative.tree_nodes));
@@ -250,6 +252,8 @@ void print_generation_summary(const ninfer::GenerationResult& result,
                          std::to_string(speculative.lookup_replace_rounds));
             print_metric("lookup head-skip rounds",
                          std::to_string(speculative.lookup_head_skip_rounds));
+            print_metric("lookup merge rounds",
+                         std::to_string(speculative.lookup_merge_rounds));
             print_metric("lookup drafted tokens",
                          std::to_string(speculative.lookup_drafted_tokens));
             print_metric("lookup accepted tokens",
