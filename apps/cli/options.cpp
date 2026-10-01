@@ -120,7 +120,7 @@ std::string usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
-           "       [--teacher-out PREFIX]\n"
+           "       [--teacher-out PREFIX] [--teacher-jsonl FILE]\n"
            "       [--device N] [--devices N,M]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
            "       [--spec-router fixed|stair] [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
@@ -146,7 +146,8 @@ std::string usage_text(const char* argv0) {
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "\n"
            "--teacher-out PREFIX switches to offline CausalScoring and writes the exact loaded "
-           ".ninfer target's taps/top16 arrays; it accepts raw --prompt text only and allocates "
+           ".ninfer target's taps/top16 arrays; raw --prompt records one sequence, while "
+           "--teacher-jsonl FILE records many {\"text\":...} rows with one model load. It allocates "
            "no generation speculative state.\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
            "Structured message content accepts text, image/image_url, and video/video_url parts;\n"
@@ -210,6 +211,8 @@ Options parse_options(int argc, char** argv) {
             options.prompt = value(arg);
         } else if (arg == "--teacher-out") {
             options.teacher_out = value(arg);
+        } else if (arg == "--teacher-jsonl") {
+            options.teacher_jsonl = value(arg);
         } else if (arg == "--chat-template") {
             options.chat_template_path = value(arg);
         } else if (arg == "--messages") {
@@ -410,12 +413,20 @@ Options parse_options(int argc, char** argv) {
 
     const bool has_prompt   = !options.prompt.empty();
     const bool has_messages = !options.messages_path.empty();
-    if (has_prompt == has_messages) {
-        throw std::invalid_argument("pass exactly one of --prompt or --messages");
+    const bool has_teacher_jsonl = !options.teacher_jsonl.empty();
+    const int input_modes = static_cast<int>(has_prompt) + static_cast<int>(has_messages) +
+                            static_cast<int>(has_teacher_jsonl);
+    if (input_modes != 1) {
+        throw std::invalid_argument(
+            "pass exactly one of --prompt, --messages, or --teacher-jsonl");
+    }
+    if (has_teacher_jsonl && options.teacher_out.empty()) {
+        throw std::invalid_argument("--teacher-jsonl requires --teacher-out");
     }
     if (!options.teacher_out.empty()) {
-        if (!has_prompt || has_messages) {
-            throw std::invalid_argument("--teacher-out requires raw --prompt text");
+        if (has_messages || (!has_prompt && !has_teacher_jsonl)) {
+            throw std::invalid_argument(
+                "--teacher-out accepts raw --prompt or --teacher-jsonl");
         }
         if (options.speculative.backend != SpeculativeBackend::None || options.enable_vision) {
             throw std::invalid_argument(
