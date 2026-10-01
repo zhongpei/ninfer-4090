@@ -154,6 +154,11 @@ void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_
                                                     std::optional<std::uint32_t> split_frontier,
                                                     bool finalize_at_end);
 
+[[nodiscard]] PrefillChunkResult prefill_teacher_chunk(PrefillContext& state,
+                                                       std::span<const TokenId> ids,
+                                                       std::uint32_t nominal_length,
+                                                       TeacherTraceSink& sink);
+
 [[nodiscard]] PrefillChunkResult
 prefill_multimodal_chunk(PrefillContext& state, const PreparedPromptData& prompt,
                          VisionPrefillSession& vision, std::uint32_t nominal_length,
