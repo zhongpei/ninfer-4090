@@ -60,5 +60,19 @@ int main() {
     failures += check(choose_stair_extent(options, easy, 9) == 9,
                       "fixed mode changed the configured verify extent");
 
+    TreeStairRouterState tree;
+    options.mode = SpeculativeRoutingMode::Stair;
+    options.warmup_rounds = 0;
+    options.probe_period = 0;
+    for (int i = 0; i < 12; ++i) {
+        tree.observe(3, 3, options);
+        tree.observe(15, 1, options);
+    }
+    failures += check(choose_tree_stair_extent(options, tree, 15) == 3,
+                      "Tree-Stair did not prefer the higher committed-token-per-cost rung");
+    options.mode = SpeculativeRoutingMode::Fixed;
+    failures += check(choose_tree_stair_extent(options, tree, 11) == 11,
+                      "fixed tree mode changed the maximum tree budget");
+
     return failures == 0 ? 0 : 1;
 }
