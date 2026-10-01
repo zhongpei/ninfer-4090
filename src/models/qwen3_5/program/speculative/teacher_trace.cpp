@@ -7,6 +7,8 @@
 #include <array>
 #include <cstring>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <system_error>
 
 namespace ninfer::models::qwen3_5::detail {
