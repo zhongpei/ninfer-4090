@@ -24,19 +24,24 @@ Then provide concise C++-style pseudocode for the transaction.
 '@
 
 $configs = @(
-    @{ label='chain7';  k=7;  args=@('--spec-tree','off') },
-    @{ label='tree7';   k=7;  args=@('--spec-tree','lattice','--spec-tree-nodes','7',
-                                     '--spec-tree-spine','5') },
-    @{ label='chain11'; k=11; args=@('--spec-tree','off') },
-    @{ label='tree11';  k=11; args=@('--spec-tree','lattice','--spec-tree-nodes','11',
-                                     '--spec-tree-spine','7') },
     @{ label='chain15'; k=15; args=@('--spec-tree','off') },
-    @{ label='tree15';  k=15; args=@('--spec-tree','lattice','--spec-tree-nodes','15',
-                                     '--spec-tree-spine','7') },
-    @{ label='tree15_stair'; k=15; args=@('--spec-tree','lattice','--spec-tree-nodes','15',
-                                          '--spec-tree-spine','7','--spec-router','stair',
-                                          '--spec-stair-widths','3,7,11,15',
-                                          '--spec-stair-costs','1.00,1.02,1.05,1.10') }
+
+    # Same resident b16 drafter, different target tree budgets. These are the rows used to
+    # calibrate the 24GB Tree-Stair verify staircase; changing K would also change draft cost.
+    @{ label='b16_tree3';  k=15; args=@('--spec-tree','lattice','--spec-tree-nodes','3',
+                                        '--spec-tree-spine','3') },
+    @{ label='b16_tree7';  k=15; args=@('--spec-tree','lattice','--spec-tree-nodes','7',
+                                        '--spec-tree-spine','5') },
+    @{ label='b16_tree11'; k=15; args=@('--spec-tree','lattice','--spec-tree-nodes','11',
+                                        '--spec-tree-spine','7') },
+    @{ label='b16_tree15'; k=15; args=@('--spec-tree','lattice','--spec-tree-nodes','15',
+                                        '--spec-tree-spine','7') },
+
+    @{ label='b16_tree_stair'; k=15; args=@('--spec-tree','lattice','--spec-tree-nodes','15',
+                                            '--spec-tree-spine','7','--spec-router','stair',
+                                            '--spec-stair-widths','3,7,11,15',
+                                            '--spec-stair-costs','1.00,1.02,1.05,1.10') }
+
 )
 
 "config,rep,decode_tok_s,generated,rounds,drafted,accepted,tree_rounds,tree_fallback,tree_nodes,tree_accepted,sha256"
