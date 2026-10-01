@@ -876,6 +876,15 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         break;
     }
+    if (options.dflash_teacher.enabled()) {
+        if (options.purpose != EnginePurpose::Generation ||
+            options.speculative.backend != SpeculativeBackend::DFlash2 ||
+            !parameters.draft || !parameters.model.config().draft ||
+            !parameters.model.config().draft->dflash2) {
+            throw std::invalid_argument(
+                "native DFlash teacher recording requires a Generation Engine with DFlash2");
+        }
+    }
     if (options.speculative.tree.mode != SpeculativeTreeMode::Off) {
         if (options.speculative.backend != SpeculativeBackend::DFlash2 ||
             options.speculative.tree.nodes == 0 || options.speculative.tree.nodes > 15 ||
@@ -913,6 +922,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->speculative_routing = inputs.speculative_routing;
     impl->speculative_tree    = inputs.speculative_tree;
     impl->speculative_backend = inputs.speculative_backend;
+    impl->dflash_teacher      = inputs.dflash_teacher;
     impl->proposal_head       = inputs.proposal_head;
     impl->features            = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
@@ -1011,6 +1021,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .speculative_routing = options.speculative.routing,
         .speculative_tree    = options.speculative.tree,
         .speculative_backend = options.speculative.backend,
+        .dflash_teacher      = options.dflash_teacher,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,
         .features            = models::load_options(options),
