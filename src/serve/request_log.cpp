@@ -323,7 +323,12 @@ Json speculative_json(const GenerationMetrics& metrics) {
                       {"replace_rounds", metrics.lookup_replace_rounds},
                       {"head_skip_rounds", metrics.lookup_head_skip_rounds},
                       {"drafted_tokens", metrics.lookup_draft_tokens},
-                      {"accepted_tokens", metrics.lookup_accepted_tokens}}}};
+                      {"accepted_tokens", metrics.lookup_accepted_tokens}}},
+                {"tree",
+                 Json{{"rounds", metrics.tree_rounds},
+                      {"fallback_rounds", metrics.tree_fallback_rounds},
+                      {"nodes", metrics.tree_nodes},
+                      {"accepted_drafts", metrics.tree_accepted_drafts}}}};
 }
 
 Json materialization_json(const ninfer::MaterializationDiagnostics& diagnostics) {
@@ -590,6 +595,20 @@ std::string format_request_done(const RequestLogContext& context,
             << "us/round";
     }
     out << " speculative=" << speculative_str(metrics);
+    if (metrics.tree_rounds != 0 || metrics.tree_fallback_rounds != 0) {
+        out << " | tree " << product::format_pretty_count(metrics.tree_rounds)
+            << " rounds, fallback "
+            << product::format_pretty_count(metrics.tree_fallback_rounds);
+        if (metrics.tree_nodes != 0) {
+            const double tree_acceptance =
+                static_cast<double>(metrics.tree_accepted_drafts) /
+                static_cast<double>(metrics.tree_nodes);
+            out << ", accepted "
+                << product::format_pretty_count(metrics.tree_accepted_drafts) << '/'
+                << product::format_pretty_count(metrics.tree_nodes) << " ("
+                << product::format_pretty_percent(tree_acceptance) << ')';
+        }
+    }
     if (outcome.thinking.configured_budget) {
         out << " thinking_budget=" << *outcome.thinking.configured_budget
             << " model_thinking=" << outcome.thinking.model_thinking_tokens
