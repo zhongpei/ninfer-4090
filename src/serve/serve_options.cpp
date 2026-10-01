@@ -94,7 +94,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--lookup-max-order N] [--lookup-max-matches N] [--lookup-min-support N] "
            "[--lookup-min-confidence F] [--lookup-base-drafts N] [--lookup-deep-after N] "
            "[--lookup-deep-drafts N] [--lookup-persistent-tokens N] "
-           "[--lookup-corpus-prefix PATH] [--lookup-corpus-weight F] [--lookup-corpus-samples N] "
+           "[--lookup-persistent-path PATH] [--lookup-corpus-prefix PATH] "
+           "[--lookup-corpus-weight F] [--lookup-corpus-samples N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-residency resident|overlay] [--vision-max-merged N] "
            "[--no-cuda-graph] [--no-prefix-reuse] [--auto-prefix-grid] [--devices N,M] "
@@ -477,6 +478,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.speculative.lookup.persistent_tokens = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--lookup-persistent-tokens"),
                                       "lookup-persistent-tokens"));
+        } else if (arg == "--lookup-persistent-path") {
+            options.speculative.lookup.persistent_path =
+                require_value("--lookup-persistent-path");
         } else if (arg == "--lookup-corpus-prefix") {
             options.speculative.lookup.corpus_prefix = require_value("--lookup-corpus-prefix");
         } else if (arg == "--lookup-corpus-weight") {
