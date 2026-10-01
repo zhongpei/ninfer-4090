@@ -676,7 +676,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
 
     const bool tree_requested = speculative_tree.mode == SpeculativeTreeMode::Lattice;
     const bool tree_sampling_ok =
-        lanes.size() == 1 && requests[lanes[0]].sampling_host.temperature <= 0.0F &&
+        lanes.size() == 1 &&
         requests[lanes[0]].sampling_host.presence_penalty == 0.0F &&
         requests[lanes[0]].sampling_host.frequency_penalty == 0.0F;
 
