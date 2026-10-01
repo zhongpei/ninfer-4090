@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace ninfer::runtime {
@@ -62,10 +63,32 @@ public:
     [[nodiscard]] std::vector<float> score(PreparedPrompt prompt, std::uint32_t first_target) {
         // One synchronous public call owns the sole job slot until its result is delivered.
         std::scoped_lock call_lock(call_mutex_);
-        auto job                               = std::make_unique<Job>();
-        job->prompt                            = std::move(prompt);
-        job->first_target                      = first_target;
-        std::future<std::vector<float>> result = job->promise.get_future();
+        auto job = std::make_unique<Job>(
+            std::in_place_type<ScoreJob>,
+            ScoreJob{.prompt = std::move(prompt), .first_target = first_target});
+        auto& score_job = std::get<ScoreJob>(*job);
+        std::future<std::vector<float>> result = score_job.promise.get_future();
+        {
+            std::lock_guard queue_lock(queue_mutex_);
+            if (stopping_) { throw std::runtime_error("causal scoring engine is stopping"); }
+            if (job_ != nullptr) {
+                throw std::logic_error("causal scoring core already has an in-flight job");
+            }
+            job_ = std::move(job);
+        }
+        queue_cv_.notify_one();
+        return result.get();
+    }
+
+    [[nodiscard]] DFlashTeacherCapture
+    teacher(PreparedPrompt prompt, std::vector<std::uint32_t> target_layer_ids) {
+        std::scoped_lock call_lock(call_mutex_);
+        auto job = std::make_unique<Job>(
+            std::in_place_type<TeacherJob>, TeacherJob{.prompt = std::move(prompt),
+                                                       .target_layer_ids =
+                                                           std::move(target_layer_ids)});
+        auto& teacher_job = std::get<TeacherJob>(*job);
+        std::future<DFlashTeacherCapture> result = teacher_job.promise.get_future();
         {
             std::lock_guard queue_lock(queue_mutex_);
             if (stopping_) { throw std::runtime_error("causal scoring engine is stopping"); }
@@ -110,11 +133,19 @@ public:
     }
 
 private:
-    struct Job {
+    struct ScoreJob {
         PreparedPrompt prompt;
         std::uint32_t first_target = 0;
         std::promise<std::vector<float>> promise;
     };
+
+    struct TeacherJob {
+        PreparedPrompt prompt;
+        std::vector<std::uint32_t> target_layer_ids;
+        std::promise<DFlashTeacherCapture> promise;
+    };
+
+    using Job = std::variant<ScoreJob, TeacherJob>;
 
     void worker_loop() noexcept {
         for (;;) {
@@ -128,19 +159,34 @@ private:
                 }
                 job = std::move(job_);
             }
-            try {
-                std::vector<float> result;
-                {
-                    std::scoped_lock lock(execution_mutex_);
-                    result =
-                        instance_.program->causal_score(std::move(job->prompt), job->first_target);
-                }
-                job->promise.set_value(std::move(result));
-            } catch (...) {
-                try {
-                    job->promise.set_exception(std::current_exception());
-                } catch (...) {}
-            }
+            std::visit(
+                [&](auto& work) {
+                    try {
+                        using Work = std::remove_cvref_t<decltype(work)>;
+                        if constexpr (std::is_same_v<Work, ScoreJob>) {
+                            std::vector<float> result;
+                            {
+                                std::scoped_lock lock(execution_mutex_);
+                                result = instance_.program->causal_score(
+                                    std::move(work.prompt), work.first_target);
+                            }
+                            work.promise.set_value(std::move(result));
+                        } else {
+                            DFlashTeacherCapture result;
+                            {
+                                std::scoped_lock lock(execution_mutex_);
+                                result = instance_.program->causal_teacher(
+                                    std::move(work.prompt), work.target_layer_ids);
+                            }
+                            work.promise.set_value(std::move(result));
+                        }
+                    } catch (...) {
+                        try {
+                            work.promise.set_exception(std::current_exception());
+                        } catch (...) {}
+                    }
+                },
+                *job);
         }
     }
 
