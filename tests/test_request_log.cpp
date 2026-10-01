@@ -490,6 +490,31 @@ int main() {
                   done.at("speculative").at("lookup").at("drafted_tokens") == 180 &&
                   done.at("speculative").at("lookup").at("accepted_tokens") == 150,
               "lookup speculative A/B metrics missing");
+    failures +=
+        check(done.at("speculative").at("tree").at("rounds") == 0 &&
+                  done.at("speculative").at("tree").at("fallback_rounds") == 0 &&
+                  done.at("speculative").at("tree").at("nodes") == 0 &&
+                  done.at("speculative").at("tree").at("accepted_drafts") == 0,
+              "default tree speculative metrics missing");
+
+    GenerationOutcome tree_outcome = outcome;
+    tree_outcome.metrics.tree_rounds = 8;
+    tree_outcome.metrics.tree_fallback_rounds = 3;
+    tree_outcome.metrics.tree_nodes = 120;
+    tree_outcome.metrics.tree_accepted_drafts = 67;
+    const Json tree_done =
+        Json::parse(format_request_done_json("serve-test", 3004, context, tree_outcome));
+    failures +=
+        check(tree_done.at("speculative").at("tree").at("rounds") == 8 &&
+                  tree_done.at("speculative").at("tree").at("fallback_rounds") == 3 &&
+                  tree_done.at("speculative").at("tree").at("nodes") == 120 &&
+                  tree_done.at("speculative").at("tree").at("accepted_drafts") == 67,
+              "tree speculative A/B metrics missing");
+    const OperationalRecord pretty_tree_done = render_request_done(context, tree_outcome);
+    failures += check(pretty_tree_done.message.find("tree 8 rounds, fallback 3") !=
+                          std::string::npos &&
+                          pretty_tree_done.message.find("accepted 67/120") != std::string::npos,
+                      "pretty request-done tree metrics missing");
     failures += check(done.at("materialization").at("predicted_total_ns") == 250000 &&
                           done.at("materialization").at("targets_evaluated") == 7 &&
                           done.at("materialization").at("stop_reason") == "queue_exhausted" &&
