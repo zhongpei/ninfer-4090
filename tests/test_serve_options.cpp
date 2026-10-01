@@ -169,6 +169,16 @@ int main() {
                           tree.speculative.tree.spine == 7,
                       "serve options did not preserve runtime tree controls");
 
+    const ServeOptions tree_cut = parse(
+        {"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "15",
+         "--spec-tree", "lattice", "--spec-tree-nodes", "7", "--spec-tree-spine", "5",
+         "--spec-router", "stair", "--spec-stair-widths", "3,7,11,15",
+         "--spec-stair-costs", "1,1.02,1.05,1.10"});
+    failures += check(tree_cut.speculative.tree.nodes == 7 &&
+                          tree_cut.speculative.tree.spine == 5 &&
+                          tree_cut.speculative.routing.mode == ninfer::SpeculativeRoutingMode::Stair,
+                      "serve rejected a tree cut below the resident DFlash2 width");
+
     bool tree_mismatch_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "7",
