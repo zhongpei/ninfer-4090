@@ -7,6 +7,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
+#include <system_error>
 
 namespace ninfer::models::qwen3_5::detail {
 
@@ -38,6 +42,83 @@ struct StairRouterState {
         last_extent = extent;
     }
 };
+
+
+inline constexpr std::uint64_t kStairRouterDiskMagic = 0x4e494e4653544152ULL; // "NINFSTAR"
+inline constexpr std::uint32_t kStairRouterDiskVersion = 1;
+
+struct StairRouterDiskState {
+    std::uint64_t magic = kStairRouterDiskMagic;
+    std::uint32_t version = kStairRouterDiskVersion;
+    std::uint32_t reserved = 0;
+    StairRouterState state;
+};
+
+[[nodiscard]] inline StairRouterState
+load_stair_router_state(const std::filesystem::path& path) {
+    if (path.empty() || !std::filesystem::exists(path)) { return {}; }
+    std::ifstream input(path, std::ios::binary);
+    StairRouterDiskState disk;
+    if (!input.read(reinterpret_cast<char*>(&disk), sizeof(disk)) ||
+        disk.magic != kStairRouterDiskMagic || disk.version != kStairRouterDiskVersion) {
+        throw std::runtime_error("invalid Stair router profile: " + path.string());
+    }
+    char extra = 0;
+    if (input.read(&extra, 1)) {
+        throw std::runtime_error("Stair router profile has trailing data: " + path.string());
+    }
+    return disk.state;
+}
+
+inline void save_stair_router_state(const std::filesystem::path& path,
+                                    const StairRouterState& state) {
+    if (path.empty()) { return; }
+    if (!path.parent_path().empty()) {
+        std::filesystem::create_directories(path.parent_path());
+    }
+    auto tmp = path;
+    tmp += ".tmp";
+    {
+        std::ofstream output(tmp, std::ios::binary | std::ios::trunc);
+        const StairRouterDiskState disk{.state = state};
+        output.write(reinterpret_cast<const char*>(&disk), sizeof(disk));
+        output.flush();
+        if (!output) {
+            throw std::runtime_error("failed writing Stair router profile: " + tmp.string());
+        }
+    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    ec.clear();
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        std::filesystem::remove(tmp);
+        throw std::runtime_error("failed publishing Stair router profile: " + ec.message());
+    }
+}
+
+inline void merge_stair_router_delta(StairRouterState& aggregate,
+                                     const StairRouterState& current,
+                                     const StairRouterState& seed) noexcept {
+    aggregate.rounds += current.rounds >= seed.rounds ? current.rounds - seed.rounds : current.rounds;
+    for (std::size_t i = 0; i < aggregate.attempted.size(); ++i) {
+        aggregate.attempted[i] +=
+            current.attempted[i] >= seed.attempted[i]
+                ? current.attempted[i] - seed.attempted[i]
+                : current.attempted[i];
+        aggregate.accepted[i] +=
+            current.accepted[i] >= seed.accepted[i]
+                ? current.accepted[i] - seed.accepted[i]
+                : current.accepted[i];
+    }
+    for (std::size_t i = 0; i < aggregate.selected.size(); ++i) {
+        aggregate.selected[i] +=
+            current.selected[i] >= seed.selected[i]
+                ? current.selected[i] - seed.selected[i]
+                : current.selected[i];
+    }
+    if (current.rounds != seed.rounds) { aggregate.last_extent = current.last_extent; }
+}
 
 [[nodiscard]] inline double stair_expected_commits(const SpeculativeRoutingOptions& options,
                                                    const StairRouterState& state,
