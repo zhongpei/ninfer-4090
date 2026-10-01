@@ -6,7 +6,7 @@ target state remains exact:
 
 - DFlash2 only;
 - one active request (C1);
-- raw greedy target sampling (temperature <= 0, no presence/frequency penalty);
+- greedy target sampling or positive-temperature sampling with no presence/frequency penalty;
 - at most 15 draft nodes / 16 target rows;
 - node budget equals startup `--draft-tokens`;
 - opt-in; all unsupported rounds fall back to the existing chain path.
@@ -105,6 +105,28 @@ The first implementation recomputes the short ancestor path per node rather than
 full recurrent state per node. With the runtime cap of 16 rows this trades a small bounded compute
 cost for avoiding multi-GB state replication.
 
+## Sampled tree
+
+Positive-temperature requests can keep the deterministic DFlash2 lattice tree when both penalties
+are zero. After target verification, every tree node samples from its own target-logit row using
+NInfer's existing counter-based RNG key:
+
+```text
+(seed, node cache/logical position, kSamplePurposeDecode)
+```
+
+Siblings at the same depth therefore use the same logical-position key but different target
+distributions. Only the branch reached by the target draw is committed. This is the same
+deterministic-tree rule TandemLLM calls sampled-tree `det`: at each node, follow the child carrying
+the target's own draw; if no child carries it, that draw is the correction token.
+
+The temporary sampling configs explicitly null `token_counts`. Presence/frequency penalties
+remain on the chain fallback because an exact tree implementation would need a different count
+overlay for every branch. Top-k, top-p, min-p, temperature and seed are otherwise inherited from
+the request.
+
+Sampling uses workspace only; it adds no persistent GPU allocation.
+
 ## Acceptance and commit contract
 
 For tree verification:
@@ -149,7 +171,6 @@ Tree verification falls back to chain when any of these is true:
 - decode batch has more than one row;
 - lookup replace/head-skip owns the proposal;
 - the wide b16 proposal would cross the target context capacity;
-- positive temperature is used;
 - presence or frequency penalties are active.
 
 Output-budget truncation no longer forces a fallback. The one resident wide drafter can still
