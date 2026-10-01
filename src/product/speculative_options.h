@@ -46,6 +46,13 @@ namespace ninfer::product {
     throw std::invalid_argument("invalid lookup DFlash mode: " + std::string(value));
 }
 
+[[nodiscard]] inline SpeculativeRouterScope
+parse_speculative_router_scope(std::string_view value) {
+    if (value == "request") { return SpeculativeRouterScope::Request; }
+    if (value == "engine") { return SpeculativeRouterScope::Engine; }
+    throw std::invalid_argument("invalid speculative router scope: " + std::string(value));
+}
+
 [[nodiscard]] inline SpeculativeRoutingMode
 parse_speculative_routing_mode(std::string_view value) {
     if (value == "fixed") { return SpeculativeRoutingMode::Fixed; }
@@ -180,6 +187,9 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         }
         // Copy widths are policy maxima. The runtime clamps both to the startup DFlash K, request
         // budget and remaining context so one A/B profile can compare K7 and K15 artifacts.
+    }
+    if (!router.state_path.empty() && router.scope != SpeculativeRouterScope::Engine) {
+        throw std::invalid_argument("--spec-router-state requires --spec-router-scope engine");
     }
     if (!std::isfinite(router.draft_cost) || router.draft_cost < 0.0F ||
         !std::isfinite(router.prior_acceptance) || router.prior_acceptance < 0.0F ||
