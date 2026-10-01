@@ -210,6 +210,12 @@ void dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size, std
                          DFlashEnvelopes envelopes,
                          ops::CausalAttentionExecutionEnvelope target_envelope,
                          DecodeGraphExecutable* executable);
+// Runtime tree verification is deliberately C1/greedy in its first version and bypasses CUDA
+// Graph capture because lattice->tree construction is data dependent.
+void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
+                        DFlashEnvelopes envelopes,
+                        ops::CausalAttentionExecutionEnvelope target_envelope,
+                        SpeculativeTreeOptions options);
 // Host lookup tokens use lane-major [batch,k] storage. They replace the neural proposal before
 // target verification. run_drafter=true is the A/B "replace" arm; false is the copy head-skip arm.
 void dflash_lookup_decode_batch(DFlashBatchContext& state, std::int32_t batch_size,
