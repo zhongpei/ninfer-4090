@@ -1102,7 +1102,7 @@ __global__ void speculative_tree_accept_greedy_kernel(
     const std::int32_t* parents, int live_rows, int physical_width,
     std::int32_t* path_nodes, std::int32_t* licensed_tokens,
     std::int32_t* licensed_counts, std::int32_t* accepted_drafts,
-    std::int32_t* path_count, std::int32_t* last_node) {
+    std::int32_t* path_count, std::int32_t* compact_last_index) {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     for (int i = 0; i < physical_width; ++i) {
         path_nodes[i] = 0;
@@ -1131,7 +1131,7 @@ __global__ void speculative_tree_accept_greedy_kernel(
     licensed_counts[0] = count;
     accepted_drafts[0] = accepted;
     path_count[0] = count;
-    last_node[0] = current;
+    compact_last_index[0] = count - 1;
 }
 
 __global__ void speculative_tree_gather_bf16_dynamic_kernel(
