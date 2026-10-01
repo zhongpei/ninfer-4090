@@ -441,17 +441,6 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
         maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
     }
 
-    const bool tree_requested = speculative_tree.mode == SpeculativeTreeMode::Lattice;
-    const bool tree_sampling_ok =
-        lanes.size() == 1 && requests[lanes[0]].sampling_host.temperature <= 0.0F &&
-        requests[lanes[0]].sampling_host.presence_penalty == 0.0F &&
-        requests[lanes[0]].sampling_host.frequency_penalty == 0.0F;
-    const bool tree_active =
-        tree_requested && speculative_backend == SpeculativeBackend::DFlash2 &&
-        lanes.size() == 1 && !lookup_batch && normal_extents[0] == draft_window &&
-        speculative_tree.nodes == draft_window && speculative_tree.spine <= draft_window &&
-        tree_sampling_ok;
-
     const auto started = Clock::now();
     try {
         std::optional<nvtx::ScopedRange> submit_range;
@@ -683,6 +672,17 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         maximum_target_tokens =
             std::max(maximum_target_tokens, sequence.execution_frontier + extent + 1U);
     }
+
+    const bool tree_requested = speculative_tree.mode == SpeculativeTreeMode::Lattice;
+    const bool tree_sampling_ok =
+        lanes.size() == 1 && requests[lanes[0]].sampling_host.temperature <= 0.0F &&
+        requests[lanes[0]].sampling_host.presence_penalty == 0.0F &&
+        requests[lanes[0]].sampling_host.frequency_penalty == 0.0F;
+    const bool tree_active =
+        tree_requested && speculative_backend == SpeculativeBackend::DFlash2 &&
+        lanes.size() == 1 && !lookup_batch && normal_extents[0] == draft_window &&
+        speculative_tree.nodes == draft_window && speculative_tree.spine <= draft_window &&
+        tree_sampling_ok;
 
     const auto started = Clock::now();
     try {
