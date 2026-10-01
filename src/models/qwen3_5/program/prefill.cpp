@@ -905,6 +905,35 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
         timing.begin_wait();
         device.synchronize();
         timing.end_wait();
+
+        // Offline deployed-target distillation trace. Product/startup validation constrains this
+        // to C1 chain DFlash2, so physical batch row 0 and the active lane own the complete
+        // committed target prefix. Record only after Frontend has chosen the final prefix.
+        if (dflash_teacher_trace && dflash_teacher_trace->enabled() &&
+            speculative_backend == SpeculativeBackend::DFlash2 && lanes.size() == 1 &&
+            !cancelled.front() && accepted_tokens.front() != 0) {
+            const std::uint32_t lane = lanes.front();
+            const RequestControl& request = requests[lane];
+            const PendingCandidate& pending = request.pending;
+            if (request.teacher_trace_id == 0 || pending.tree_verify || !io.dflash_decode ||
+                !dflash) {
+                throw std::logic_error(
+                    "DFlash teacher trace lost its chain target runtime state");
+            }
+            const std::uint32_t rows = accepted_tokens.front();
+            const std::int32_t width = static_cast<std::int32_t>(draft_window + 1U);
+            Tensor ids = io.dflash_decode->verify_ids.slice(1, 0, 1).view({width});
+            Tensor logits =
+                io.dflash_decode->target_logits.slice(2, 0, 1)
+                    .view({io.dflash_decode->target_logits.ne[0], width});
+            Tensor features =
+                dflash->pending_features.slice(2, static_cast<std::int32_t>(lane), 1)
+                    .view({dflash->pending_features.ne[0], width});
+            const std::span<const TokenId> labels(
+                dflash_host_egress->licensed_tokens.data(), rows);
+            dflash_teacher_trace->append(request.teacher_trace_id, pending.base_E, rows,
+                                         ids, features, logits, labels);
+        }
         work.reset();
     } catch (...) {
         try {
