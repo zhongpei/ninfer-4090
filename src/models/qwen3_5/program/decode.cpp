@@ -669,8 +669,10 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         const SequenceState& sequence = active_sequence(lanes[row]);
         const std::uint32_t extent =
             lookup_batch ? lookup_proposals[row].count : normal_extents[row];
+        const std::uint32_t target_extent =
+            tree_active && row == 0 ? runtime_tree.nodes : extent;
         maximum_target_tokens =
-            std::max(maximum_target_tokens, sequence.execution_frontier + extent + 1U);
+            std::max(maximum_target_tokens, sequence.execution_frontier + target_extent + 1U);
     }
 
     const bool tree_requested = speculative_tree.mode == SpeculativeTreeMode::Lattice;
@@ -678,11 +680,28 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         lanes.size() == 1 && requests[lanes[0]].sampling_host.temperature <= 0.0F &&
         requests[lanes[0]].sampling_host.presence_penalty == 0.0F &&
         requests[lanes[0]].sampling_host.frequency_penalty == 0.0F;
+
+    // Tree-StairCut reuses the existing measured Stair controller, but it cuts target tree nodes
+    // rather than shrinking the physical DFlash2/round buffers. Fixed mode preserves the exact
+    // configured node budget. Stair mode snaps any budget/context truncation down to the largest
+    // configured tier, normally 3/7/11/15.
+    SpeculativeTreeOptions runtime_tree = speculative_tree;
+    if (tree_requested && lanes.size() == 1) {
+        const std::uint32_t cap = std::min(normal_extents[0], speculative_tree.nodes);
+        if (speculative_routing.mode == SpeculativeRoutingMode::Stair) {
+            runtime_tree.nodes = 0;
+            for (std::uint32_t tier : speculative_routing.widths) {
+                if (tier <= cap) runtime_tree.nodes = tier;
+            }
+        } else {
+            runtime_tree.nodes = cap >= speculative_tree.nodes ? speculative_tree.nodes : 0;
+        }
+        runtime_tree.spine = std::min(runtime_tree.spine, runtime_tree.nodes);
+    }
     const bool tree_active =
         tree_requested && speculative_backend == SpeculativeBackend::DFlash2 &&
-        lanes.size() == 1 && !lookup_batch && normal_extents[0] == draft_window &&
-        speculative_tree.nodes == draft_window && speculative_tree.spine <= draft_window &&
-        tree_sampling_ok;
+        lanes.size() == 1 && !lookup_batch && runtime_tree.nodes != 0 &&
+        runtime_tree.nodes <= draft_window && runtime_tree.spine != 0 && tree_sampling_ok;
 
     const auto started = Clock::now();
     try {
@@ -710,7 +729,8 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             const RequestControl& request = requests[lanes[row]];
             const std::uint32_t frontier = sequence.execution_frontier;
             const std::uint32_t extent =
-                lookup_batch ? lookup_proposals[row].count : normal_extents[row];
+                lookup_batch ? lookup_proposals[row].count
+                             : (tree_active && row == 0 ? runtime_tree.nodes : normal_extents[row]);
             dflash_host_ingress->anchors[row] = sequence.ledger.back();
             dflash_host_ingress->execution_frontiers[row] =
                 checked_i32(frontier, "DFlash batch frontier");
@@ -764,7 +784,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 target_envelope, std::span<const TokenId>(lookup_host), run_drafter);
         } else if (tree_active) {
             execution::dflash_tree_decode(schedule_state, draft_window, envelopes, target_envelope,
-                                          speculative_tree);
+                                          runtime_tree);
         } else {
             execution::dflash_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                            draft_window, envelopes, target_envelope, executable);
@@ -814,9 +834,14 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 }
                 if (tree_active) {
                     ++request.speculative_stats.tree_rounds;
-                    request.speculative_stats.tree_nodes += speculative_tree.nodes;
+                    request.speculative_stats.tree_nodes += runtime_tree.nodes;
                     request.speculative_stats.tree_accepted_drafts +=
                         static_cast<std::uint32_t>(accepted_i);
+                    if (speculative_routing.mode == SpeculativeRoutingMode::Stair) {
+                        request.stair_router.observe(
+                            runtime_tree.nodes, static_cast<std::uint32_t>(accepted_i),
+                            speculative_routing);
+                    }
                 } else if (!lookup_batch &&
                            speculative_routing.mode == SpeculativeRoutingMode::Stair) {
                     request.stair_router.observe(
