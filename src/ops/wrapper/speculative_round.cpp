@@ -311,8 +311,9 @@ void speculative_tree_build_plan(
 }
 
 void speculative_tree_accept_greedy(
-    const Tensor& target_tokens, const Tensor& tree_tokens, const Tensor& parents,
-    std::int32_t live_rows, Tensor& path_nodes, Tensor& licensed_tokens,
+    const Tensor& target_tokens, const Tensor& target_logits, const Tensor& tree_tokens,
+    const Tensor& parents, std::int32_t live_rows, std::int32_t token_domain,
+    Tensor& path_nodes, Tensor& licensed_tokens,
     Tensor& licensed_counts, Tensor& accepted_drafts, Tensor& path_count,
     Tensor& compact_last_index, cudaStream_t stream) {
     constexpr const char* op = "speculative_tree_accept_greedy";
@@ -323,6 +324,13 @@ void speculative_tree_accept_greedy(
         throw std::invalid_argument("speculative_tree_accept_greedy: invalid tree width");
     }
     require_vector(target_tokens, DType::I32, width, op, "target_tokens");
+    require_dtype(target_logits, DType::BF16, op, "target_logits");
+    if (target_logits.ne[0] <= 0 || target_logits.ne[1] != width ||
+        target_logits.ne[2] != 1 || target_logits.ne[3] != 1 ||
+        token_domain <= 0 || token_domain > target_logits.ne[0]) {
+        throw std::invalid_argument(
+            "speculative_tree_accept_greedy: invalid target logits/token domain");
+    }
     require_vector(parents, DType::I32, width, op, "parents");
     require_vector(path_nodes, DType::I32, width, op, "path_nodes");
     require_vector(licensed_tokens, DType::I32, width, op, "licensed_tokens");
@@ -331,8 +339,9 @@ void speculative_tree_accept_greedy(
     require_vector(path_count, DType::I32, 1, op, "path_count");
     require_vector(compact_last_index, DType::I32, 1, op, "compact_last_index");
     detail::speculative_tree_accept_greedy_launch(
-        target_tokens, tree_tokens, parents, live_rows, path_nodes, licensed_tokens,
-        licensed_counts, accepted_drafts, path_count, compact_last_index, stream);
+        target_tokens, target_logits, tree_tokens, parents, live_rows, token_domain,
+        path_nodes, licensed_tokens, licensed_counts, accepted_drafts, path_count,
+        compact_last_index, stream);
 }
 
 void speculative_make_one_hot_sparse_proposal(
