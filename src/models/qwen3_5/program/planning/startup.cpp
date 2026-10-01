@@ -748,10 +748,20 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     std::max({out.dflash_round, finish(target), accept,
                               dflash_context_capacity(verify, batch, true), proposal});
                 if (plan.speculative_tree.mode != SpeculativeTreeMode::Off && batch == 1) {
+                    const std::size_t tree_sampling =
+                        checked_add(
+                            ops::sampling_workspace_capacity_bytes(
+                                dimension(parameters.model.resources().public_token_count),
+                                verify, verify),
+                            static_cast<std::size_t>(verify) * sizeof(ops::SamplingConfig),
+                            "DFlash tree sampling workspace");
+                    // Preserve bounded headroom for accepted-path K/V/tap gathers while explicitly
+                    // accounting for positive-temperature tree sampling.
                     out.dflash_round = std::max(
                         out.dflash_round,
-                        checked_add(finish(target), 2ULL * 1024ULL * 1024ULL,
-                                    "DFlash tree workspace headroom"));
+                        std::max(checked_add(finish(target), 2ULL * 1024ULL * 1024ULL,
+                                             "DFlash tree workspace headroom"),
+                                 tree_sampling));
                 }
             }
         }
@@ -879,11 +889,11 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
     if (options.speculative.tree.mode != SpeculativeTreeMode::Off) {
         if (options.speculative.backend != SpeculativeBackend::DFlash2 ||
             options.speculative.tree.nodes == 0 || options.speculative.tree.nodes > 15 ||
-            options.speculative.tree.nodes != options.speculative.draft_tokens ||
+            options.speculative.tree.nodes > options.speculative.draft_tokens ||
             options.speculative.tree.spine == 0 ||
             options.speculative.tree.spine > options.speculative.tree.nodes) {
             throw std::invalid_argument(
-                "runtime tree verify requires DFlash2 with nodes=draft_tokens in [1,15] "
+                "runtime tree verify requires DFlash2 with tree nodes in [1,draft_tokens] "
                 "and spine<=nodes");
         }
     }
