@@ -81,6 +81,12 @@ public:
     [[nodiscard]] std::vector<float> score_tokens(std::vector<TokenId> tokens,
                                                   std::uint32_t first_target);
 
+    // Offline DFlash2 teacher data from the actual loaded .ninfer target. For N input tokens this
+    // returns N-1 predictor rows, including selected runtime layer taps and exact top-K logprobs.
+    // Requires EnginePurpose::CausalScoring and owns no serving/runtime cache state.
+    [[nodiscard]] TeacherTrace trace_tokens(std::vector<TokenId> tokens,
+                                            const TeacherTraceOptions& options = {});
+
     [[nodiscard]] std::uint32_t count_tokens(PromptInput input,
                                              const PreparationControl& control = {}) const;
     [[nodiscard]] ModelSamplingDefaults sampling_defaults() const;
