@@ -861,6 +861,34 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
             target_tokens_live, frame.tree_kv_key, frame.tree_kv_value, sink);
     }
 
+    // Deterministic-tree sampling: each target node draws from its own target distribution at the
+    // logical cache position for that tree depth. Counter-based RNG means siblings at the same
+    // depth use the same position-keyed noise; only the branch reached by the tree walk commits.
+    // Penalty requests never enter this path because branch-specific token-count histories would
+    // otherwise be required for exactness.
+    if (state.host_ingress.sampling[0].temperature > 0.0F) {
+        auto sampling_scope = state.execution.work.scope();
+        std::array<ops::SamplingConfig, kDFlashDecodeMaximumWidth> host_configs{};
+        for (std::int32_t i = 0; i < live_width; ++i) {
+            host_configs[static_cast<std::size_t>(i)] = state.host_ingress.sampling[0];
+            host_configs[static_cast<std::size_t>(i)].token_counts = nullptr;
+        }
+        DeviceSpan config_storage = state.execution.work.alloc_bytes(
+            static_cast<std::size_t>(live_width) * sizeof(ops::SamplingConfig),
+            alignof(ops::SamplingConfig));
+        CUDA_CHECK(cudaMemcpyAsync(
+            config_storage.data, host_configs.data(),
+            static_cast<std::size_t>(live_width) * sizeof(ops::SamplingConfig),
+            cudaMemcpyHostToDevice, stream));
+        ops::sample(
+            target_logits_live.view({target_logits_live.ne[0], live_width}),
+            target_tokens_live.view({live_width}),
+            dimension(state.execution.parameters.model.resources().public_token_count),
+            static_cast<const ops::SamplingConfig*>(config_storage.data),
+            target_positions_live.view({live_width}), ops::kSamplePurposeDecode,
+            state.execution.work, stream);
+    }
+
     Tensor path_nodes      = frame.tree_path_nodes.slice(0, 0, physical_width);
     Tensor licensed_tokens = frame.licensed_tokens.slice(1, 0, 1);
     Tensor licensed_counts = frame.licensed_counts.slice(0, 0, 1);
