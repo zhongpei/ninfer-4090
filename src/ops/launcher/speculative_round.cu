@@ -169,6 +169,38 @@ void speculative_select_accepted_hidden_launch(const Tensor& hidden, const Tenso
     CUDA_CHECK(cudaGetLastError());
 }
 
+void speculative_tree_build_device_launch(const Tensor& candidates, const Tensor& lattice,
+                                          std::int32_t anchor, std::int32_t steps,
+                                          std::int32_t node_budget, std::int32_t spine,
+                                          std::int32_t frontier, std::int32_t rope_delta,
+                                          Tensor& verify_ids, Tensor& positions,
+                                          Tensor& rope_positions, Tensor& parents,
+                                          Tensor& depths, cudaStream_t stream) {
+    speculative_tree_build_device_kernel<<<1, 1, 0, stream>>>(
+        static_cast<const std::int32_t*>(candidates.data),
+        static_cast<const float*>(lattice.data), anchor, steps, node_budget, spine,
+        frontier, rope_delta, static_cast<std::int32_t*>(verify_ids.data),
+        static_cast<std::int32_t*>(positions.data),
+        static_cast<std::int32_t*>(rope_positions.data),
+        static_cast<std::int32_t*>(parents.data), static_cast<std::int32_t*>(depths.data));
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void speculative_tree_accept_device_launch(const Tensor& verify_ids, const Tensor& parents,
+                                           const Tensor& target_tokens, Tensor& path_nodes,
+                                           Tensor& licensed_tokens, Tensor& licensed_counts,
+                                           Tensor& accepted_drafts, cudaStream_t stream) {
+    speculative_tree_accept_device_kernel<<<1, 1, 0, stream>>>(
+        static_cast<const std::int32_t*>(verify_ids.data),
+        static_cast<const std::int32_t*>(parents.data),
+        static_cast<const std::int32_t*>(target_tokens.data), verify_ids.ne[0],
+        static_cast<std::int32_t*>(path_nodes.data),
+        static_cast<std::int32_t*>(licensed_tokens.data),
+        static_cast<std::int32_t*>(licensed_counts.data),
+        static_cast<std::int32_t*>(accepted_drafts.data));
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void speculative_tree_gather_bf16_launch(const Tensor& source, const Tensor& path_nodes,
                                          std::int32_t count, Tensor& destination,
                                          cudaStream_t stream) {
