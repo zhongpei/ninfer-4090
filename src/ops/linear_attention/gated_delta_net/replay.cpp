@@ -308,6 +308,25 @@ void gated_delta_net_replay_record(const Tensor& q, const Tensor& k, const Tenso
                                                      value_record, gate_record, out, stream);
 }
 
+void gated_delta_net_tree_replay_record(
+    const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g, const Tensor& beta,
+    float scale, const Tensor& ssm_states, const Tensor& initial_state_slots,
+    const Tensor& parents, Tensor& key_record, Tensor& value_record, Tensor& gate_record,
+    Tensor& out, cudaStream_t stream) {
+    const Tensor no_valid{};
+    validate_replay_record(q, k, v, g, beta, scale, ssm_states, no_valid,
+                           initial_state_slots, key_record, value_record, gate_record, out);
+    if (q.ne[3] != 1 || parents.data == nullptr || parents.dtype != DType::I32 ||
+        !parents.is_contiguous() || parents.ne[0] != q.ne[2] || parents.ne[1] != 1 ||
+        parents.ne[2] != 1 || parents.ne[3] != 1) {
+        throw std::invalid_argument(
+            "gated_delta_net_tree_replay_record: invalid parent selector");
+    }
+    detail::gated_delta_net::launch_recurrent_tree_record(
+        q, k, v, g, beta, scale, ssm_states, initial_state_slots, parents,
+        key_record, value_record, gate_record, out, stream);
+}
+
 GdnReplayFoldPlan::GdnReplayFoldPlan(const GdnReplayRecords& records,
                                      LinearAttentionStateAllLayersView states)
     : records_(records), states_(states) {
@@ -321,6 +340,27 @@ void GdnReplayFoldPlan::execute(std::span<const GdnReplayFoldRow> rows, cudaStre
         validate_fold_rows(records_, states_, rows);
     detail::gated_delta_net::launch_replay_fold(records_, states_, packed,
                                                 static_cast<std::int32_t>(rows.size()), stream);
+}
+
+void GdnReplayFoldPlan::execute_tree(
+    std::int32_t source_state_slot, std::int32_t destination_state_slot,
+    const Tensor& path_nodes, std::int32_t commit_columns, cudaStream_t stream) const {
+    if (source_state_slot < 0 || source_state_slot >= states_.spec.slot_count ||
+        destination_state_slot < 0 || destination_state_slot >= states_.spec.slot_count) {
+        throw std::invalid_argument("gdn_replay_fold tree: state slot is out of range");
+    }
+    if (commit_columns < 0 || commit_columns > records_.spec.width) {
+        throw std::invalid_argument("gdn_replay_fold tree: commit extent is out of range");
+    }
+    if (commit_columns == 0) return;
+    if (path_nodes.data == nullptr || path_nodes.dtype != DType::I32 ||
+        !path_nodes.is_contiguous() || path_nodes.ne[0] != records_.spec.width ||
+        path_nodes.ne[1] != 1 || path_nodes.ne[2] != 1 || path_nodes.ne[3] != 1) {
+        throw std::invalid_argument("gdn_replay_fold tree: invalid path selector");
+    }
+    detail::gated_delta_net::launch_replay_tree_fold(
+        records_, states_, source_state_slot, destination_state_slot, path_nodes,
+        commit_columns, stream);
 }
 
 } // namespace ninfer::ops
