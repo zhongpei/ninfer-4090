@@ -3,6 +3,7 @@
 #include <cmath>
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/program/context.h"
+#include "models/qwen3_5/program/speculative/tree_plan.h"
 #include "models/qwen3_5/execution/workspace.h"
 
 #include "core/nvtx.h"
@@ -22,6 +23,7 @@
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer/ops/prepare_masked_block.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
+#include "ninfer/ops/position.h"
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/rope.h"
 #include "ninfer/ops/scalar.h"
@@ -32,6 +34,8 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <stdexcept>
 #include <utility>
@@ -400,11 +404,12 @@ void propose_dflash2_batch(DFlashBatchContext& state, qwen3_5::DFlashDecodeState
 }
 
 void propose_batch_impl(DFlashBatchContext& state, qwen3_5::DFlashDecodeState& frame,
-                        std::int32_t batch_size, std::uint32_t k, DFlashEnvelopes envelopes) {
+                        std::int32_t batch_size, std::uint32_t k, DFlashEnvelopes envelopes,
+                        Tensor* lattice_scores = nullptr) {
     if (state.execution.parameters.model.config().draft->dflash2) {
         nvtx::ScopedRange proposal_range(nvtx::Name::DFlashProposal, nvtx::Category::DFlash,
                                          static_cast<std::uint64_t>(k + 1U) * batch_size);
-        propose_dflash2_batch(state, frame, batch_size, k, envelopes);
+        propose_dflash2_batch(state, frame, batch_size, k, envelopes, lattice_scores);
     } else {
         const auto& target         = state.execution.parameters.model.config().text;
         const auto& config         = *state.execution.parameters.model.config().draft;
