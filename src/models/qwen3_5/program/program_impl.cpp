@@ -8,6 +8,7 @@
 #include "core/device.h"
 #include <cuda_runtime.h>
 #include "ninfer/ops/target_logprobs.h"
+#include "ninfer/ops/linear_topk.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -608,6 +609,214 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
         flush();
         if (output.size() != token_count_size - first_target) {
             throw std::logic_error("causal score produced the wrong number of logprobs");
+        }
+        cleanup();
+        return output;
+    } catch (...) {
+        try {
+            device.synchronize();
+        } catch (...) {}
+        work.reset();
+        try {
+            cleanup();
+        } catch (...) {}
+        throw;
+    }
+}
+
+DFlashTeacherCapture ProgramImpl::causal_teacher(
+    PreparedPromptData&& prompt, std::span<const std::uint32_t> target_layer_ids) {
+    if (!causal_scoring || workspace_plan.causal_score == 0) {
+        throw std::logic_error("Program was not constructed for causal scoring");
+    }
+    if (speculative_backend != SpeculativeBackend::None || vision_enabled || use_cuda_graph ||
+        context_cache.enabled) {
+        throw std::logic_error("causal teacher Program has generation-only startup features");
+    }
+    const std::size_t token_count_size = prompt.token_ids.size();
+    if (token_count_size < 2 || token_count_size > capacity || prompt.has_media()) {
+        throw std::invalid_argument(
+            "causal teacher requires 2..capacity text-only target tokens");
+    }
+    if (target_layer_ids.empty() || target_layer_ids.size() > 32) {
+        throw std::invalid_argument("causal teacher target layer list is empty or too large");
+    }
+    const auto layer_count = static_cast<std::uint32_t>(
+        parameters.model.config().text.blocks.size());
+    std::uint32_t previous = 0;
+    for (std::size_t i = 0; i < target_layer_ids.size(); ++i) {
+        const std::uint32_t layer = target_layer_ids[i];
+        if (layer >= layer_count || (i != 0 && layer <= previous)) {
+            throw std::invalid_argument(
+                "causal teacher target layers must be strictly increasing and in range");
+        }
+        previous = layer;
+    }
+
+    const std::uint32_t predictor_count =
+        static_cast<std::uint32_t>(token_count_size - 1U);
+    const std::uint32_t entitlement = kv_pages_for_frontier(predictor_count);
+    if (entitlement == 0) {
+        throw std::logic_error("causal teacher has no KV entitlement");
+    }
+    const std::int32_t hidden_size =
+        dimension(parameters.model.config().text.hidden_size);
+    const std::size_t fused_rows =
+        static_cast<std::size_t>(hidden_size) * target_layer_ids.size();
+    if (fused_rows > std::numeric_limits<std::size_t>::max() /
+                         static_cast<std::size_t>(predictor_count)) {
+        throw std::overflow_error("causal teacher feature shape overflows size_t");
+    }
+
+    DFlashTeacherCapture output;
+    output.token_ids = prompt.token_ids;
+    output.target_layer_ids.assign(target_layer_ids.begin(), target_layer_ids.end());
+    output.hidden_size = static_cast<std::uint32_t>(hidden_size);
+    output.predictor_count = predictor_count;
+    output.top_k = 16;
+    output.fused_bf16.reserve(
+        static_cast<std::size_t>(predictor_count) * fused_rows);
+    output.labels.reserve(predictor_count);
+    output.top_ids.reserve(static_cast<std::size_t>(predictor_count) * output.top_k);
+    output.top_logits.reserve(static_cast<std::size_t>(predictor_count) * output.top_k);
+
+    const std::size_t feature_chunk_values =
+        static_cast<std::size_t>(prefill_chunk) * fused_rows;
+    if (feature_chunk_values >
+        std::numeric_limits<std::size_t>::max() / sizeof(std::uint16_t)) {
+        throw std::overflow_error("causal teacher pinned feature buffer overflows size_t");
+    }
+    PinnedHostBuffer feature_host(feature_chunk_values * sizeof(std::uint16_t));
+    PinnedHostBuffer top_ids_host(static_cast<std::size_t>(prefill_chunk) * 16U *
+                                  sizeof(TokenId));
+    PinnedHostBuffer top_logits_host(static_cast<std::size_t>(prefill_chunk) * 16U *
+                                     sizeof(float));
+
+    std::optional<StateImageHandle> state;
+    std::optional<KVAddressSpaceHandle> address;
+    const auto cleanup = [&] {
+        bool released = true;
+        if (address) {
+            if (text_kv_addresses->active(*address)) {
+                text_kv_addresses->deactivate(*address);
+            }
+            released = text_kv_addresses->release(*address) && released;
+            address.reset();
+        }
+        if (state) {
+            released = state_store->release(*state) && released;
+            state.reset();
+        }
+        if (!released) {
+            throw std::logic_error("causal teacher resources could not be released");
+        }
+    };
+
+    try {
+        state = state_store->reserve_reset(device.stream);
+        if (!state) {
+            throw ninfer::ContextCacheExhausted(
+                "Device StateImage store has no free slot for teacher capture");
+        }
+        address = text_kv_addresses->create_active(entitlement, 0);
+        if (!address) {
+            throw ninfer::ContextCacheExhausted(
+                "text KV address space has no free teacher entry");
+        }
+        if (text_kv_addresses->bound_row(*address) != 0) {
+            throw std::logic_error("causal teacher did not bind the unique Main KV row");
+        }
+        text_kv_addresses->ensure_mapped_to_tokens(*address, predictor_count, device.stream);
+        const std::int32_t state_slot = state_store->physical_slot(*state);
+
+        std::uint32_t cursor = 0;
+        while (cursor < predictor_count) {
+            const std::uint32_t nominal =
+                std::min(prefill_chunk, predictor_count - cursor);
+            execution::PrefillContext schedule_state{
+                {device, parameters, work, state_images->linear(), nullptr, io, prefill_hidden,
+                 prefill_chunk, proposal_head, rope_scaling_factor,
+                 rope_scaling_original_context},
+                decoder->text_kv.execution_view(text_kv_addresses->execution_row(*address)),
+                {},
+                decoder->text_kv,
+                nullptr,
+                nullptr,
+                cursor,
+                nullptr,
+                nullptr,
+                state_slot,
+                state_slot,
+                0,
+                nullptr};
+
+            execution::TeacherFeatureSink sink{
+                .host_features = feature_host.data(),
+                .host_feature_bytes = feature_host.size(),
+                .layers = target_layer_ids,
+                .hidden_size = hidden_size,
+                .active_tokens = 0,
+                .token_offset = 0,
+                .total_tokens = nominal,
+            };
+            mark_workspace_usage(workspace_plan.causal_score);
+            const execution::PrefillChunkResult result =
+                execution::prefill_text_chunk(
+                    schedule_state, std::span<const TokenId>(prompt.token_ids), nominal,
+                    std::nullopt, false, sink);
+            if (result.finalized || result.processed_tokens == 0 ||
+                result.processed_tokens > nominal) {
+                throw std::logic_error("causal teacher Prefill made invalid progress");
+            }
+            const auto columns = static_cast<std::int32_t>(result.processed_tokens);
+            const std::size_t feature_values =
+                static_cast<std::size_t>(columns) * fused_rows;
+            const auto* captured =
+                static_cast<const std::uint16_t*>(feature_host.data());
+            output.fused_bf16.insert(output.fused_bf16.end(), captured,
+                                     captured + feature_values);
+
+            work.reset();
+            Tensor hidden = prefill_hidden.slice(1, 0, columns);
+            Tensor top_ids = work.alloc(DType::I32, {16, columns});
+            Tensor top_scores = work.alloc(DType::FP32, {16, columns});
+            const auto& head = parameters.text.output_head;
+            const Tensor head_input =
+                execution::rotated_input(hidden, head.hadamard_signs, work, device.stream);
+            ops::linear_topk(
+                head_input, head.weight,
+                dimension(parameters.model.resources().public_token_count),
+                top_ids, top_scores, work, device.stream);
+            CUDA_CHECK(cudaMemcpyAsync(
+                top_ids_host.data(), top_ids.data, top_ids.bytes(),
+                cudaMemcpyDeviceToHost, device.stream));
+            CUDA_CHECK(cudaMemcpyAsync(
+                top_logits_host.data(), top_scores.data, top_scores.bytes(),
+                cudaMemcpyDeviceToHost, device.stream));
+            device.synchronize();
+
+            const auto* ids = static_cast<const TokenId*>(top_ids_host.data());
+            const auto* scores = static_cast<const float*>(top_logits_host.data());
+            const std::size_t top_values = static_cast<std::size_t>(columns) * 16U;
+            output.top_ids.insert(output.top_ids.end(), ids, ids + top_values);
+            output.top_logits.insert(output.top_logits.end(), scores, scores + top_values);
+            for (std::int32_t col = 0; col < columns; ++col) {
+                output.labels.push_back(ids[static_cast<std::size_t>(col) * 16U]);
+            }
+
+            cursor += result.processed_tokens;
+            text_kv_addresses->commit_frontier(*address, cursor);
+            work.reset();
+        }
+
+        const std::size_t expected_top =
+            static_cast<std::size_t>(predictor_count) * output.top_k;
+        if (output.fused_bf16.size() !=
+                static_cast<std::size_t>(predictor_count) * fused_rows ||
+            output.labels.size() != predictor_count ||
+            output.top_ids.size() != expected_top ||
+            output.top_logits.size() != expected_top) {
+            throw std::logic_error("causal teacher returned an incomplete capture");
         }
         cleanup();
         return output;
