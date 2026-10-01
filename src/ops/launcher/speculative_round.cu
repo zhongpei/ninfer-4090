@@ -199,7 +199,8 @@ void speculative_tree_gather_bf16_dynamic_launch(
 
 void speculative_tree_build_plan_launch(
     const Tensor& candidate_ids, const Tensor& lattice_scores, const Tensor& anchors,
-    const Tensor& frontiers, const Tensor& rope_starts, std::int32_t node_budget,
+    const Tensor& frontiers, const Tensor& rope_starts, const Tensor& lookup_tokens,
+    std::int32_t lookup_count, float lookup_confidence, std::int32_t node_budget,
     std::int32_t spine, Tensor& tree_tokens, Tensor& parents, Tensor& depths,
     Tensor& cache_positions, Tensor& rope_positions, cudaStream_t stream) {
     speculative_tree_build_plan_kernel<<<1, 1, 0, stream>>>(
@@ -208,7 +209,8 @@ void speculative_tree_build_plan_launch(
         static_cast<const std::int32_t*>(anchors.data),
         static_cast<const std::int32_t*>(frontiers.data),
         static_cast<const std::int32_t*>(rope_starts.data),
-        candidate_ids.ne[1], node_budget, spine,
+        lookup_count == 0 ? nullptr : static_cast<const std::int32_t*>(lookup_tokens.data),
+        lookup_count, lookup_confidence, candidate_ids.ne[1], node_budget, spine,
         static_cast<std::int32_t*>(tree_tokens.data),
         static_cast<std::int32_t*>(parents.data),
         static_cast<std::int32_t*>(depths.data),
