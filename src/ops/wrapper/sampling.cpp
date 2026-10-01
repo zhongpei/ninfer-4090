@@ -59,6 +59,40 @@ void sample(const Tensor& logits, Tensor& out, std::int32_t token_domain,
                                 scratch, stream);
 }
 
+void sample_broadcast_config(const Tensor& logits, Tensor& out, std::int32_t token_domain,
+                             const SamplingConfig* config,
+                             const Tensor& logical_positions, std::int32_t purpose,
+                             WorkspaceArena& workspace, cudaStream_t stream) {
+    if (config == nullptr) {
+        throw std::invalid_argument("sample_broadcast_config: config must be non-null");
+    }
+    if (logits.dtype != DType::BF16 || logits.ne[0] <= 0 || logits.ne[1] <= 0 ||
+        logits.ne[1] > kSamplerMaxColumns || logits.ne[2] != 1 || logits.ne[3] != 1 ||
+        out.dtype != DType::I32 || out.ne[0] != logits.ne[1] || out.ne[1] != 1 ||
+        out.ne[2] != 1 || out.ne[3] != 1 || logical_positions.dtype != DType::I32 ||
+        logical_positions.ne[0] != logits.ne[1] || logical_positions.ne[1] != 1 ||
+        logical_positions.ne[2] != 1 || logical_positions.ne[3] != 1 ||
+        token_domain <= 0 || token_domain > logits.ne[0] || !logits.is_contiguous() ||
+        !out.is_contiguous() || !logical_positions.is_contiguous() ||
+        logits.data == nullptr || out.data == nullptr || logical_positions.data == nullptr) {
+        throw std::invalid_argument("sample_broadcast_config: invalid tree sampling profile");
+    }
+
+    auto scope = workspace.scope();
+    const DeviceSpan config_storage =
+        workspace.alloc_bytes(static_cast<std::size_t>(logits.ne[1]) * sizeof(SamplingConfig),
+                              alignof(SamplingConfig));
+    auto* configs = static_cast<SamplingConfig*>(config_storage.data);
+    detail::broadcast_sampling_config_launch(config, configs, logits.ne[1], stream);
+
+    const std::size_t scratch_bytes =
+        sampling_workspace_capacity_bytes(token_domain, logits.ne[1], logits.ne[1]);
+    const DeviceSpan scratch =
+        scratch_bytes == 0 ? DeviceSpan{} : workspace.alloc_bytes(scratch_bytes);
+    detail::sample_batch_launch(logits, out, token_domain, configs, logical_positions, purpose,
+                                scratch, stream);
+}
+
 void increment_token_counts(const Tensor& token_ids, Tensor& token_counts, cudaStream_t stream) {
     if (token_ids.dtype != DType::I32 || token_ids.ne[0] <= 0 || token_ids.ne[1] != 1 ||
         token_ids.ne[2] != 1 || token_ids.ne[3] != 1 || !token_ids.is_contiguous() ||
