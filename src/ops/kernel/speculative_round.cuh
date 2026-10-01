@@ -1043,7 +1043,8 @@ __global__ void speculative_tree_accept_device_kernel(
     const std::int32_t* verify_ids, const std::int32_t* parents,
     const std::int32_t* target_tokens, std::int32_t width,
     std::int32_t* path_nodes, std::int32_t* licensed_tokens,
-    std::int32_t* licensed_counts, std::int32_t* accepted_drafts) {
+    std::int32_t* licensed_counts, std::int32_t* accepted_drafts,
+    std::int32_t* last_node) {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     for (int i = 0; i < width; ++i) {
         path_nodes[i] = 0;
@@ -1070,6 +1071,20 @@ __global__ void speculative_tree_accept_device_kernel(
     }
     licensed_counts[0] = count;
     accepted_drafts[0] = accepted;
+    last_node[0] = current;
+}
+
+__global__ void speculative_tree_gather_bf16_counted_kernel(
+    const __nv_bfloat16* source, const std::int32_t* path_nodes,
+    const std::int32_t* count, __nv_bfloat16* destination, int rows, int width) {
+    const int column = static_cast<int>(blockIdx.y);
+    const int active = max(0, min(width, count[0]));
+    const int source_column = column < active ? path_nodes[column] : 0;
+    for (int row = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x; row < rows;
+         row += blockDim.x * gridDim.x) {
+        destination[column * rows + row] =
+            column < active ? source[source_column * rows + row] : __float2bfloat16(0.0f);
+    }
 }
 
 __global__ void speculative_tree_gather_bf16_kernel(
