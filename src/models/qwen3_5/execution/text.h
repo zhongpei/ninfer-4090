@@ -41,6 +41,18 @@ struct PrefillChunkResult {
     runtime::ExecutionTiming timing;
 };
 
+struct DFlashTreeFeatureSink {
+    static constexpr bool enabled = true;
+    Tensor* features = nullptr; // BF16 [layers*H, physical_width]
+    std::span<const std::uint32_t> layers;
+    std::int32_t active_tokens = 0;
+    std::uint32_t captured_mask = 0;
+
+    void begin(const Tensor& value);
+    void capture_layer(int layer, const Tensor& value, cudaStream_t stream);
+    void capture_positions(const Tensor& source, cudaStream_t stream);
+};
+
 struct DFlashFeatureSink {
     static constexpr bool enabled = true;
     using PrefillConsumer         = std::function<void(const Tensor&, const Tensor&, bool)>;
@@ -146,6 +158,13 @@ public:
                              const Tensor& kv_table_rows, const Tensor& linear_state_source_slots,
                              ops::CausalAttentionExecutionEnvelope envelope, Tensor& hidden,
                              Tensor& logits, Tensor& target_tokens, DFlashFeatureSink& sink);
+
+    void target_verify_tree(const Tensor& ids, const Tensor& cache_positions,
+                            const Tensor& rope_positions, const Tensor& kv_table_rows,
+                            const Tensor& linear_state_source_slots, const Tensor& parents,
+                            ops::CausalAttentionExecutionEnvelope envelope, Tensor& hidden,
+                            Tensor& logits, Tensor& target_tokens, Tensor& tree_kv_key,
+                            Tensor& tree_kv_value, DFlashTreeFeatureSink& sink);
     void mtp_forward_decode_batch(const Tensor& ids, const Tensor& hidden,
                                   const Tensor& cache_positions, const Tensor& rope_positions,
                                   const Tensor& valid_columns, const Tensor& kv_table_rows,
@@ -239,6 +258,9 @@ private:
     const Tensor* active_linear_state_destination_slots_                           = nullptr;
     const Tensor* active_valid_columns_                                            = nullptr;
     const Tensor* active_backend_kv_table_rows_                                    = nullptr;
+    const Tensor* active_tree_parents_                                              = nullptr;
+    Tensor* active_tree_kv_key_                                                     = nullptr;
+    Tensor* active_tree_kv_value_                                                   = nullptr;
     const ops::CausalAttentionExecutionEnvelope* active_causal_attention_envelope_ = nullptr;
     std::int32_t active_sequence_batch_                                            = 0;
     std::int32_t active_sequence_width_                                            = 0;

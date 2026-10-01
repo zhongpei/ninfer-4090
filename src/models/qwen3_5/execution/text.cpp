@@ -150,6 +150,44 @@ private:
 
 } // namespace
 
+void DFlashTreeFeatureSink::begin(const Tensor& value) {
+    if (features == nullptr || layers.empty() || layers.size() > 32 || active_tokens <= 0 ||
+        value.dtype != DType::BF16 || value.ne[1] != active_tokens ||
+        features->dtype != DType::BF16 ||
+        value.ne[0] * static_cast<std::int32_t>(layers.size()) != features->ne[0] ||
+        active_tokens > features->ne[1]) {
+        throw std::logic_error("DFlash tree feature sink is incomplete");
+    }
+    captured_mask = 0;
+}
+
+void DFlashTreeFeatureSink::capture_layer(int layer, const Tensor& value, cudaStream_t stream) {
+    const auto it = std::find(layers.begin(), layers.end(), layer);
+    if (it == layers.end()) return;
+    const std::size_t index = static_cast<std::size_t>(it - layers.begin());
+    if (features == nullptr || value.dtype != DType::BF16 || value.ne[1] != active_tokens) {
+        throw std::logic_error("DFlash tree feature capture shape is invalid");
+    }
+    const std::size_t element_bytes = dtype_size(DType::BF16);
+    const std::size_t width_bytes = static_cast<std::size_t>(value.ne[0]) * element_bytes;
+    const std::size_t source_pitch = static_cast<std::size_t>(value.nb[1]);
+    const std::size_t target_pitch = static_cast<std::size_t>(features->nb[1]);
+    auto* target = static_cast<std::byte*>(features->data) + index * width_bytes;
+    CUDA_CHECK(cudaMemcpy2DAsync(target, target_pitch, value.data, source_pitch, width_bytes,
+                                 static_cast<std::size_t>(active_tokens),
+                                 cudaMemcpyDeviceToDevice, stream));
+    captured_mask |= 1U << index;
+}
+
+void DFlashTreeFeatureSink::capture_positions(const Tensor& source, cudaStream_t) {
+    const std::uint32_t complete_mask =
+        layers.size() == 32 ? ~0U : ((1U << layers.size()) - 1U);
+    if (captured_mask != complete_mask || source.dtype != DType::I32 ||
+        source.ne[0] != active_tokens) {
+        throw std::logic_error("DFlash tree target call did not publish every feature layer");
+    }
+}
+
 void DFlashFeatureSink::begin(const Tensor& value) {
     const bool prefill = features != nullptr && positions != nullptr && batch_features == nullptr;
     const bool batch   = batch_features != nullptr && batch_lanes != nullptr &&
@@ -355,7 +393,50 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
 
     Tensor a = results.attention.view({dimension(config_.attention->head_dim),
                                        dimension(config_.attention->num_attention_heads), T});
-    if (active_sequence_batch_ != 0) {
+    if (active_tree_parents_ != nullptr) {
+        const std::int32_t width = active_sequence_width_;
+        if (active_sequence_batch_ != 1 || width != T || batch_text_kv_ == nullptr ||
+            active_tree_kv_key_ == nullptr || active_tree_kv_value_ == nullptr) {
+            throw std::logic_error("Text tree attention binding is incomplete");
+        }
+        const std::int32_t head_dim = dimension(config_.attention->head_dim);
+        const std::int32_t kv_heads = dimension(config_.attention->num_key_value_heads);
+        if (fidx < 0 || fidx >= active_tree_kv_key_->ne[3] ||
+            active_tree_kv_key_->ne[2] < width || active_tree_kv_value_->ne[2] < width) {
+            throw std::logic_error("Text tree attention replay layer is out of range");
+        }
+
+        Tensor key_record = active_tree_kv_key_->slice(3, fidx, 1)
+                                .slice(2, 0, width)
+                                .view({head_dim * kv_heads, width});
+        Tensor value_record = active_tree_kv_value_->slice(3, fidx, 1)
+                                  .slice(2, 0, width)
+                                  .view({head_dim * kv_heads, width});
+        Tensor key_source = kn.view({head_dim * kv_heads, width});
+        Tensor value_source = v.view({head_dim * kv_heads, width});
+        CUDA_CHECK(cudaMemcpyAsync(key_record.data, key_source.data, key_record.bytes(),
+                                   cudaMemcpyDeviceToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(value_record.data, value_source.data, value_record.bytes(),
+                                   cudaMemcpyDeviceToDevice, s));
+
+        for (std::int32_t node = 0; node < width; ++node) {
+            Tensor q_node = qn.slice(2, node, 1)
+                                .view({head_dim,
+                                       dimension(config_.attention->num_attention_heads), 1, 1});
+            Tensor k_node = kn.slice(2, node, 1).view({head_dim, kv_heads, 1, 1});
+            Tensor v_node = v.slice(2, node, 1).view({head_dim, kv_heads, 1, 1});
+            Tensor a_node = a.slice(2, node, 1)
+                                .view({head_dim,
+                                       dimension(config_.attention->num_attention_heads), 1, 1});
+            Tensor position_node = cache_positions.slice(0, node, 1).view({1, 1});
+            ops::causal_softmax_attention(
+                q_node, k_node, v_node, position_node, Tensor{}, kv_table_rows,
+                {head_dim, dimension(config_.attention->num_attention_heads), kv_heads},
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim))),
+                batch_text_kv_->batch_layer_view(fidx), *active_causal_attention_envelope_,
+                work_, a_node, s);
+        }
+    } else if (active_sequence_batch_ != 0) {
         const std::int32_t width = active_sequence_width_;
         if (width <= 0 || width * active_sequence_batch_ != T ||
             active_backend_kv_table_rows_ == nullptr || active_valid_columns_ == nullptr) {
@@ -803,6 +884,77 @@ void TextContext::target_verify_batch(const Tensor& ids, const Tensor& cache_pos
                              sink);
 }
 
+void TextContext::target_verify_tree(
+    const Tensor& ids, const Tensor& cache_positions, const Tensor& rope_positions,
+    const Tensor& kv_table_rows, const Tensor& linear_state_source_slots,
+    const Tensor& parents, ops::CausalAttentionExecutionEnvelope envelope,
+    Tensor& hidden, Tensor& logits, Tensor& target_tokens, Tensor& tree_kv_key,
+    Tensor& tree_kv_value, DFlashTreeFeatureSink& sink) {
+    const std::int32_t width = ids.ne[0];
+    if (width < 2 || width > static_cast<std::int32_t>(kDFlashDecodeMaximumWidth)) {
+        throw std::invalid_argument("target verify tree width must be in [2,16]");
+    }
+    require_tensor_shape(ids, DType::I32, {width, 1}, "target verify tree ids");
+    require_tensor_shape(cache_positions, DType::I32, {width, 1},
+                         "target verify tree cache positions");
+    require_tensor_shape(rope_positions, DType::I32, {width, 1},
+                         "target verify tree RoPE positions");
+    require_tensor_shape(kv_table_rows, DType::I32, {1}, "target verify tree KV row");
+    require_tensor_shape(linear_state_source_slots, DType::I32, {1},
+                         "target verify tree Linear Attention slot");
+    require_tensor_shape(parents, DType::I32, {width}, "target verify tree parents");
+    require_tensor_shape(hidden, DType::BF16, {dimension(config_.hidden_size), width, 1},
+                         "target verify tree hidden");
+    require_tensor_shape(logits, DType::BF16, {dimension(config_.vocab_size), width, 1},
+                         "target verify tree logits");
+    require_tensor_shape(target_tokens, DType::I32, {width, 1},
+                         "target verify tree tokens");
+    if (!config_.attention || tree_kv_key.dtype != DType::BF16 ||
+        tree_kv_value.dtype != DType::BF16 ||
+        tree_kv_key.ne[0] != dimension(config_.attention->head_dim) ||
+        tree_kv_key.ne[1] != dimension(config_.attention->num_key_value_heads) ||
+        tree_kv_key.ne[2] < width ||
+        tree_kv_key.ne[3] != static_cast<std::int32_t>(config_.full_attention_layers) ||
+        tree_kv_value.ne[0] != tree_kv_key.ne[0] ||
+        tree_kv_value.ne[1] != tree_kv_key.ne[1] ||
+        tree_kv_value.ne[2] != tree_kv_key.ne[2] ||
+        tree_kv_value.ne[3] != tree_kv_key.ne[3]) {
+        throw std::invalid_argument("target verify tree KV replay buffers have invalid geometry");
+    }
+
+    cudaStream_t stream = ctx_.stream;
+    work_.reset();
+    {
+        ScopedPositions cache_binding(active_cache_positions_, cache_positions);
+        ScopedPositions rope_binding(active_rope_positions_, rope_positions);
+        ScopedEnvelope envelope_binding(active_causal_attention_envelope_, envelope);
+        ScopedValue<const Tensor*> kv_binding(active_kv_table_rows_, &kv_table_rows);
+        ScopedValue<const Tensor*> state_binding(active_linear_state_source_slots_,
+                                                 &linear_state_source_slots);
+        ScopedValue<const Tensor*> parent_binding(active_tree_parents_, &parents);
+        ScopedValue<Tensor*> tree_key_binding(active_tree_kv_key_, &tree_kv_key);
+        ScopedValue<Tensor*> tree_value_binding(active_tree_kv_value_, &tree_kv_value);
+        ScopedValue<std::int32_t> batch_binding(active_sequence_batch_, 1);
+        ScopedValue<std::int32_t> width_binding(active_sequence_width_, width);
+
+        Tensor residual = work_.alloc(DType::BF16, {dimension(config_.hidden_size), width});
+        embed_tokens(ids.view({width}), *embed_, parameters_.text.token_embedding_signs,
+                     residual, stream);
+        sink.begin(residual);
+        run_layers(residual, Phase::Verify, sink);
+        sink.capture_positions(cache_positions, stream);
+
+        Tensor flat_hidden = hidden.view({dimension(config_.hidden_size), width});
+        Tensor flat_logits = logits.view({dimension(config_.vocab_size), width});
+        Tensor flat_tokens = target_tokens.view({width});
+        ops::rmsnorm(residual, *final_norm_, config_.rms_norm_eps, true, flat_hidden, stream);
+        project(flat_hidden, *lm_head_, flat_logits, work_, stream);
+        ops::argmax(flat_logits, flat_tokens,
+                    dimension(parameters_.model.resources().public_token_count), stream);
+    }
+    work_.reset();
+}
+
 void TextContext::mtp_forward_decode_batch(const Tensor& ids, const Tensor& hidden,
                                            const Tensor& cache_positions,
                                            const Tensor& rope_positions,
@@ -985,7 +1137,21 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
             z.view({dimension(config_.gdn->value_width()), width, active_sequence_batch_});
         Tensor conv_states = state_.layer_view(static_cast<std::uint32_t>(gidx)).conv;
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
-        if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
+        if (active_tree_parents_ != nullptr) {
+            if (gdn_state_action_ != GdnStateAction::RecordForReplay || replay_records_ == nullptr ||
+                active_sequence_batch_ != 1) {
+                throw std::logic_error("Tree GDN requires C1 ReplaySSM record mode");
+            }
+            // Materialize the parent projection once, then apply the convolution along each
+            // node's ancestor chain rather than along DFS storage order.
+            Tensor raw_qkv = workspace::gdn_prefill_conv(work_, config_, T);
+            Tensor z_flat = z.view({dimension(config_.gdn->value_width()), T});
+            gdn_projection(h, p, raw_qkv, z_flat, work_, s, projection_basis);
+            GdnReplayRecordLayer records = replay_records_->layer(gidx, 1);
+            ops::gdn_projected_tree_conv_record(
+                raw_qkv, p.convolution, conv_states, *active_linear_state_source_slots_,
+                *active_tree_parents_, records.conv, query_output, key_output, value_output, s);
+        } else if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
             if (replay_records_ == nullptr) {
                 throw std::logic_error("Replay-record GDN has no record storage");
             }
@@ -1044,12 +1210,21 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
         if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
             GdnReplayRecordLayer records = replay_records_->layer(gidx, active_sequence_batch_);
-            ops::gated_delta_net_replay_record(
-                q_batch, k_batch, v_batch, g_batch, beta_batch,
-                static_cast<float>(
-                    1.0 / std::sqrt(static_cast<double>(config_.gdn->linear_key_head_dim))),
-                recurrent_states, valid, *active_linear_state_source_slots_, records.key,
-                records.value, records.gate, out_batch, s);
+            if (active_tree_parents_ != nullptr) {
+                ops::gated_delta_net_tree_replay_record(
+                    q_batch, k_batch, v_batch, g_batch, beta_batch,
+                    static_cast<float>(
+                        1.0 / std::sqrt(static_cast<double>(config_.gdn->linear_key_head_dim))),
+                    recurrent_states, *active_linear_state_source_slots_, *active_tree_parents_,
+                    records.key, records.value, records.gate, out_batch, s);
+            } else {
+                ops::gated_delta_net_replay_record(
+                    q_batch, k_batch, v_batch, g_batch, beta_batch,
+                    static_cast<float>(
+                        1.0 / std::sqrt(static_cast<double>(config_.gdn->linear_key_head_dim))),
+                    recurrent_states, valid, *active_linear_state_source_slots_, records.key,
+                    records.value, records.gate, out_batch, s);
+            }
         } else {
             ops::gated_delta_net_batch_update(
                 q_batch, k_batch, v_batch, g_batch, beta_batch,

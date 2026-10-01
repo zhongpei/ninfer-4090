@@ -3,6 +3,7 @@
 #include <cmath>
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/program/context.h"
+#include "models/qwen3_5/program/speculative/tree_plan.h"
 #include "models/qwen3_5/execution/workspace.h"
 
 #include "core/nvtx.h"
@@ -22,6 +23,7 @@
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer/ops/prepare_masked_block.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
+#include "ninfer/ops/position.h"
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/rope.h"
 #include "ninfer/ops/scalar.h"
@@ -32,6 +34,8 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <stdexcept>
 #include <utility>
@@ -260,7 +264,7 @@ void finish_dynamic_branch(ExecutionCore& execution, const Tensor& input,
 }
 
 void propose_dflash2_batch(DFlashBatchContext& state, qwen3_5::DFlashDecodeState& frame, int batch,
-                           int k, DFlashEnvelopes envelopes) {
+                           int k, DFlashEnvelopes envelopes, Tensor* lattice_scores = nullptr) {
     if (state.execution.parameters.model.config().draft->dflash2) {
         const auto& target = state.execution.parameters.model.config().text;
         const auto& config = *state.execution.parameters.model.config().draft;
@@ -379,21 +383,33 @@ void propose_dflash2_batch(DFlashBatchContext& state, qwen3_5::DFlashDecodeState
         project(hidden, weights.selector->hidden_projection, projected, work, stream);
         Tensor drafts     = frame.draft_tokens.slice(1, 0, batch);
         Tensor proposal_q = frame.proposal_q.slice(2, 0, batch);
-        ops::candidate_selector_path(
-            candidates, scores.view({dimension(config.dflash2->selector_top_k), k, batch}),
-            projected.view({dimension(config.dflash2->selector_rank), k, batch}), anchors,
-            weights.selector->predecessor_codebook, weights.selector->successor_codebook, frontiers,
-            frame.sampling, drafts, proposal_q, work, stream);
+        if (lattice_scores != nullptr) {
+            if (batch != 1) {
+                throw std::logic_error("DFlash2 tree lattice is C1 in the first runtime version");
+            }
+            ops::candidate_selector_lattice(
+                candidates, scores.view({dimension(config.dflash2->selector_top_k), k, batch}),
+                projected.view({dimension(config.dflash2->selector_rank), k, batch}), anchors,
+                weights.selector->predecessor_codebook, weights.selector->successor_codebook,
+                frontiers, frame.sampling, drafts, proposal_q, *lattice_scores, stream);
+        } else {
+            ops::candidate_selector_path(
+                candidates, scores.view({dimension(config.dflash2->selector_top_k), k, batch}),
+                projected.view({dimension(config.dflash2->selector_rank), k, batch}), anchors,
+                weights.selector->predecessor_codebook, weights.selector->successor_codebook,
+                frontiers, frame.sampling, drafts, proposal_q, work, stream);
+        }
         work.reset();
     }
 }
 
 void propose_batch_impl(DFlashBatchContext& state, qwen3_5::DFlashDecodeState& frame,
-                        std::int32_t batch_size, std::uint32_t k, DFlashEnvelopes envelopes) {
+                        std::int32_t batch_size, std::uint32_t k, DFlashEnvelopes envelopes,
+                        Tensor* lattice_scores = nullptr) {
     if (state.execution.parameters.model.config().draft->dflash2) {
         nvtx::ScopedRange proposal_range(nvtx::Name::DFlashProposal, nvtx::Category::DFlash,
                                          static_cast<std::uint64_t>(k + 1U) * batch_size);
-        propose_dflash2_batch(state, frame, batch_size, k, envelopes);
+        propose_dflash2_batch(state, frame, batch_size, k, envelopes, lattice_scores);
     } else {
         const auto& target         = state.execution.parameters.model.config().text;
         const auto& config         = *state.execution.parameters.model.config().draft;
@@ -735,6 +751,259 @@ void dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size, std
                          DecodeGraphExecutable* executable) {
     auto body = dflash_decode_batch_body(state, batch_size, k, envelopes, target_envelope);
     run_prepared(state, executable, body);
+}
+
+void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
+                        DFlashEnvelopes envelopes,
+                        ops::CausalAttentionExecutionEnvelope target_envelope,
+                        SpeculativeTreeOptions options) {
+    if (k == 0 || k > kDFlashDecodeMaximumDrafts || options.mode != SpeculativeTreeMode::Lattice ||
+        options.nodes != k || options.spine == 0 || options.spine > k ||
+        !state.execution.parameters.model.config().draft ||
+        !state.execution.parameters.model.config().draft->dflash2 ||
+        state.execution.replay_records == nullptr) {
+        throw std::invalid_argument("DFlash2 tree decode received an unsupported runtime profile");
+    }
+    if (state.host_ingress.sampling[0].temperature > 0.0F ||
+        state.host_ingress.sampling[0].presence_penalty != 0.0F ||
+        state.host_ingress.sampling[0].frequency_penalty != 0.0F) {
+        throw std::invalid_argument("DFlash2 tree decode currently requires raw greedy sampling");
+    }
+
+    qwen3_5::DFlashDecodeState& frame = state.frame;
+    const std::int32_t width = static_cast<std::int32_t>(k) + 1;
+    if (!frame.lattice_scores.data || !frame.tree_parents.data || !frame.tree_depths.data ||
+        !frame.tree_path_nodes.data || !frame.tree_kv_key.data || !frame.tree_kv_value.data) {
+        throw std::logic_error("DFlash2 tree decode buffers are not planned");
+    }
+
+    const cudaStream_t stream = state.execution.device.stream;
+    CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &state.host_ingress,
+                               sizeof(qwen3_5::DFlashDecodeIngress), cudaMemcpyHostToDevice,
+                               stream));
+
+    Tensor anchors            = frame.anchors.slice(0, 0, 1);
+    Tensor frontiers          = frame.execution_frontiers.slice(0, 0, 1);
+    Tensor context_starts     = frame.context_frontiers.slice(0, 0, 1);
+    Tensor state_sources      = frame.state_source_slots.slice(0, 0, 1);
+    Tensor state_destinations = frame.state_destination_slots.slice(0, 0, 1);
+    Tensor text_rows          = frame.text_kv_table_rows.slice(0, 0, 1);
+    Tensor dflash_rows        = frame.dflash_kv_table_rows.slice(0, 0, 1);
+    Tensor active_lanes       = frame.active_lanes.slice(0, 0, 1);
+    Tensor append_positions   = frame.append_positions.slice(1, 0, 1);
+    Tensor append_counts      = frame.append_counts.slice(0, 0, 1);
+
+    // Bring the DFlash target context up to the round entry exactly as the chain schedule does.
+    state.execution.work.reset();
+    Tensor compact_features = state.execution.work.alloc(
+        DType::BF16, {dimension(state.execution.parameters.draft->feature_projection.weight.k),
+                      width, 1});
+    ops::prepare_ragged_prefix(state.dflash.pending_features, active_lanes, context_starts,
+                               frontiers, compact_features, append_positions, append_counts, stream);
+    append_context_impl(state, compact_features, append_positions, append_counts,
+                        state_destinations, dflash_rows, envelopes.append);
+    state.execution.work.reset();
+
+    // The lattice already exists inside the ordinary DFlash2 selector for K>4; preserve it rather
+    // than rerunning the selector. Tree construction is host-side in this first implementation.
+    Tensor lattice = frame.lattice_scores.slice(3, 0, 1);
+    propose_batch_impl(state, frame, 1, k, envelopes, &lattice);
+
+    std::array<TokenId, 16 * kDFlashDecodeMaximumDrafts> host_candidates{};
+    std::array<float, 16 * 16 * kDFlashDecodeMaximumDrafts> host_lattice{};
+    Tensor candidates = frame.candidate_ids.slice(2, 0, 1);
+    CUDA_CHECK(cudaMemcpyAsync(host_candidates.data(), candidates.data,
+                               static_cast<std::size_t>(16 * k) * sizeof(TokenId),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(host_lattice.data(), lattice.data,
+                               static_cast<std::size_t>(16 * 16 * k) * sizeof(float),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    const auto tree = qwen3_5::detail::build_verify_tree(
+        state.host_ingress.anchors[0], host_candidates.data(), host_lattice.data(), k, options);
+    if (!tree.valid() || tree.rows != static_cast<std::uint32_t>(width)) {
+        throw std::logic_error("DFlash2 runtime tree does not fill the configured verify width");
+    }
+
+    std::array<std::int32_t, kDFlashDecodeMaximumWidth> host_positions{};
+    std::array<std::int32_t, kDFlashDecodeMaximumWidth> host_rope{};
+    const std::int32_t frontier = state.host_ingress.execution_frontiers[0];
+    const std::int32_t rope_delta = state.host_ingress.target_rope_positions[0] - frontier;
+    for (std::int32_t i = 0; i < width; ++i) {
+        host_positions[static_cast<std::size_t>(i)] =
+            frontier + tree.depths[static_cast<std::size_t>(i)];
+        host_rope[static_cast<std::size_t>(i)] =
+            host_positions[static_cast<std::size_t>(i)] + rope_delta;
+    }
+
+    Tensor verify_ids       = frame.verify_ids.slice(1, 0, 1);
+    Tensor target_positions = frame.verify_positions.slice(1, 0, 1);
+    Tensor target_rope      = frame.target_rope_positions.slice(1, 0, 1);
+    Tensor parents          = frame.tree_parents.slice(0, 0, width);
+    Tensor depths           = frame.tree_depths.slice(0, 0, width);
+    CUDA_CHECK(cudaMemcpyAsync(verify_ids.data, tree.tokens.data(),
+                               static_cast<std::size_t>(width) * sizeof(TokenId),
+                               cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(target_positions.data, host_positions.data(),
+                               static_cast<std::size_t>(width) * sizeof(std::int32_t),
+                               cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(target_rope.data, host_rope.data(),
+                               static_cast<std::size_t>(width) * sizeof(std::int32_t),
+                               cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(parents.data, tree.parents.data(),
+                               static_cast<std::size_t>(width) * sizeof(std::int32_t),
+                               cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(depths.data, tree.depths.data(),
+                               static_cast<std::size_t>(width) * sizeof(std::int32_t),
+                               cudaMemcpyHostToDevice, stream));
+
+    const std::int32_t lane = state.host_ingress.active_lanes[0];
+    if (lane < 0 || lane >= state.dflash.pending_features.ne[2]) {
+        throw std::logic_error("DFlash2 tree target lane is outside pending feature storage");
+    }
+    Tensor tree_features = state.dflash.pending_features.slice(2, lane, 1)
+                               .view({state.dflash.pending_features.ne[0], width});
+    DFlashTreeFeatureSink sink{
+        .features = &tree_features,
+        .layers = std::span<const std::uint32_t>(
+            state.execution.parameters.model.config().draft->target_layer_ids),
+        .active_tokens = width,
+    };
+
+    Tensor target_hidden = frame.target_hidden.slice(2, 0, 1);
+    Tensor target_logits = frame.target_logits.slice(2, 0, 1);
+    Tensor target_tokens = frame.target_argmax.slice(1, 0, 1);
+    TextContext card(state.execution.device, state.execution.parameters, state.execution.work, {},
+                     state.execution.linear_attention, state.execution.io,
+                     state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
+                     &state.text_cache);
+    card.set_gdn_state_action(GdnStateAction::RecordForReplay, state.execution.replay_records);
+    {
+        nvtx::ScopedRange target_range(nvtx::Name::DecodeDFlashTarget, nvtx::Category::DFlash,
+                                       static_cast<std::uint64_t>(width));
+        card.target_verify_tree(verify_ids, target_positions, target_rope, text_rows, state_sources,
+                                parents, target_envelope, target_hidden, target_logits,
+                                target_tokens, frame.tree_kv_key, frame.tree_kv_value, sink);
+    }
+
+    std::array<TokenId, kDFlashDecodeMaximumWidth> host_target{};
+    CUDA_CHECK(cudaMemcpyAsync(host_target.data(), target_tokens.data,
+                               static_cast<std::size_t>(width) * sizeof(TokenId),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    const auto accepted = qwen3_5::detail::accept_verify_tree(tree, host_target.data());
+    if (accepted.count == 0 || accepted.count > static_cast<std::uint32_t>(width) ||
+        accepted.accepted_drafts + 1 != accepted.count) {
+        throw std::logic_error("DFlash2 runtime tree produced invalid acceptance metadata");
+    }
+
+    state.host_egress = {};
+    state.host_egress.licensed_counts[0] = static_cast<std::int32_t>(accepted.count);
+    state.host_egress.accepted_drafts[0] =
+        static_cast<std::int32_t>(accepted.accepted_drafts);
+    state.host_egress.tree_path_count = static_cast<std::int32_t>(accepted.count);
+    std::copy_n(accepted.licensed_tokens.begin(), accepted.count,
+                state.host_egress.licensed_tokens.begin());
+    std::copy_n(accepted.path_nodes.begin(), accepted.count,
+                state.host_egress.tree_path_nodes.begin());
+
+    Tensor path_nodes = frame.tree_path_nodes.slice(0, 0, width);
+    CUDA_CHECK(cudaMemcpyAsync(path_nodes.data, state.host_egress.tree_path_nodes.data(),
+                               static_cast<std::size_t>(width) * sizeof(std::int32_t),
+                               cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(frame.egress.data, &state.host_egress,
+                               sizeof(qwen3_5::DFlashDecodeEgress), cudaMemcpyHostToDevice,
+                               stream));
+
+    // Canonicalize target hidden into accepted-path order as well. The Program's existing
+    // partial-terminal correction then keeps using selector=(committed-1) without knowing that
+    // verification originally ran in DFS node order.
+    state.execution.work.reset();
+    Tensor compacted_hidden = state.execution.work.alloc(
+        DType::BF16, {target_hidden.ne[0], width});
+    ops::speculative_tree_gather_bf16(
+        target_hidden.view({target_hidden.ne[0], width}), path_nodes,
+        static_cast<std::int32_t>(accepted.count), compacted_hidden, stream);
+    CUDA_CHECK(cudaMemcpyAsync(target_hidden.data, compacted_hidden.data,
+                               compacted_hidden.bytes(), cudaMemcpyDeviceToDevice, stream));
+
+    // Keep only the accepted path in DFlash target-tap storage. A terminal Frontend truncation
+    // later consumes a prefix of this already compacted chain.
+    Tensor compacted_features = state.execution.work.alloc(
+        DType::BF16, {tree_features.ne[0], width});
+    ops::speculative_tree_gather_bf16(tree_features, path_nodes,
+                                      static_cast<std::int32_t>(accepted.count),
+                                      compacted_features, stream);
+    CUDA_CHECK(cudaMemcpyAsync(tree_features.data, compacted_features.data,
+                               compacted_features.bytes(), cudaMemcpyDeviceToDevice, stream));
+
+    // Re-publish full-attention KV in canonical contiguous positions. DFS verify intentionally
+    // reuses depth positions, so the cache currently holds whichever branch visited those depths
+    // last; the replay planes preserve every node's BF16 K/V for this compaction.
+    const auto& target = state.execution.parameters.model.config().text;
+    if (!target.attention) {
+        throw std::logic_error("DFlash2 tree target requires full-attention geometry");
+    }
+    const std::int32_t head_dim = dimension(target.attention->head_dim);
+    const std::int32_t kv_heads = dimension(target.attention->num_key_value_heads);
+    const std::int32_t kv_rows = head_dim * kv_heads;
+    Tensor canonical_positions =
+        state.execution.work.alloc(DType::I32, {static_cast<std::int32_t>(accepted.count)});
+    ops::fill_i32_positions(canonical_positions, frontier, stream);
+    const std::int32_t table_row = state.host_ingress.text_kv_table_rows[0];
+    for (std::int32_t layer = 0; layer < frame.tree_kv_key.ne[3]; ++layer) {
+        auto scope = state.execution.work.scope();
+        Tensor source_k = frame.tree_kv_key.slice(3, layer, 1)
+                              .slice(2, 0, width)
+                              .view({kv_rows, width});
+        Tensor source_v = frame.tree_kv_value.slice(3, layer, 1)
+                              .slice(2, 0, width)
+                              .view({kv_rows, width});
+        Tensor compact_k = state.execution.work.alloc(DType::BF16, {kv_rows, width});
+        Tensor compact_v = state.execution.work.alloc(DType::BF16, {kv_rows, width});
+        ops::speculative_tree_gather_bf16(source_k, path_nodes,
+                                          static_cast<std::int32_t>(accepted.count),
+                                          compact_k, stream);
+        ops::speculative_tree_gather_bf16(source_v, path_nodes,
+                                          static_cast<std::int32_t>(accepted.count),
+                                          compact_v, stream);
+        Tensor commit_k = compact_k.slice(1, 0, static_cast<std::int32_t>(accepted.count))
+                              .view({head_dim, kv_heads,
+                                     static_cast<std::int32_t>(accepted.count)});
+        Tensor commit_v = compact_v.slice(1, 0, static_cast<std::int32_t>(accepted.count))
+                              .view({head_dim, kv_heads,
+                                     static_cast<std::int32_t>(accepted.count)});
+        const PagedKVBatchLayerView batch_cache =
+            state.text_cache.batch_layer_view(static_cast<std::uint32_t>(layer));
+        if (table_row < 0 || table_row >= batch_cache.block_tables.ne[1]) {
+            throw std::logic_error("DFlash2 tree target table row is outside cache metadata");
+        }
+        Tensor block_table = batch_cache.block_tables.slice(1, table_row, 1)
+                                 .view({batch_cache.block_tables.ne[0]});
+        PagedKVLayerView single{
+            .k_pages = batch_cache.k_pages,
+            .v_pages = batch_cache.v_pages,
+            .k_scale_pages = batch_cache.k_scale_pages,
+            .v_scale_pages = batch_cache.v_scale_pages,
+            .block_table = block_table,
+            .head_dim = batch_cache.head_dim,
+            .num_kv_heads = batch_cache.num_kv_heads,
+            .storage = batch_cache.storage,
+        };
+        ops::kv_cache_append(commit_k, commit_v, canonical_positions, single, stream);
+    }
+
+    // The continuation hidden belongs to the tree node that emitted the correction/bonus token.
+    const std::int32_t last_node =
+        accepted.path_nodes[static_cast<std::size_t>(accepted.count - 1)];
+    CUDA_CHECK(cudaMemcpyAsync(append_counts.data, &last_node, sizeof(last_node),
+                               cudaMemcpyHostToDevice, stream));
+    Tensor selected_hidden = frame.target_continuation_hidden.slice(1, 0, 1);
+    ops::speculative_select_accepted_hidden(target_hidden, append_counts, selected_hidden, stream);
+    ops::scatter(selected_hidden, state_destinations, state.continuation_hidden_store, stream);
+    state.execution.work.reset();
 }
 
 void dflash_lookup_decode_batch(DFlashBatchContext& state, std::int32_t batch_size,

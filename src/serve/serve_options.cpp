@@ -86,6 +86,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--spec-router fixed|stair] [--spec-stair-widths A,B,C,D] "
+           "[--spec-tree off|lattice] [--spec-tree-nodes N] [--spec-tree-spine N] "
            "[--spec-stair-costs A,B,C,D] [--spec-stair-draft-cost F] "
            "[--spec-stair-prior F] [--spec-stair-prior-weight F] "
            "[--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F] "
@@ -132,6 +133,8 @@ std::string serve_usage_text(const char* argv0) {
            "small perplexity cost (docs/performance.md), off by default, and it wants a larger "
            "--prefill-chunk to pay; --no-prefill-cublas-projections keeps the attention and GDN "
            "input projections off that route\n"
+           "       --spec-tree lattice enables C1 greedy DFlash2 runtime tree verification; "
+           "nodes/spine are explicit A/B controls and off remains the default\n"
            "       --spec-router stair adaptively cuts DFlash/DFlash2 target verification using "
            "four explicit width/cost rungs; fixed remains the default for A/B comparisons\n"
            "       --lookup-ngram N adds context-lookup drafting alongside --spec: the last N tokens "
@@ -346,6 +349,15 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--draft-tokens"), "draft-tokens"));
+        } else if (arg == "--spec-tree") {
+            options.speculative.tree.mode =
+                product::parse_speculative_tree_mode(require_value("--spec-tree"));
+        } else if (arg == "--spec-tree-nodes") {
+            options.speculative.tree.nodes = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--spec-tree-nodes"), "spec-tree-nodes"));
+        } else if (arg == "--spec-tree-spine") {
+            options.speculative.tree.spine = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--spec-tree-spine"), "spec-tree-spine"));
         } else if (arg == "--spec-router") {
             options.speculative.routing.mode =
                 product::parse_speculative_routing_mode(require_value("--spec-router"));

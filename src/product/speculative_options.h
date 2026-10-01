@@ -17,6 +17,22 @@ namespace ninfer::product {
     throw std::invalid_argument("invalid speculative backend: " + std::string(value));
 }
 
+[[nodiscard]] inline const char* speculative_tree_mode_name(SpeculativeTreeMode mode) noexcept {
+    switch (mode) {
+    case SpeculativeTreeMode::Off:
+        return "off";
+    case SpeculativeTreeMode::Lattice:
+        return "lattice";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] inline SpeculativeTreeMode parse_speculative_tree_mode(std::string_view value) {
+    if (value == "off") { return SpeculativeTreeMode::Off; }
+    if (value == "lattice") { return SpeculativeTreeMode::Lattice; }
+    throw std::invalid_argument("invalid speculative tree mode: " + std::string(value));
+}
+
 [[nodiscard]] inline LookupDraftStrategy parse_lookup_draft_strategy(std::string_view value) {
     if (value == "recent") { return LookupDraftStrategy::Recent; }
     if (value == "vote") { return LookupDraftStrategy::Vote; }
@@ -118,7 +134,26 @@ inline void parse_speculative_stair_costs(std::string_view value,
 
 inline void validate_speculative_cli_options(const SpeculativeOptions& options) {
     const auto& router = options.routing;
+    const auto& tree = options.tree;
     const auto& lookup = options.lookup;
+    if (tree.nodes == 0 || tree.nodes > 15 || tree.spine == 0 || tree.spine > 15) {
+        throw std::invalid_argument("invalid speculative tree node/spine policy");
+    }
+    if (tree.mode != SpeculativeTreeMode::Off) {
+        if (options.backend != SpeculativeBackend::DFlash2) {
+            throw std::invalid_argument("--spec-tree lattice requires --spec dflash2");
+        }
+        if (options.draft_tokens < 5) {
+            throw std::invalid_argument("--spec-tree lattice requires --draft-tokens >= 5");
+        }
+        if (tree.nodes != options.draft_tokens) {
+            throw std::invalid_argument(
+                "first-version --spec-tree-nodes must equal --draft-tokens");
+        }
+        if (tree.spine > tree.nodes) {
+            throw std::invalid_argument("--spec-tree-spine must not exceed --spec-tree-nodes");
+        }
+    }
     if (lookup.max_order == 0 || lookup.max_order > 16 || lookup.max_matches == 0 ||
         lookup.min_support == 0 || !std::isfinite(lookup.min_confidence) ||
         lookup.min_confidence < 0.0F || lookup.min_confidence > 1.0F ||

@@ -32,6 +32,9 @@ void speculative_accept_sparse_drafts_launch(
 
 void speculative_select_accepted_hidden_launch(const Tensor& hidden, const Tensor& selectors,
                                                Tensor& out, cudaStream_t stream);
+void speculative_tree_gather_bf16_launch(const Tensor& source, const Tensor& path_nodes,
+                                         std::int32_t count, Tensor& destination,
+                                         cudaStream_t stream);
 void speculative_make_one_hot_sparse_proposal_launch(
     const Tensor& drafts, const Tensor& current_extents, Tensor& candidate_ids,
     Tensor& proposal_q, std::int32_t token_domain, cudaStream_t stream);

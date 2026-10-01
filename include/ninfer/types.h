@@ -116,6 +116,22 @@ enum class LookupDFlashMode : std::uint8_t {
     HeadSkip,
 };
 
+enum class SpeculativeTreeMode : std::uint8_t {
+    Off,
+    Lattice,
+};
+
+struct SpeculativeTreeOptions {
+    // Tree verification is opt-in. The first runtime implementation is deliberately bounded to
+    // one DFlash2 row, greedy target sampling and at most 15 drafted nodes (16 target rows).
+    SpeculativeTreeMode mode = SpeculativeTreeMode::Off;
+    std::uint32_t nodes      = 15;
+    // Number of greedy-lattice levels installed before best-first alternatives consume the
+    // remaining node budget. Seven matches the released DFlash2 block while a b16 drafter can
+    // still supply deeper continuations to alternative branches.
+    std::uint32_t spine      = 7;
+};
+
 struct LookupDraftOptions {
     // Recent preserves the historical nearest-occurrence lookup. Vote counts all matching
     // continuations from the active sequence plus optional process history and static corpus.
@@ -166,6 +182,7 @@ struct SpeculativeOptions {
     std::uint32_t draft_tokens = 0;
     ProposalHead proposal_head = ProposalHead::Full;
     SpeculativeRoutingOptions routing;
+    SpeculativeTreeOptions tree;
     LookupDraftOptions lookup;
     // Context-lookup drafting: match this many trailing tokens against the sequence so far and
     // propose whatever followed the last time they appeared. 0 disables it. It costs no device
@@ -876,6 +893,10 @@ struct SpeculativeStats {
     std::uint64_t lookup_head_skip_rounds = 0;
     std::uint64_t lookup_drafted_tokens   = 0;
     std::uint64_t lookup_accepted_tokens  = 0;
+    std::uint64_t tree_rounds              = 0;
+    std::uint64_t tree_fallback_rounds     = 0;
+    std::uint64_t tree_nodes               = 0;
+    std::uint64_t tree_accepted_drafts     = 0;
 };
 
 struct ThinkingBudgetStats {

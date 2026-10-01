@@ -673,6 +673,17 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             std::max(maximum_target_tokens, sequence.execution_frontier + extent + 1U);
     }
 
+    const bool tree_requested = speculative_tree.mode == SpeculativeTreeMode::Lattice;
+    const bool tree_sampling_ok =
+        lanes.size() == 1 && requests[lanes[0]].sampling_host.temperature <= 0.0F &&
+        requests[lanes[0]].sampling_host.presence_penalty == 0.0F &&
+        requests[lanes[0]].sampling_host.frequency_penalty == 0.0F;
+    const bool tree_active =
+        tree_requested && speculative_backend == SpeculativeBackend::DFlash2 &&
+        lanes.size() == 1 && !lookup_batch && normal_extents[0] == draft_window &&
+        speculative_tree.nodes == draft_window && speculative_tree.spine <= draft_window &&
+        tree_sampling_ok;
+
     const auto started = Clock::now();
     try {
         std::optional<nvtx::ScopedRange> submit_range;
@@ -681,7 +692,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         DecodeGraphExecutable* executable    = nullptr;
         execution::DFlashEnvelopes envelopes = dflash_envelopes(0, maximum_frontier, draft_window);
         ops::CausalAttentionExecutionEnvelope target_envelope{1, maximum_target_tokens};
-        if (use_cuda_graph && !lookup_batch) {
+        if (use_cuda_graph && !lookup_batch && !tree_active) {
             DecodeGraphProfile& profile =
                 select_graph_profile(dflash_graphs, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "DFlash batch");
@@ -751,6 +762,9 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             execution::dflash_lookup_decode_batch(
                 schedule_state, static_cast<std::int32_t>(lanes.size()), draft_window, envelopes,
                 target_envelope, std::span<const TokenId>(lookup_host), run_drafter);
+        } else if (tree_active) {
+            execution::dflash_tree_decode(schedule_state, draft_window, envelopes, target_envelope,
+                                          speculative_tree);
         } else {
             execution::dflash_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                            draft_window, envelopes, target_envelope, executable);
@@ -785,6 +799,9 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                                           row * width,
                                                       static_cast<std::size_t>(count_i));
             validate_licensed_tokens(row_tokens);
+            if (tree_requested && !tree_active) {
+                ++request.speculative_stats.tree_fallback_rounds;
+            }
             if (extent == 0) {
                 request.speculative_stats.fallback_steps += 1;
             } else {
@@ -795,7 +812,13 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                     request.speculative_stats.accepted_per_position[static_cast<std::size_t>(i)] +=
                         1;
                 }
-                if (!lookup_batch && speculative_routing.mode == SpeculativeRoutingMode::Stair) {
+                if (tree_active) {
+                    ++request.speculative_stats.tree_rounds;
+                    request.speculative_stats.tree_nodes += speculative_tree.nodes;
+                    request.speculative_stats.tree_accepted_drafts +=
+                        static_cast<std::uint32_t>(accepted_i);
+                } else if (!lookup_batch &&
+                           speculative_routing.mode == SpeculativeRoutingMode::Stair) {
                     request.stair_router.observe(
                         extent, static_cast<std::uint32_t>(accepted_i), speculative_routing);
                 }
@@ -825,6 +848,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                  .base_S        = base_S,
                                  .prompt_tokens = 0,
                                  .produced      = static_cast<std::uint32_t>(count_i),
+                                 .tree_verify   = tree_active,
             };
             request.lifecycle = Lifecycle::Pending;
             request.timings.decode_seconds += seconds;

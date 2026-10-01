@@ -16,6 +16,15 @@ struct GdnReplayFoldRow {
     std::int32_t commit_columns;
 };
 
+// Tree record: B=1, T<=16, parents is topological/DFS I32 [T] with parents[0]=-1. Each node's
+// output is evaluated from the round-entry recurrent state plus exactly its ancestor path. Raw
+// key/value/gate records remain indexed by tree node for later accepted-path commit.
+void gated_delta_net_tree_replay_record(
+    const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g, const Tensor& beta,
+    float scale, const Tensor& ssm_states, const Tensor& initial_state_slots,
+    const Tensor& parents, Tensor& key_record, Tensor& value_record, Tensor& gate_record,
+    Tensor& out, cudaStream_t stream);
+
 /**
  * Prepared Op: gdn_replay_fold
  *
@@ -50,6 +59,13 @@ public:
     GdnReplayFoldPlan(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states);
 
     void execute(std::span<const GdnReplayFoldRow> rows, cudaStream_t stream) const;
+
+    // C1 tree commit. path_nodes is device I32 [record width]; the first commit_columns selectors
+    // name root + accepted draft inputs in record storage. Frontend truncation simply lowers
+    // commit_columns before this call.
+    void execute_tree(std::int32_t source_state_slot, std::int32_t destination_state_slot,
+                      const Tensor& path_nodes, std::int32_t commit_columns,
+                      cudaStream_t stream) const;
 
 private:
     GdnReplayRecords records_;

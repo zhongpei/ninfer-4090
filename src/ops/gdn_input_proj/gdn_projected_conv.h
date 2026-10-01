@@ -17,4 +17,9 @@ void gdn_projected_conv_record_launch(const Tensor& conv_record, const Tensor& c
                                       const Tensor& initial_state_slots, Tensor& query, Tensor& key,
                                       Tensor& value, cudaStream_t stream);
 
+void gdn_projected_tree_conv_record_launch(
+    const Tensor& projected, const Tensor& conv_weight, const Tensor& conv_states,
+    const Tensor& initial_state_slots, const Tensor& parents, Tensor& conv_record,
+    Tensor& query, Tensor& key, Tensor& value, cudaStream_t stream);
+
 } // namespace ninfer::ops::detail

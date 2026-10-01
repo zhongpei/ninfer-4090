@@ -528,6 +528,10 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.metrics.lookup_head_skip_rounds = result.speculative.lookup_head_skip_rounds;
     outcome.metrics.lookup_draft_tokens     = result.speculative.lookup_drafted_tokens;
     outcome.metrics.lookup_accepted_tokens  = result.speculative.lookup_accepted_tokens;
+    outcome.metrics.tree_rounds             = result.speculative.tree_rounds;
+    outcome.metrics.tree_fallback_rounds    = result.speculative.tree_fallback_rounds;
+    outcome.metrics.tree_nodes              = result.speculative.tree_nodes;
+    outcome.metrics.tree_accepted_drafts    = result.speculative.tree_accepted_drafts;
 
     outcome.tool_calls      = std::move(result.tool_calls);
     outcome.tool_call_parse = result.tool_call_parse;

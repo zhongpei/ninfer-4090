@@ -209,6 +209,55 @@ DFlash2-proposal purpose; compact-batch row does not define random identity. Exa
 tie-breaking and storage are in
 [`candidate_selector.h`](../../include/ninfer/ops/candidate_selector.h).
 
+## Runtime tree verification
+
+DFlash2 can optionally spend the selector lattice on a target **tree** instead of verifying only
+the sampled chain. The feature is off by default and is intended to be measured against the chain
+path:
+
+```text
+--spec dflash2 --draft-tokens 15 --spec-tree lattice --spec-tree-nodes 15 --spec-tree-spine 7
+```
+
+The first runtime implementation deliberately has a narrow execution contract:
+
+- one request row (`C1`);
+- greedy target sampling with no presence/frequency penalty;
+- no lookup takeover in the same round;
+- `--spec-tree-nodes` equals `--draft-tokens`, so the physical ReplaySSM record width remains
+  `K+1 <= 16`;
+- the tree arm is not CUDA-Graph captured yet. Unsupported rounds use the existing chain path and
+  increment `tree_fallback_rounds`.
+
+For `K>4` the native DFlash2 selector already computes the complete conditional
+`E_i[p,c]` lattice. Tree mode preserves that FP32 lattice instead of recomputing it. It installs a
+greedy spine first, spends the remaining node budget best-first on alternative conditional nodes,
+and emits the result in DFS preorder. Every parent therefore has a lower physical node index.
+
+The target is hybrid, so a tree is not just an attention mask:
+
+1. **Full attention.** Node `n` at tree depth `d` executes at temporary logical position `F+d`.
+   DFS traversal means its ancestors still occupy positions `F..F+d-1`; siblings may overwrite
+   the same depth after the previous subtree is complete. Each full-attention layer also records
+   every node's BF16 K/V. After target acceptance, the selected root-to-leaf path is gathered and
+   written back to canonical consecutive cache positions.
+2. **GDN / ReplaySSM.** The four-tap convolution reads the current node's own parent/grandparent
+   history, not the previous DFS row. Recurrent output starts from the round-entry state and
+   replays exactly that node's ancestor path. Raw projected convolution rows and
+   key/value/{g,beta} records remain indexed by tree node.
+3. **Commit.** Greedy target argmax walks matching children until there is no matching branch.
+   `path_nodes` contains the root plus every accepted draft input. Frontend terminal truncation
+   simply shortens this selector: ReplaySSM fold, continuation hidden and pending DFlash features
+   all commit the same prefix without rerunning the target.
+4. **DFlash target taps.** Target feature layers are captured in tree-node order and gathered into
+   accepted-path order before the round returns, preserving the existing pending-feature contract.
+
+This correctness-first implementation performs two stream synchronizations: one after selector
+lattice production for host tree construction and one after target logits for host path walking.
+Those costs are intentional A/B-visible overhead. A later optimization can move tree construction
+and acceptance to device code and add fixed node-budget graph families without changing the state
+contract above.
+
 ## Target verification and committed prefix
 
 For each request, let P be the number of proposals that can be verified this round, `0<=P<=K`,

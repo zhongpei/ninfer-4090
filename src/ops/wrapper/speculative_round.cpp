@@ -237,6 +237,26 @@ void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& sele
     detail::speculative_select_accepted_hidden_launch(hidden, selectors, out, stream);
 }
 
+void speculative_tree_gather_bf16(const Tensor& source, const Tensor& path_nodes,
+                                  std::int32_t count, Tensor& destination,
+                                  cudaStream_t stream) {
+    constexpr const char* op = "speculative_tree_gather_bf16";
+    require_dtype(source, DType::BF16, op, "source");
+    require_dtype(destination, DType::BF16, op, "destination");
+    if (source.ne[0] <= 0 || source.ne[1] < 1 || source.ne[1] > 16 ||
+        source.ne[2] != 1 || source.ne[3] != 1 ||
+        destination.ne[0] != source.ne[0] || destination.ne[1] != source.ne[1] ||
+        destination.ne[2] != 1 || destination.ne[3] != 1 || count < 0 ||
+        count > source.ne[1]) {
+        throw std::invalid_argument("speculative_tree_gather_bf16: invalid matrix/count");
+    }
+    require_vector(path_nodes, DType::I32, source.ne[1], op, "path_nodes");
+    if (source.data == destination.data) {
+        throw std::invalid_argument("speculative_tree_gather_bf16: source/destination must differ");
+    }
+    detail::speculative_tree_gather_bf16_launch(source, path_nodes, count, destination, stream);
+}
+
 void speculative_make_one_hot_sparse_proposal(
     const Tensor& drafts, const Tensor& current_extents, Tensor& candidate_ids,
     Tensor& proposal_q, std::int32_t token_domain, cudaStream_t stream) {

@@ -125,4 +125,48 @@ void candidate_selector_path(const Tensor& candidate_ids, const Tensor& unary_sc
         successor_codebook, base_positions, configs, drafts, proposal_q, workspace, stream);
 }
 
+
+void candidate_selector_lattice(const Tensor& candidate_ids, const Tensor& unary_scores,
+                                const Tensor& projected_hidden, const Tensor& anchors,
+                                const Tensor& predecessor_codebook,
+                                const Tensor& successor_codebook,
+                                const Tensor& base_positions, const SamplingConfig* configs,
+                                Tensor& drafts, Tensor& proposal_q, Tensor& lattice_scores,
+                                cudaStream_t stream) {
+    const std::int32_t batch_size = candidate_ids.ne[2];
+    const std::int32_t kSteps = candidate_ids.ne[1];
+    if (kSteps < 1 || kSteps > 15 || batch_size < 1 || batch_size > 8) {
+        throw std::invalid_argument("candidate_selector_lattice: invalid K/B");
+    }
+    require_tensor(candidate_ids, DType::I32, kCandidates, kSteps, batch_size, 1, "candidate_ids");
+    require_tensor(unary_scores, DType::FP32, kCandidates, kSteps, batch_size, 1, "unary_scores");
+    require_tensor(projected_hidden, DType::BF16, kRank, kSteps, batch_size, 1, "projected_hidden");
+    require_tensor(anchors, DType::I32, batch_size, 1, 1, 1, "anchors");
+    require_tensor(predecessor_codebook, DType::BF16, kRank, kCodebookRows, 1, 1,
+                   "predecessor_codebook");
+    require_tensor(successor_codebook, DType::BF16, kRank, kCodebookRows, 1, 1,
+                   "successor_codebook");
+    require_tensor(base_positions, DType::I32, batch_size, 1, 1, 1, "base_positions");
+    require_tensor(drafts, DType::I32, kSteps, batch_size, 1, 1, "drafts");
+    require_tensor(proposal_q, DType::FP32, kCandidates, kSteps, batch_size, 1, "proposal_q");
+    require_tensor(lattice_scores, DType::FP32, kCandidates, kCandidates, kSteps, batch_size,
+                   "lattice_scores");
+    if (!aligned_to(configs, alignof(SamplingConfig))) {
+        throw std::invalid_argument("candidate_selector_lattice: invalid configs");
+    }
+    require_nonoverlap(candidate_ids, unary_scores, projected_hidden, anchors, predecessor_codebook,
+                       successor_codebook, base_positions, configs, drafts, proposal_q);
+    if (overlaps({lattice_scores.data, lattice_scores.bytes(), "lattice_scores"},
+                 {candidate_ids.data, candidate_ids.bytes(), "candidate_ids"}) ||
+        overlaps({lattice_scores.data, lattice_scores.bytes(), "lattice_scores"},
+                 {drafts.data, drafts.bytes(), "drafts"}) ||
+        overlaps({lattice_scores.data, lattice_scores.bytes(), "lattice_scores"},
+                 {proposal_q.data, proposal_q.bytes(), "proposal_q"})) {
+        throw std::invalid_argument("candidate_selector_lattice: lattice output overlaps operands");
+    }
+    detail::candidate_selector_lattice_launch(
+        candidate_ids, unary_scores, projected_hidden, anchors, predecessor_codebook,
+        successor_codebook, base_positions, configs, drafts, proposal_q, lattice_scores, stream);
+}
+
 } // namespace ninfer::ops

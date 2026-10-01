@@ -174,6 +174,12 @@ void speculative_accept_sparse_drafts(
 void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& selectors, Tensor& out,
                                         cudaStream_t stream);
 
+// Gather a C1 BF16 tree matrix [D,T] into accepted-path order. The first count columns are
+// destination[:,i]=source[:,path_nodes[i]] and the physical suffix is zeroed.
+void speculative_tree_gather_bf16(const Tensor& source, const Tensor& path_nodes,
+                                  std::int32_t count, Tensor& destination,
+                                  cudaStream_t stream);
+
 /**
  * Rewrite the live DFlash2 proposal distribution as q=1 on the supplied draft token.
  * candidate_ids is I32 [16,K,B], proposal_q is FP32 [16,K,B], drafts is I32 [K,B],

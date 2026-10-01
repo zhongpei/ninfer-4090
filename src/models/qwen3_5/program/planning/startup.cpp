@@ -242,6 +242,15 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                                          .batch_capacity = plan.max_concurrency,
                                          .draft_window   = plan.draft_window,
                                          .backend        = plan.speculative_backend,
+                                         .tree_verify    = plan.speculative_tree.mode != SpeculativeTreeMode::Off,
+                                         .attention_head_dim = config.attention
+                                                                   ? dimension(config.attention->head_dim)
+                                                                   : 0,
+                                         .attention_kv_heads = config.attention
+                                                                  ? dimension(config.attention->num_key_value_heads)
+                                                                  : 0,
+                                         .full_attention_layers =
+                                             static_cast<std::int32_t>(config.full_attention_layers),
                                          .causal_scoring = plan.causal_scoring});
     out.prefill_hidden =
         add_tensor(builder, DType::BF16, {dimension(config.hidden_size), effective_prefill_chunk},
@@ -738,6 +747,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 out.dflash_round =
                     std::max({out.dflash_round, finish(target), accept,
                               dflash_context_capacity(verify, batch, true), proposal});
+                if (plan.speculative_tree.mode != SpeculativeTreeMode::Off && batch == 1) {
+                    out.dflash_round = std::max(
+                        out.dflash_round,
+                        checked_add(finish(target), 2ULL * 1024ULL * 1024ULL,
+                                    "DFlash tree workspace headroom"));
+                }
             }
         }
     }
@@ -861,6 +876,17 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         break;
     }
+    if (options.speculative.tree.mode != SpeculativeTreeMode::Off) {
+        if (options.speculative.backend != SpeculativeBackend::DFlash2 ||
+            options.speculative.tree.nodes == 0 || options.speculative.tree.nodes > 15 ||
+            options.speculative.tree.nodes != options.speculative.draft_tokens ||
+            options.speculative.tree.spine == 0 ||
+            options.speculative.tree.spine > options.speculative.tree.nodes) {
+            throw std::invalid_argument(
+                "runtime tree verify requires DFlash2 with nodes=draft_tokens in [1,15] "
+                "and spine<=nodes");
+        }
+    }
     if (device.compute_capability() != 86 && device.compute_capability() != 89) {
         throw std::invalid_argument(
             "Qwen3.5 family runtime requires compute capability 8.6 or 8.9");
@@ -885,6 +911,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->lookup_ngram        = inputs.lookup_ngram;
     impl->lookup_options      = inputs.lookup_options;
     impl->speculative_routing = inputs.speculative_routing;
+    impl->speculative_tree    = inputs.speculative_tree;
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
     impl->features            = inputs.features;
@@ -982,6 +1009,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .lookup_ngram        = options.speculative.lookup_ngram,
         .lookup_options      = options.speculative.lookup,
         .speculative_routing = options.speculative.routing,
+        .speculative_tree    = options.speculative.tree,
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,

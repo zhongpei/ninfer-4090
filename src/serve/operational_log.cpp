@@ -288,6 +288,19 @@ OperationalRecord render_request_done(const RequestLogContext& context,
             << '/' << product::format_pretty_count(metrics.speculative_draft_tokens) << " ("
             << product::format_pretty_percent(acceptance) << ')';
     }
+    if (metrics.tree_rounds != 0 || metrics.tree_fallback_rounds != 0) {
+        out << " | tree " << product::format_pretty_count(metrics.tree_rounds)
+            << " rounds, fallback "
+            << product::format_pretty_count(metrics.tree_fallback_rounds);
+        if (metrics.tree_nodes != 0) {
+            const double acceptance = static_cast<double>(metrics.tree_accepted_drafts) /
+                                      static_cast<double>(metrics.tree_nodes);
+            out << ", accepted "
+                << product::format_pretty_count(metrics.tree_accepted_drafts) << '/'
+                << product::format_pretty_count(metrics.tree_nodes) << " ("
+                << product::format_pretty_percent(acceptance) << ')';
+        }
+    }
     if (outcome.thinking.configured_budget) {
         out << " | thinking "
             << product::format_pretty_count(outcome.thinking.model_thinking_tokens) << '/'

@@ -110,6 +110,86 @@ void launch(const Tensor& projected, const Tensor& conv_weight, const Tensor& st
     CUDA_CHECK(cudaGetLastError());
 }
 
+template <int Channels, int QueryRows, int KeyRows, int ValueRows>
+__global__ void gdn_projected_tree_conv_kernel(
+    const __nv_bfloat16* __restrict__ projected, const __nv_bfloat16* __restrict__ conv_weight,
+    const __nv_bfloat16* __restrict__ state_read,
+    const std::int32_t* __restrict__ initial_state_slots,
+    const std::int32_t* __restrict__ parents, __nv_bfloat16* __restrict__ conv_record,
+    __nv_bfloat16* __restrict__ query, __nv_bfloat16* __restrict__ key,
+    __nv_bfloat16* __restrict__ value, std::int32_t width) {
+    static_assert(Channels == QueryRows + KeyRows + ValueRows);
+    const std::int32_t row = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (row >= Channels) return;
+
+    constexpr std::int64_t slot_stride = static_cast<std::int64_t>(Channels) * 3;
+    const std::int64_t initial_base =
+        static_cast<std::int64_t>(initial_state_slots[0]) * slot_stride;
+    const float s0 = __bfloat162float(state_read[initial_base + row]);
+    const float s1 = __bfloat162float(state_read[initial_base + Channels + row]);
+    const float s2 = __bfloat162float(state_read[initial_base + 2LL * Channels + row]);
+    const float w0 = __bfloat162float(conv_weight[row]);
+    const float w1 = __bfloat162float(conv_weight[Channels + row]);
+    const float w2 = __bfloat162float(conv_weight[2LL * Channels + row]);
+    const float w3 = __bfloat162float(conv_weight[3LL * Channels + row]);
+
+    for (std::int32_t node = 0; node < width; ++node) {
+        const std::int32_t p1 = parents[node];
+        const std::int32_t p2 = p1 >= 0 ? parents[p1] : -1;
+        const std::int32_t p3 = p2 >= 0 ? parents[p2] : -1;
+
+        // The convolution history is tail_3(source_history || ancestors(current)).
+        const float newest =
+            p1 >= 0 ? __bfloat162float(
+                          projected[static_cast<std::int64_t>(p1) * Channels + row])
+                    : s2;
+        const float middle =
+            p2 >= 0 ? __bfloat162float(
+                          projected[static_cast<std::int64_t>(p2) * Channels + row])
+                    : (p1 >= 0 ? s2 : s1);
+        const float oldest =
+            p3 >= 0 ? __bfloat162float(
+                          projected[static_cast<std::int64_t>(p3) * Channels + row])
+                    : (p2 >= 0 ? s2 : (p1 >= 0 ? s1 : s0));
+        const float current =
+            __bfloat162float(projected[static_cast<std::int64_t>(node) * Channels + row]);
+
+        float conv = fmaf(w0, oldest, 0.0F);
+        conv = fmaf(w1, middle, conv);
+        conv = fmaf(w2, newest, conv);
+        conv = fmaf(w3, current, conv);
+        const __nv_bfloat16 output = __float2bfloat16_rn(silu(conv));
+        conv_record[static_cast<std::int64_t>(node) * Channels + row] =
+            __float2bfloat16_rn(current);
+        if (row < QueryRows) {
+            query[static_cast<std::int64_t>(node) * QueryRows + row] = output;
+        } else if (row < QueryRows + KeyRows) {
+            key[static_cast<std::int64_t>(node) * KeyRows + row - QueryRows] = output;
+        } else {
+            value[static_cast<std::int64_t>(node) * ValueRows + row - QueryRows - KeyRows] =
+                output;
+        }
+    }
+}
+
+template <int Channels, int QueryRows, int KeyRows, int ValueRows>
+void launch_tree(const Tensor& projected, const Tensor& conv_weight, const Tensor& state_read,
+                 const Tensor& initial_state_slots, const Tensor& parents, Tensor& conv_record,
+                 Tensor& query, Tensor& key, Tensor& value, cudaStream_t stream) {
+    constexpr int kThreads = 256;
+    gdn_projected_tree_conv_kernel<Channels, QueryRows, KeyRows, ValueRows>
+        <<<(Channels + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(projected.data),
+            static_cast<const __nv_bfloat16*>(conv_weight.data),
+            static_cast<const __nv_bfloat16*>(state_read.data),
+            static_cast<const std::int32_t*>(initial_state_slots.data),
+            static_cast<const std::int32_t*>(parents.data),
+            static_cast<__nv_bfloat16*>(conv_record.data),
+            static_cast<__nv_bfloat16*>(query.data), static_cast<__nv_bfloat16*>(key.data),
+            static_cast<__nv_bfloat16*>(value.data), projected.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 template <class Publish>
 void dispatch(const Tensor& projected, const Tensor& conv_weight, const Tensor& state_read,
               const Tensor& valid_columns, const Tensor& initial_state_slots, Tensor& query,
@@ -150,6 +230,27 @@ void gdn_projected_conv_record_launch(const Tensor& conv_record, const Tensor& c
                                       Tensor& value, cudaStream_t stream) {
     dispatch(conv_record, conv_weight, conv_states, valid_columns, initial_state_slots, query, key,
              value, NoHistoryPublish{}, stream);
+}
+
+void gdn_projected_tree_conv_record_launch(
+    const Tensor& projected, const Tensor& conv_weight, const Tensor& conv_states,
+    const Tensor& initial_state_slots, const Tensor& parents, Tensor& conv_record,
+    Tensor& query, Tensor& key, Tensor& value, cudaStream_t stream) {
+    if (projected.ne[0] == 10240 && query.ne[0] == 2048 && key.ne[0] == 2048 &&
+        value.ne[0] == 6144) {
+        launch_tree<10240, 2048, 2048, 6144>(projected, conv_weight, conv_states,
+                                             initial_state_slots, parents, conv_record,
+                                             query, key, value, stream);
+        return;
+    }
+    if (projected.ne[0] == 8192 && query.ne[0] == 2048 && key.ne[0] == 2048 &&
+        value.ne[0] == 4096) {
+        launch_tree<8192, 2048, 2048, 4096>(projected, conv_weight, conv_states,
+                                            initial_state_slots, parents, conv_record,
+                                            query, key, value, stream);
+        return;
+    }
+    throw std::invalid_argument("GDN projected tree conv received an unregistered geometry");
 }
 
 } // namespace ninfer::ops::detail

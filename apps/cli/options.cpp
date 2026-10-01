@@ -123,6 +123,7 @@ std::string usage_text(const char* argv0) {
            "       [--device N] [--devices N,M]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
            "       [--spec-router fixed|stair] [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
+           "       [--spec-tree off|lattice] [--spec-tree-nodes N] [--spec-tree-spine N]\n"
            "       [--spec-stair-draft-cost F] [--spec-stair-prior F] [--spec-stair-prior-weight F]\n"
            "       [--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F]\n"
            "       [--lookup-ngram N] [--lookup-strategy recent|vote] [--lookup-dflash off|replace|skip]\n"
@@ -163,6 +164,9 @@ std::string usage_text(const char* argv0) {
            "perplexity cost (docs/performance.md), off by default, and it wants a larger "
            "--prefill-chunk to pay. --no-prefill-cublas-projections keeps the attention and GDN "
            "input projections off that route.\n"
+           "--spec-tree lattice enables C1 greedy DFlash2 runtime tree verification; "
+           "--spec-tree-nodes caps drafted nodes at 15 and --spec-tree-spine controls how much "
+           "of the greedy lattice is installed before best-first alternatives.\n"
            "--spec-router stair keeps the configured DFlash/DFlash2 drafter at maximum K while "
            "choosing the target-verify extent from an explicit measured cost staircase; fixed is "
            "the default and all Stair parameters are exposed for A/B calibration.\n"
@@ -221,6 +225,12 @@ Options parse_options(int argc, char** argv) {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = parse_u32(value(arg), "draft-tokens");
+        } else if (arg == "--spec-tree") {
+            options.speculative.tree.mode = product::parse_speculative_tree_mode(value(arg));
+        } else if (arg == "--spec-tree-nodes") {
+            options.speculative.tree.nodes = parse_u32(value(arg), "spec-tree-nodes");
+        } else if (arg == "--spec-tree-spine") {
+            options.speculative.tree.spine = parse_u32(value(arg), "spec-tree-spine");
         } else if (arg == "--spec-router") {
             options.speculative.routing.mode =
                 product::parse_speculative_routing_mode(value(arg));
