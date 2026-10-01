@@ -122,7 +122,8 @@ std::string usage_text(const char* argv0) {
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--devices N,M]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
-           "       [--spec-router fixed|stair] [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
+           "       [--spec-router fixed|stair] [--spec-router-scope request|engine] [--spec-router-state PATH]\n"
+           "       [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
            "       [--spec-tree off|lattice] [--spec-tree-nodes N] [--spec-tree-spine N]\n"
            "       [--spec-stair-draft-cost F] [--spec-stair-prior F] [--spec-stair-prior-weight F]\n"
            "       [--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F]\n"
@@ -167,6 +168,8 @@ std::string usage_text(const char* argv0) {
            "--spec-tree lattice enables C1 greedy DFlash2 runtime tree verification; "
            "--spec-tree-nodes caps the maximum at 15; Tree-Stair may choose a smaller active prefix, and --spec-tree-spine controls how much "
            "of the greedy lattice is installed before best-first alternatives.\n"
+           "--spec-router-scope engine reuses Stair evidence across requests; "
+           "--spec-router-state additionally restores/saves that host-only state across restarts.\n"
            "--spec-router stair keeps the configured DFlash/DFlash2 drafter at maximum K while "
            "choosing the target-verify extent from an explicit measured cost staircase; fixed is "
            "the default and all Stair parameters are exposed for A/B calibration.\n"
@@ -234,6 +237,11 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--spec-router") {
             options.speculative.routing.mode =
                 product::parse_speculative_routing_mode(value(arg));
+        } else if (arg == "--spec-router-scope") {
+            options.speculative.routing.scope =
+                product::parse_speculative_router_scope(value(arg));
+        } else if (arg == "--spec-router-state") {
+            options.speculative.routing.state_path = value(arg);
         } else if (arg == "--spec-stair-widths") {
             product::parse_speculative_stair_widths(value(arg), options.speculative.routing);
         } else if (arg == "--spec-stair-costs") {
