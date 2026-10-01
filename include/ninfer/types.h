@@ -65,6 +65,27 @@ enum class EnginePurpose : std::uint8_t {
     CausalScoring,
 };
 
+struct TeacherTraceOptions {
+    // Runtime DFlash2 tap convention: capture the residual after these target layers.
+    std::vector<std::uint32_t> target_layer_ids{5, 19, 33, 47, 61};
+    // NInfer's full-head linear_topk kernel returns 16 stable candidates.
+    std::uint32_t top_k = 16;
+};
+
+struct TeacherTrace {
+    std::uint32_t hidden_size = 0;
+    std::uint32_t top_k       = 0;
+    std::vector<std::uint32_t> target_layer_ids;
+    // Predictor rows. For input N tokens, trace_tokens emits rows for input tokens [0,N-1).
+    std::vector<TokenId> input_ids;
+    // Row-major [rows, target_layer_ids.size()*hidden_size] raw BF16 bit patterns.
+    std::vector<std::uint16_t> fused_bf16;
+    // Row-major [rows,top_k]. top_ids[row,0] == argmax[row].
+    std::vector<TokenId> top_ids;
+    std::vector<float> top_logprobs;
+    std::vector<TokenId> argmax;
+};
+
 enum class KvCapacityMode : std::uint8_t {
     Explicit,
     Automatic,
