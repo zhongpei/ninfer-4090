@@ -9,7 +9,8 @@ ninfer-serve MODEL.ninfer \
   --spec-router stair \
   --spec-stair-widths 3,7,11,15 \
   --spec-stair-costs 1.00,1.02,1.05,1.10 \
-  --spec-stair-draft-cost 0.25
+  --spec-stair-draft-cost 0.25 \
+  --spec-stair-profile profiles/qwen38-4090.stair
 ```
 
 Without `--spec-router stair`, routing is `fixed` and the previous maximum-K behavior is
@@ -59,6 +60,7 @@ oscillation from short-window noise.
 | `--spec-stair-warmup N` | initial widest-rung rounds | `4` |
 | `--spec-stair-probe-period N` | wide probe cadence; zero disables | `16` |
 | `--spec-stair-margin F` | fractional hysteresis around previous rung | `0.02` |
+| `--spec-stair-profile PATH` | optional restart-persistent survival/selection state | empty |
 
 Stair mode currently applies only to DFlash/DFlash2. Every configured width must be at or below
 `--draft-tokens`.
@@ -71,6 +73,20 @@ fixed baseline with the adaptive policy on model-generated text and records outp
 acceptance, tokens/round and decode throughput.
 
 For each intended context class, measure at least the configured rungs and convert the median target
-verify times to one common relative scale. Draft cost must include the actual wide DFlash2 proposal
-path. A/B comparisons should hold model artifact, prompt, KV format, sampling and CUDA Graph mode
-constant.
+verify times to one common relative scale. A/B comparisons should hold model artifact, prompt, KV
+format, sampling and CUDA Graph mode constant.
+
+For the K15/24 GB path, `scripts/sweeps/dflash2-stair-cost-calibration.ps1` holds the neural
+DFlash2 proposal at K15 and forces each 3/7/11/15 target rung independently. Feed its CSV to:
+
+```bash
+python -m tools.dflash2_training.calibrate_4090 sweep.csv --out profiles/4090-stair.json
+```
+
+The calibrator uses median total seconds/round as the effective routing cost and therefore emits
+`--spec-stair-draft-cost 0` so the common wide-drafter cost is not counted twice. It also refuses
+to emit a profile if greedy output hashes differ across forced rungs.
+
+With `--spec-stair-profile PATH`, the survival counters learned from successful requests are
+loaded at startup and updated after successful request completion. The profile is advisory
+performance state only; an I/O failure does not become generation authority.
