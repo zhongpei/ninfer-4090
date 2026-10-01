@@ -296,6 +296,7 @@ struct DFlashDecodeState {
     Tensor tree_parents;
     Tensor tree_depths;
     Tensor tree_path_nodes;
+    Tensor tree_path_count;
     Tensor tree_kv_key;
     Tensor tree_kv_value;
     Tensor append_positions;
