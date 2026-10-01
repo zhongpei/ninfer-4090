@@ -590,6 +590,8 @@ public:
     const ProposalHead proposal_head;
     ::ninfer::qwen3_5::LookupPersistentStore lookup_persistent;
     ::ninfer::qwen3_5::LookupCorpusStore lookup_corpus;
+    StairRouterState engine_stair_router;
+    TreeStairRouterState engine_tree_stair_router;
     const float rope_scaling_factor;
     const std::uint32_t rope_scaling_original_context;
 
