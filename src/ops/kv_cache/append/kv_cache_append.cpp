@@ -197,6 +197,72 @@ void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
     detail::kv_cache_append_launch(k, v, positions, cache, stream);
 }
 
+void kv_cache_append_full_prefix(const Tensor& k, const Tensor& v,
+                                 const Tensor& positions, const Tensor& count,
+                                 const Tensor& table_row, PagedKVBatchLayerView cache,
+                                 cudaStream_t stream) {
+    constexpr const char* op = "kv_cache_append_full_prefix";
+    if (k.dtype != DType::BF16 || v.dtype != DType::BF16 || positions.dtype != DType::I32 ||
+        count.dtype != DType::I32 || table_row.dtype != DType::I32) {
+        throw std::invalid_argument(
+            "kv_cache_append_full_prefix: invalid input dtype");
+    }
+    const std::int32_t kv_heads = k.ne[1];
+    const std::int32_t tokens = k.ne[2];
+    if ((kv_heads != 4 && kv_heads != 2) || tokens < 1 || tokens > 16 ||
+        k.ne[0] != kFullHeadDim || k.ne[3] != 1 || v.ne[0] != kFullHeadDim ||
+        v.ne[1] != kv_heads || v.ne[2] != tokens || v.ne[3] != 1 ||
+        positions.ne[0] != tokens || positions.ne[1] != 1 || positions.ne[2] != 1 ||
+        positions.ne[3] != 1 || count.ne[0] != 1 || count.ne[1] != 1 ||
+        count.ne[2] != 1 || count.ne[3] != 1 || table_row.ne[0] != 1 ||
+        table_row.ne[1] != 1 || table_row.ne[2] != 1 || table_row.ne[3] != 1) {
+        throw std::invalid_argument("kv_cache_append_full_prefix: invalid input shape");
+    }
+    require_contiguous_nonnull(k, op, "k");
+    require_contiguous_nonnull(v, op, "v");
+    require_contiguous_nonnull(positions, op, "positions");
+    require_contiguous_nonnull(count, op, "count");
+    require_contiguous_nonnull(table_row, op, "table row");
+
+    const D256KVCacheProfile profile = d256_kv_cache_profile(cache.storage);
+    const std::int32_t physical_pages = cache.k_pages.ne[3];
+    const std::int32_t logical_pages = cache.block_tables.ne[0];
+    if (cache.num_kv_heads != kv_heads || cache.head_dim != kFullHeadDim ||
+        physical_pages <= 0 || logical_pages <= 0 || cache.block_tables.ne[1] <= 0 ||
+        cache.block_tables.ne[2] != 1 || cache.block_tables.ne[3] != 1 ||
+        cache.block_tables.dtype != DType::I32 ||
+        cache.k_pages.dtype != profile.key_code_dtype ||
+        cache.v_pages.dtype != profile.value_code_dtype) {
+        throw std::invalid_argument("kv_cache_append_full_prefix: invalid target cache");
+    }
+    require_shape(cache.k_pages, profile.key_leading_extent, kPagedKVPageSize, kv_heads,
+                  physical_pages, op, "cache k pages");
+    require_shape(cache.v_pages, profile.value_leading_extent, kPagedKVPageSize, kv_heads,
+                  physical_pages, op, "cache v pages");
+    require_contiguous_nonnull(cache.k_pages, op, "cache k pages");
+    require_contiguous_nonnull(cache.v_pages, op, "cache v pages");
+    require_contiguous_nonnull(cache.block_tables, op, "cache block tables");
+    if (cache.storage == KvCacheStorage::BFloat16) {
+        if (cache.k_scale_pages.data != nullptr || cache.v_scale_pages.data != nullptr) {
+            throw std::invalid_argument(
+                "kv_cache_append_full_prefix: BF16 cache must not have scales");
+        }
+    } else {
+        if (cache.k_scale_pages.dtype != profile.key_scale_dtype ||
+            cache.v_scale_pages.dtype != profile.value_scale_dtype) {
+            throw std::invalid_argument(
+                "kv_cache_append_full_prefix: invalid target cache scale dtype");
+        }
+        require_shape(cache.k_scale_pages, profile.scale_leading_extent, kPagedKVPageSize,
+                      kv_heads, physical_pages, op, "cache k scales");
+        require_shape(cache.v_scale_pages, profile.value_scale_leading_extent, kPagedKVPageSize,
+                      kv_heads, physical_pages, op, "cache v scales");
+        require_contiguous_nonnull(cache.k_scale_pages, op, "cache k scales");
+        require_contiguous_nonnull(cache.v_scale_pages, op, "cache v scales");
+    }
+    detail::kv_cache_append_batch_launch(k, v, positions, count, table_row, cache, stream);
+}
+
 void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& positions,
                             const Tensor& counts, const Tensor& table_rows,
                             KVCacheAppendPrefixExecutionEnvelope envelope,

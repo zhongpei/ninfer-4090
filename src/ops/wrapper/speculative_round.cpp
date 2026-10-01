@@ -257,6 +257,93 @@ void speculative_tree_gather_bf16(const Tensor& source, const Tensor& path_nodes
     detail::speculative_tree_gather_bf16_launch(source, path_nodes, count, destination, stream);
 }
 
+void speculative_tree_gather_bf16_dynamic(
+    const Tensor& source, const Tensor& path_nodes, const Tensor& count,
+    Tensor& destination, cudaStream_t stream) {
+    constexpr const char* op = "speculative_tree_gather_bf16_dynamic";
+    require_dtype(source, DType::BF16, op, "source");
+    require_dtype(destination, DType::BF16, op, "destination");
+    if (source.ne[0] <= 0 || source.ne[1] < 1 || source.ne[1] > 16 ||
+        source.ne[2] != 1 || source.ne[3] != 1 ||
+        destination.ne[0] != source.ne[0] || destination.ne[1] < source.ne[1] ||
+        destination.ne[1] > 16 || destination.ne[2] != 1 || destination.ne[3] != 1) {
+        throw std::invalid_argument(
+            "speculative_tree_gather_bf16_dynamic: invalid source/destination shape");
+    }
+    require_vector(path_nodes, DType::I32, destination.ne[1], op, "path_nodes");
+    require_vector(count, DType::I32, 1, op, "count");
+    if (source.data == destination.data) {
+        throw std::invalid_argument(
+            "speculative_tree_gather_bf16_dynamic: source/destination must differ");
+    }
+    detail::speculative_tree_gather_bf16_dynamic_launch(
+        source, path_nodes, count, destination, stream);
+}
+
+void speculative_tree_build_plan(
+    const Tensor& candidate_ids, const Tensor& lattice_scores, const Tensor& anchors,
+    const Tensor& frontiers, const Tensor& rope_starts, std::int32_t node_budget,
+    std::int32_t spine, Tensor& tree_tokens, Tensor& parents, Tensor& depths,
+    Tensor& cache_positions, Tensor& rope_positions, cudaStream_t stream) {
+    constexpr const char* op = "speculative_tree_build_plan";
+    const std::int32_t steps = candidate_ids.ne[1];
+    if (steps < 1 || steps > 15 || candidate_ids.ne[0] != 16 ||
+        candidate_ids.ne[2] != 1 || candidate_ids.ne[3] != 1 ||
+        lattice_scores.ne[0] != 16 || lattice_scores.ne[1] != 16 ||
+        lattice_scores.ne[2] != steps || lattice_scores.ne[3] != 1 ||
+        node_budget < 1 || node_budget > steps || spine < 1 || spine > node_budget) {
+        throw std::invalid_argument("speculative_tree_build_plan: invalid lattice/budget");
+    }
+    require_dtype(candidate_ids, DType::I32, op, "candidate_ids");
+    require_dtype(lattice_scores, DType::FP32, op, "lattice_scores");
+    require_vector(anchors, DType::I32, 1, op, "anchors");
+    require_vector(frontiers, DType::I32, 1, op, "frontiers");
+    require_vector(rope_starts, DType::I32, 1, op, "rope_starts");
+    const std::int32_t width = steps + 1;
+    require_vector(tree_tokens, DType::I32, width, op, "tree_tokens");
+    require_vector(parents, DType::I32, width, op, "parents");
+    require_vector(depths, DType::I32, width, op, "depths");
+    require_vector(cache_positions, DType::I32, width, op, "cache_positions");
+    require_vector(rope_positions, DType::I32, width, op, "rope_positions");
+    detail::speculative_tree_build_plan_launch(
+        candidate_ids, lattice_scores, anchors, frontiers, rope_starts, node_budget, spine,
+        tree_tokens, parents, depths, cache_positions, rope_positions, stream);
+}
+
+void speculative_tree_accept_greedy(
+    const Tensor& target_tokens, const Tensor& target_logits, const Tensor& tree_tokens,
+    const Tensor& parents, std::int32_t live_rows, std::int32_t token_domain,
+    Tensor& path_nodes, Tensor& licensed_tokens,
+    Tensor& licensed_counts, Tensor& accepted_drafts, Tensor& path_count,
+    Tensor& compact_last_index, cudaStream_t stream) {
+    constexpr const char* op = "speculative_tree_accept_greedy";
+    require_dtype(tree_tokens, DType::I32, op, "tree_tokens");
+    const std::int32_t width = tree_tokens.ne[0];
+    if (width < 2 || width > 16 || tree_tokens.ne[1] != 1 || tree_tokens.ne[2] != 1 ||
+        tree_tokens.ne[3] != 1 || live_rows < 2 || live_rows > width) {
+        throw std::invalid_argument("speculative_tree_accept_greedy: invalid tree width");
+    }
+    require_vector(target_tokens, DType::I32, width, op, "target_tokens");
+    require_dtype(target_logits, DType::BF16, op, "target_logits");
+    if (target_logits.ne[0] <= 0 || target_logits.ne[1] != width ||
+        target_logits.ne[2] != 1 || target_logits.ne[3] != 1 ||
+        token_domain <= 0 || token_domain > target_logits.ne[0]) {
+        throw std::invalid_argument(
+            "speculative_tree_accept_greedy: invalid target logits/token domain");
+    }
+    require_vector(parents, DType::I32, width, op, "parents");
+    require_vector(path_nodes, DType::I32, width, op, "path_nodes");
+    require_vector(licensed_tokens, DType::I32, width, op, "licensed_tokens");
+    require_vector(licensed_counts, DType::I32, 1, op, "licensed_counts");
+    require_vector(accepted_drafts, DType::I32, 1, op, "accepted_drafts");
+    require_vector(path_count, DType::I32, 1, op, "path_count");
+    require_vector(compact_last_index, DType::I32, 1, op, "compact_last_index");
+    detail::speculative_tree_accept_greedy_launch(
+        target_tokens, target_logits, tree_tokens, parents, live_rows, token_domain,
+        path_nodes, licensed_tokens, licensed_counts, accepted_drafts, path_count,
+        compact_last_index, stream);
+}
+
 void speculative_make_one_hot_sparse_proposal(
     const Tensor& drafts, const Tensor& current_extents, Tensor& candidate_ids,
     Tensor& proposal_q, std::int32_t token_domain, cudaStream_t stream) {

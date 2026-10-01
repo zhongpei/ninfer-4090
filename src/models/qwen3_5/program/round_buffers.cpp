@@ -392,8 +392,10 @@ DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeState
         egress_tensor(offsetof(DFlashDecodeEgress, licensed_counts), DType::I32, {batch});
     accepted_drafts =
         egress_tensor(offsetof(DFlashDecodeEgress, accepted_drafts), DType::I32, {batch});
-    // tree_path_nodes/tree_path_count are host-visible egress fields; the device replay selector
-    // itself lives in layout.tree_path_nodes so post-Frontend fold can use the committed prefix.
+    tree_path_count =
+        egress_tensor(offsetof(DFlashDecodeEgress, tree_path_count), DType::I32, {1});
+    // tree_path_nodes in the egress struct remains diagnostic host storage. The device replay
+    // selector itself lives in layout.tree_path_nodes so post-Frontend fold can use it directly.
     proposal_ids               = layout.proposal_ids.bind(backing);
     proposal_positions         = layout.proposal_positions.bind(backing);
     append_positions           = layout.append_positions.bind(backing);

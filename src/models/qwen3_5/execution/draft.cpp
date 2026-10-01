@@ -758,8 +758,8 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
                         ops::CausalAttentionExecutionEnvelope target_envelope,
                         SpeculativeTreeOptions options) {
     if (k == 0 || k > kDFlashDecodeMaximumDrafts || options.mode != SpeculativeTreeMode::Lattice ||
-        options.nodes != k || options.spine == 0 || options.spine > k ||
-        !state.execution.parameters.model.config().draft ||
+        options.nodes == 0 || options.nodes > k || options.spine == 0 ||
+        options.spine > options.nodes || !state.execution.parameters.model.config().draft ||
         !state.execution.parameters.model.config().draft->dflash2 ||
         state.execution.replay_records == nullptr) {
         throw std::invalid_argument("DFlash2 tree decode received an unsupported runtime profile");
@@ -771,9 +771,11 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
     }
 
     qwen3_5::DFlashDecodeState& frame = state.frame;
-    const std::int32_t width = static_cast<std::int32_t>(k) + 1;
+    const std::int32_t physical_width = static_cast<std::int32_t>(k) + 1;
+    const std::int32_t live_width = static_cast<std::int32_t>(options.nodes) + 1;
     if (!frame.lattice_scores.data || !frame.tree_parents.data || !frame.tree_depths.data ||
-        !frame.tree_path_nodes.data || !frame.tree_kv_key.data || !frame.tree_kv_value.data) {
+        !frame.tree_path_nodes.data || !frame.tree_path_count.data ||
+        !frame.tree_kv_key.data || !frame.tree_kv_value.data) {
         throw std::logic_error("DFlash2 tree decode buffers are not planned");
     }
 
@@ -797,83 +799,54 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
     state.execution.work.reset();
     Tensor compact_features = state.execution.work.alloc(
         DType::BF16, {dimension(state.execution.parameters.draft->feature_projection.weight.k),
-                      width, 1});
+                      physical_width, 1});
     ops::prepare_ragged_prefix(state.dflash.pending_features, active_lanes, context_starts,
                                frontiers, compact_features, append_positions, append_counts, stream);
     append_context_impl(state, compact_features, append_positions, append_counts,
                         state_destinations, dflash_rows, envelopes.append);
     state.execution.work.reset();
 
-    // The lattice already exists inside the ordinary DFlash2 selector for K>4; preserve it rather
-    // than rerunning the selector. Tree construction is host-side in this first implementation.
+    // Always run the one resident wide drafter. Only the target tree budget changes; no second
+    // b8 checkpoint or wider persistent tree buffer is required on a 24GB card.
     Tensor lattice = frame.lattice_scores.slice(3, 0, 1);
     propose_batch_impl(state, frame, 1, k, envelopes, &lattice);
 
-    std::array<TokenId, 16 * kDFlashDecodeMaximumDrafts> host_candidates{};
-    std::array<float, 16 * 16 * kDFlashDecodeMaximumDrafts> host_lattice{};
-    Tensor candidates = frame.candidate_ids.slice(2, 0, 1);
-    CUDA_CHECK(cudaMemcpyAsync(host_candidates.data(), candidates.data,
-                               static_cast<std::size_t>(16 * k) * sizeof(TokenId),
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(host_lattice.data(), lattice.data,
-                               static_cast<std::size_t>(16 * 16 * k) * sizeof(float),
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-
-    const auto tree = qwen3_5::detail::build_verify_tree(
-        state.host_ingress.anchors[0], host_candidates.data(), host_lattice.data(), k, options);
-    if (!tree.valid() || tree.rows != static_cast<std::uint32_t>(width)) {
-        throw std::logic_error("DFlash2 runtime tree does not fill the configured verify width");
-    }
-
-    std::array<std::int32_t, kDFlashDecodeMaximumWidth> host_positions{};
-    std::array<std::int32_t, kDFlashDecodeMaximumWidth> host_rope{};
-    const std::int32_t frontier = state.host_ingress.execution_frontiers[0];
-    const std::int32_t rope_delta = state.host_ingress.target_rope_positions[0] - frontier;
-    for (std::int32_t i = 0; i < width; ++i) {
-        host_positions[static_cast<std::size_t>(i)] =
-            frontier + tree.depths[static_cast<std::size_t>(i)];
-        host_rope[static_cast<std::size_t>(i)] =
-            host_positions[static_cast<std::size_t>(i)] + rope_delta;
-    }
-
+    Tensor candidates       = frame.candidate_ids.slice(2, 0, 1);
     Tensor verify_ids       = frame.verify_ids.slice(1, 0, 1);
     Tensor target_positions = frame.verify_positions.slice(1, 0, 1);
     Tensor target_rope      = frame.target_rope_positions.slice(1, 0, 1);
-    Tensor parents          = frame.tree_parents.slice(0, 0, width);
-    Tensor depths           = frame.tree_depths.slice(0, 0, width);
-    CUDA_CHECK(cudaMemcpyAsync(verify_ids.data, tree.tokens.data(),
-                               static_cast<std::size_t>(width) * sizeof(TokenId),
-                               cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(target_positions.data, host_positions.data(),
-                               static_cast<std::size_t>(width) * sizeof(std::int32_t),
-                               cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(target_rope.data, host_rope.data(),
-                               static_cast<std::size_t>(width) * sizeof(std::int32_t),
-                               cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(parents.data, tree.parents.data(),
-                               static_cast<std::size_t>(width) * sizeof(std::int32_t),
-                               cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(depths.data, tree.depths.data(),
-                               static_cast<std::size_t>(width) * sizeof(std::int32_t),
-                               cudaMemcpyHostToDevice, stream));
+    Tensor rope_start       = target_rope.slice(0, 0, 1);
+    Tensor parents          = frame.tree_parents.slice(0, 0, physical_width);
+    Tensor depths           = frame.tree_depths.slice(0, 0, physical_width);
+    ops::speculative_tree_build_plan(
+        candidates, lattice, anchors, frontiers, rope_start,
+        static_cast<std::int32_t>(options.nodes), static_cast<std::int32_t>(options.spine),
+        verify_ids, parents, depths, target_positions, target_rope, stream);
 
     const std::int32_t lane = state.host_ingress.active_lanes[0];
     if (lane < 0 || lane >= state.dflash.pending_features.ne[2]) {
         throw std::logic_error("DFlash2 tree target lane is outside pending feature storage");
     }
     Tensor tree_features = state.dflash.pending_features.slice(2, lane, 1)
-                               .view({state.dflash.pending_features.ne[0], width});
+                               .view({state.dflash.pending_features.ne[0], physical_width});
     DFlashTreeFeatureSink sink{
         .features = &tree_features,
         .layers = std::span<const std::uint32_t>(
             state.execution.parameters.model.config().draft->target_layer_ids),
-        .active_tokens = width,
+        .active_tokens = live_width,
     };
 
     Tensor target_hidden = frame.target_hidden.slice(2, 0, 1);
     Tensor target_logits = frame.target_logits.slice(2, 0, 1);
     Tensor target_tokens = frame.target_argmax.slice(1, 0, 1);
+    Tensor verify_ids_live = verify_ids.slice(0, 0, live_width);
+    Tensor target_positions_live = target_positions.slice(0, 0, live_width);
+    Tensor target_rope_live = target_rope.slice(0, 0, live_width);
+    Tensor parents_live = parents.slice(0, 0, live_width);
+    Tensor target_hidden_live = target_hidden.slice(1, 0, live_width);
+    Tensor target_logits_live = target_logits.slice(1, 0, live_width);
+    Tensor target_tokens_live = target_tokens.slice(0, 0, live_width);
+
     TextContext card(state.execution.device, state.execution.parameters, state.execution.work, {},
                      state.execution.linear_attention, state.execution.io,
                      state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
@@ -881,67 +854,43 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
     card.set_gdn_state_action(GdnStateAction::RecordForReplay, state.execution.replay_records);
     {
         nvtx::ScopedRange target_range(nvtx::Name::DecodeDFlashTarget, nvtx::Category::DFlash,
-                                       static_cast<std::uint64_t>(width));
-        card.target_verify_tree(verify_ids, target_positions, target_rope, text_rows, state_sources,
-                                parents, target_envelope, target_hidden, target_logits,
-                                target_tokens, frame.tree_kv_key, frame.tree_kv_value, sink);
+                                       static_cast<std::uint64_t>(live_width));
+        card.target_verify_tree(
+            verify_ids_live, target_positions_live, target_rope_live, text_rows, state_sources,
+            parents_live, target_envelope, target_hidden_live, target_logits_live,
+            target_tokens_live, frame.tree_kv_key, frame.tree_kv_value, sink);
     }
 
-    std::array<TokenId, kDFlashDecodeMaximumWidth> host_target{};
-    CUDA_CHECK(cudaMemcpyAsync(host_target.data(), target_tokens.data,
-                               static_cast<std::size_t>(width) * sizeof(TokenId),
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    Tensor path_nodes      = frame.tree_path_nodes.slice(0, 0, physical_width);
+    Tensor licensed_tokens = frame.licensed_tokens.slice(1, 0, 1);
+    Tensor licensed_counts = frame.licensed_counts.slice(0, 0, 1);
+    Tensor accepted_drafts = frame.accepted_drafts.slice(0, 0, 1);
+    ops::speculative_tree_accept_greedy(
+        target_tokens, target_logits, verify_ids, parents, live_width,
+        dimension(state.execution.parameters.model.resources().public_token_count),
+        path_nodes, licensed_tokens, licensed_counts, accepted_drafts,
+        frame.tree_path_count, append_counts, stream);
 
-    const auto accepted = qwen3_5::detail::accept_verify_tree(tree, host_target.data());
-    if (accepted.count == 0 || accepted.count > static_cast<std::uint32_t>(width) ||
-        accepted.accepted_drafts + 1 != accepted.count) {
-        throw std::logic_error("DFlash2 runtime tree produced invalid acceptance metadata");
-    }
-
-    state.host_egress = {};
-    state.host_egress.licensed_counts[0] = static_cast<std::int32_t>(accepted.count);
-    state.host_egress.accepted_drafts[0] =
-        static_cast<std::int32_t>(accepted.accepted_drafts);
-    state.host_egress.tree_path_count = static_cast<std::int32_t>(accepted.count);
-    std::copy_n(accepted.licensed_tokens.begin(), accepted.count,
-                state.host_egress.licensed_tokens.begin());
-    std::copy_n(accepted.path_nodes.begin(), accepted.count,
-                state.host_egress.tree_path_nodes.begin());
-
-    Tensor path_nodes = frame.tree_path_nodes.slice(0, 0, width);
-    CUDA_CHECK(cudaMemcpyAsync(path_nodes.data, state.host_egress.tree_path_nodes.data(),
-                               static_cast<std::size_t>(width) * sizeof(std::int32_t),
-                               cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(frame.egress.data, &state.host_egress,
-                               sizeof(qwen3_5::DFlashDecodeEgress), cudaMemcpyHostToDevice,
-                               stream));
-
-    // Canonicalize target hidden into accepted-path order as well. The Program's existing
-    // partial-terminal correction then keeps using selector=(committed-1) without knowing that
-    // verification originally ran in DFS node order.
+    // Canonicalize target hidden and DFlash taps into accepted-path order without a D2H count.
     state.execution.work.reset();
-    Tensor compacted_hidden = state.execution.work.alloc(
-        DType::BF16, {target_hidden.ne[0], width});
-    ops::speculative_tree_gather_bf16(
-        target_hidden.view({target_hidden.ne[0], width}), path_nodes,
-        static_cast<std::int32_t>(accepted.count), compacted_hidden, stream);
+    Tensor compacted_hidden =
+        state.execution.work.alloc(DType::BF16, {target_hidden.ne[0], physical_width});
+    ops::speculative_tree_gather_bf16_dynamic(
+        target_hidden.view({target_hidden.ne[0], physical_width}), path_nodes, licensed_counts,
+        compacted_hidden, stream);
     CUDA_CHECK(cudaMemcpyAsync(target_hidden.data, compacted_hidden.data,
                                compacted_hidden.bytes(), cudaMemcpyDeviceToDevice, stream));
 
-    // Keep only the accepted path in DFlash target-tap storage. A terminal Frontend truncation
-    // later consumes a prefix of this already compacted chain.
-    Tensor compacted_features = state.execution.work.alloc(
-        DType::BF16, {tree_features.ne[0], width});
-    ops::speculative_tree_gather_bf16(tree_features, path_nodes,
-                                      static_cast<std::int32_t>(accepted.count),
-                                      compacted_features, stream);
+    Tensor compacted_features =
+        state.execution.work.alloc(DType::BF16, {tree_features.ne[0], physical_width});
+    ops::speculative_tree_gather_bf16_dynamic(
+        tree_features, path_nodes, licensed_counts, compacted_features, stream);
     CUDA_CHECK(cudaMemcpyAsync(tree_features.data, compacted_features.data,
                                compacted_features.bytes(), cudaMemcpyDeviceToDevice, stream));
 
-    // Re-publish full-attention KV in canonical contiguous positions. DFS verify intentionally
-    // reuses depth positions, so the cache currently holds whichever branch visited those depths
-    // last; the replay planes preserve every node's BF16 K/V for this compaction.
+    // Re-publish full-attention KV in canonical contiguous positions using the device acceptance
+    // count. This path supports the target's quantized KV formats; no accepted-count host sync is
+    // needed merely to construct a host-sized slice.
     const auto& target = state.execution.parameters.model.config().text;
     if (!target.attention) {
         throw std::logic_error("DFlash2 tree target requires full-attention geometry");
@@ -949,60 +898,45 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
     const std::int32_t head_dim = dimension(target.attention->head_dim);
     const std::int32_t kv_heads = dimension(target.attention->num_key_value_heads);
     const std::int32_t kv_rows = head_dim * kv_heads;
-    Tensor canonical_positions =
-        state.execution.work.alloc(DType::I32, {static_cast<std::int32_t>(accepted.count)});
-    ops::fill_i32_positions(canonical_positions, frontier, stream);
-    const std::int32_t table_row = state.host_ingress.text_kv_table_rows[0];
+    Tensor canonical_positions = state.execution.work.alloc(DType::I32, {physical_width});
+    ops::fill_i32_positions(canonical_positions, state.host_ingress.execution_frontiers[0], stream);
+    Tensor canonical_positions_batch = canonical_positions.view({physical_width, 1});
     for (std::int32_t layer = 0; layer < frame.tree_kv_key.ne[3]; ++layer) {
         auto scope = state.execution.work.scope();
         Tensor source_k = frame.tree_kv_key.slice(3, layer, 1)
-                              .slice(2, 0, width)
-                              .view({kv_rows, width});
+                              .slice(2, 0, physical_width)
+                              .view({kv_rows, physical_width});
         Tensor source_v = frame.tree_kv_value.slice(3, layer, 1)
-                              .slice(2, 0, width)
-                              .view({kv_rows, width});
-        Tensor compact_k = state.execution.work.alloc(DType::BF16, {kv_rows, width});
-        Tensor compact_v = state.execution.work.alloc(DType::BF16, {kv_rows, width});
-        ops::speculative_tree_gather_bf16(source_k, path_nodes,
-                                          static_cast<std::int32_t>(accepted.count),
-                                          compact_k, stream);
-        ops::speculative_tree_gather_bf16(source_v, path_nodes,
-                                          static_cast<std::int32_t>(accepted.count),
-                                          compact_v, stream);
-        Tensor commit_k = compact_k.slice(1, 0, static_cast<std::int32_t>(accepted.count))
-                              .view({head_dim, kv_heads,
-                                     static_cast<std::int32_t>(accepted.count)});
-        Tensor commit_v = compact_v.slice(1, 0, static_cast<std::int32_t>(accepted.count))
-                              .view({head_dim, kv_heads,
-                                     static_cast<std::int32_t>(accepted.count)});
-        const PagedKVBatchLayerView batch_cache =
-            state.text_cache.batch_layer_view(static_cast<std::uint32_t>(layer));
-        if (table_row < 0 || table_row >= batch_cache.block_tables.ne[1]) {
-            throw std::logic_error("DFlash2 tree target table row is outside cache metadata");
-        }
-        Tensor block_table = batch_cache.block_tables.slice(1, table_row, 1)
-                                 .view({batch_cache.block_tables.ne[0]});
-        PagedKVLayerView single{
-            .k_pages = batch_cache.k_pages,
-            .v_pages = batch_cache.v_pages,
-            .k_scale_pages = batch_cache.k_scale_pages,
-            .v_scale_pages = batch_cache.v_scale_pages,
-            .block_table = block_table,
-            .head_dim = batch_cache.head_dim,
-            .num_kv_heads = batch_cache.num_kv_heads,
-            .storage = batch_cache.storage,
-        };
-        ops::kv_cache_append(commit_k, commit_v, canonical_positions, single, stream);
+                              .slice(2, 0, physical_width)
+                              .view({kv_rows, physical_width});
+        Tensor compact_k = state.execution.work.alloc(DType::BF16, {kv_rows, physical_width});
+        Tensor compact_v = state.execution.work.alloc(DType::BF16, {kv_rows, physical_width});
+        ops::speculative_tree_gather_bf16_dynamic(
+            source_k, path_nodes, licensed_counts, compact_k, stream);
+        ops::speculative_tree_gather_bf16_dynamic(
+            source_v, path_nodes, licensed_counts, compact_v, stream);
+        Tensor commit_k = compact_k.view({head_dim, kv_heads, physical_width, 1});
+        Tensor commit_v = compact_v.view({head_dim, kv_heads, physical_width, 1});
+        ops::kv_cache_append_full_prefix(
+            commit_k, commit_v, canonical_positions_batch, licensed_counts, text_rows,
+            state.text_cache.batch_layer_view(static_cast<std::uint32_t>(layer)), stream);
     }
 
-    // The continuation hidden belongs to the tree node that emitted the correction/bonus token.
-    const std::int32_t last_node =
-        accepted.path_nodes[static_cast<std::size_t>(accepted.count - 1)];
-    CUDA_CHECK(cudaMemcpyAsync(append_counts.data, &last_node, sizeof(last_node),
-                               cudaMemcpyHostToDevice, stream));
+    // Acceptance wrote compact-path index count-1 into append_counts. target_hidden has already
+    // been compacted into that same order.
     Tensor selected_hidden = frame.target_continuation_hidden.slice(1, 0, 1);
     ops::speculative_select_accepted_hidden(target_hidden, append_counts, selected_hidden, stream);
     ops::scatter(selected_hidden, state_destinations, state.continuation_hidden_store, stream);
+
+    // The Program already performs one end-of-round synchronize before reading the pinned egress.
+    // Keep all tree control on the stream and reuse that existing boundary instead of introducing
+    // two additional mid-round synchronizations.
+    CUDA_CHECK(cudaMemcpyAsync(&state.host_egress, frame.egress.data,
+                               sizeof(qwen3_5::DFlashDecodeEgress), cudaMemcpyDeviceToHost,
+                               stream));
+    CUDA_CHECK(cudaMemcpyAsync(state.host_egress.tree_path_nodes.data(), path_nodes.data,
+                               static_cast<std::size_t>(physical_width) * sizeof(std::int32_t),
+                               cudaMemcpyDeviceToHost, stream));
     state.execution.work.reset();
 }
 

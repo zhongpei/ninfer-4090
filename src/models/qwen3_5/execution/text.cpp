@@ -1148,9 +1148,10 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
             Tensor z_flat = z.view({dimension(config_.gdn->value_width()), T});
             gdn_projection(h, p, raw_qkv, z_flat, work_, s, projection_basis);
             GdnReplayRecordLayer records = replay_records_->layer(gidx, 1);
+            Tensor conv_record = records.conv.slice(1, 0, width);
             ops::gdn_projected_tree_conv_record(
                 raw_qkv, p.convolution, conv_states, *active_linear_state_source_slots_,
-                *active_tree_parents_, records.conv, query_output, key_output, value_output, s);
+                *active_tree_parents_, conv_record, query_output, key_output, value_output, s);
         } else if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
             if (replay_records_ == nullptr) {
                 throw std::logic_error("Replay-record GDN has no record storage");
@@ -1211,12 +1212,15 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
         if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
             GdnReplayRecordLayer records = replay_records_->layer(gidx, active_sequence_batch_);
             if (active_tree_parents_ != nullptr) {
+                Tensor key_record = records.key.slice(2, 0, width);
+                Tensor value_record = records.value.slice(2, 0, width);
+                Tensor gate_record = records.gate.slice(2, 0, width);
                 ops::gated_delta_net_tree_replay_record(
                     q_batch, k_batch, v_batch, g_batch, beta_batch,
                     static_cast<float>(
                         1.0 / std::sqrt(static_cast<double>(config_.gdn->linear_key_head_dim))),
                     recurrent_states, *active_linear_state_source_slots_, *active_tree_parents_,
-                    records.key, records.value, records.gate, out_batch, s);
+                    key_record, value_record, gate_record, out_batch, s);
             } else {
                 ops::gated_delta_net_replay_record(
                     q_batch, k_batch, v_batch, g_batch, beta_batch,

@@ -182,6 +182,62 @@ void speculative_tree_gather_bf16_launch(const Tensor& source, const Tensor& pat
     CUDA_CHECK(cudaGetLastError());
 }
 
+void speculative_tree_gather_bf16_dynamic_launch(
+    const Tensor& source, const Tensor& path_nodes, const Tensor& count,
+    Tensor& destination, cudaStream_t stream) {
+    constexpr int kBlock = 256;
+    const dim3 grid(static_cast<unsigned>(std::max(1, div_up(source.ne[0], kBlock))),
+                    static_cast<unsigned>(destination.ne[1]));
+    speculative_tree_gather_bf16_dynamic_kernel<<<grid, kBlock, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(source.data),
+        static_cast<const std::int32_t*>(path_nodes.data),
+        static_cast<const std::int32_t*>(count.data),
+        static_cast<__nv_bfloat16*>(destination.data), source.ne[0], source.ne[1],
+        destination.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void speculative_tree_build_plan_launch(
+    const Tensor& candidate_ids, const Tensor& lattice_scores, const Tensor& anchors,
+    const Tensor& frontiers, const Tensor& rope_starts, std::int32_t node_budget,
+    std::int32_t spine, Tensor& tree_tokens, Tensor& parents, Tensor& depths,
+    Tensor& cache_positions, Tensor& rope_positions, cudaStream_t stream) {
+    speculative_tree_build_plan_kernel<<<1, 1, 0, stream>>>(
+        static_cast<const std::int32_t*>(candidate_ids.data),
+        static_cast<const float*>(lattice_scores.data),
+        static_cast<const std::int32_t*>(anchors.data),
+        static_cast<const std::int32_t*>(frontiers.data),
+        static_cast<const std::int32_t*>(rope_starts.data),
+        candidate_ids.ne[1], node_budget, spine,
+        static_cast<std::int32_t*>(tree_tokens.data),
+        static_cast<std::int32_t*>(parents.data),
+        static_cast<std::int32_t*>(depths.data),
+        static_cast<std::int32_t*>(cache_positions.data),
+        static_cast<std::int32_t*>(rope_positions.data));
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void speculative_tree_accept_greedy_launch(
+    const Tensor& target_tokens, const Tensor& target_logits, const Tensor& tree_tokens,
+    const Tensor& parents, std::int32_t live_rows, std::int32_t token_domain,
+    Tensor& path_nodes, Tensor& licensed_tokens,
+    Tensor& licensed_counts, Tensor& accepted_drafts, Tensor& path_count,
+    Tensor& compact_last_index, cudaStream_t stream) {
+    speculative_tree_accept_greedy_kernel<<<1, 1, 0, stream>>>(
+        static_cast<const std::int32_t*>(target_tokens.data),
+        static_cast<const __nv_bfloat16*>(target_logits.data),
+        static_cast<const std::int32_t*>(tree_tokens.data),
+        static_cast<const std::int32_t*>(parents.data), live_rows, tree_tokens.ne[0],
+        target_logits.ne[0], token_domain,
+        static_cast<std::int32_t*>(path_nodes.data),
+        static_cast<std::int32_t*>(licensed_tokens.data),
+        static_cast<std::int32_t*>(licensed_counts.data),
+        static_cast<std::int32_t*>(accepted_drafts.data),
+        static_cast<std::int32_t*>(path_count.data),
+        static_cast<std::int32_t*>(compact_last_index.data));
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void speculative_make_one_hot_sparse_proposal_launch(
     const Tensor& drafts, const Tensor& current_extents, Tensor& candidate_ids,
     Tensor& proposal_q, std::int32_t token_domain, cudaStream_t stream) {

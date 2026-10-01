@@ -146,9 +146,9 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         if (options.draft_tokens < 5) {
             throw std::invalid_argument("--spec-tree lattice requires --draft-tokens >= 5");
         }
-        if (tree.nodes != options.draft_tokens) {
+        if (tree.nodes > options.draft_tokens) {
             throw std::invalid_argument(
-                "first-version --spec-tree-nodes must equal --draft-tokens");
+                "--spec-tree-nodes must not exceed --draft-tokens");
         }
         if (tree.spine > tree.nodes) {
             throw std::invalid_argument("--spec-tree-spine must not exceed --spec-tree-nodes");

@@ -165,7 +165,7 @@ std::string usage_text(const char* argv0) {
            "--prefill-chunk to pay. --no-prefill-cublas-projections keeps the attention and GDN "
            "input projections off that route.\n"
            "--spec-tree lattice enables C1 greedy DFlash2 runtime tree verification; "
-           "--spec-tree-nodes caps drafted nodes at 15 and --spec-tree-spine controls how much "
+           "--spec-tree-nodes caps the maximum at 15; Tree-Stair may choose a smaller active prefix, and --spec-tree-spine controls how much "
            "of the greedy lattice is installed before best-first alternatives.\n"
            "--spec-router stair keeps the configured DFlash/DFlash2 drafter at maximum K while "
            "choosing the target-verify extent from an explicit measured cost staircase; fixed is "

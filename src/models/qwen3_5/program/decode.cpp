@@ -143,6 +143,7 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
         .accepted_per_position = std::vector<std::uint64_t>(draft_window, 0),
     };
     request.stair_router = {};
+    request.tree_stair_router = {};
     request.lookup_round = {};
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
                            request.sampling_host.frequency_penalty != 0.0F;
@@ -678,11 +679,37 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         lanes.size() == 1 && requests[lanes[0]].sampling_host.temperature <= 0.0F &&
         requests[lanes[0]].sampling_host.presence_penalty == 0.0F &&
         requests[lanes[0]].sampling_host.frequency_penalty == 0.0F;
-    const bool tree_active =
-        tree_requested && speculative_backend == SpeculativeBackend::DFlash2 &&
-        lanes.size() == 1 && !lookup_batch && normal_extents[0] == draft_window &&
-        speculative_tree.nodes == draft_window && speculative_tree.spine <= draft_window &&
-        tree_sampling_ok;
+
+    SpeculativeTreeOptions tree_round_options = speculative_tree;
+    std::uint32_t tree_node_budget = 0;
+    if (tree_requested && speculative_backend == SpeculativeBackend::DFlash2 &&
+        lanes.size() == 1 && !lookup_batch && tree_sampling_ok) {
+        const SequenceState& sequence = active_sequence(lanes[0]);
+        const std::uint32_t max_by_output =
+            budgets[0].generated_tokens_remaining > 1
+                ? budgets[0].generated_tokens_remaining - 1U
+                : 0U;
+        // Keep one wide b16 drafter resident. Tree-Stair changes only the target rows inside the
+        // already-planned 16-row tree buffer, so the policy adds no second drafter or 24/32-row
+        // persistent allocation on a 24GB card.
+        const bool wide_proposal_fits =
+            capacity - sequence.execution_frontier - 1U >= draft_window;
+        if (wide_proposal_fits) {
+            const std::uint32_t maximum_tree =
+                std::min({speculative_tree.nodes, draft_window, max_by_output});
+            tree_node_budget = choose_tree_stair_extent(
+                speculative_routing, requests[lanes[0]].tree_stair_router, maximum_tree);
+            tree_round_options.nodes = tree_node_budget;
+            tree_round_options.spine = std::min(speculative_tree.spine, tree_node_budget);
+        }
+    }
+    const bool tree_active = tree_node_budget != 0;
+    if (tree_active) {
+        const SequenceState& sequence = active_sequence(lanes[0]);
+        maximum_target_tokens =
+            std::max(maximum_target_tokens,
+                     sequence.execution_frontier + tree_node_budget + 1U);
+    }
 
     const auto started = Clock::now();
     try {
@@ -710,7 +737,8 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             const RequestControl& request = requests[lanes[row]];
             const std::uint32_t frontier = sequence.execution_frontier;
             const std::uint32_t extent =
-                lookup_batch ? lookup_proposals[row].count : normal_extents[row];
+                lookup_batch ? lookup_proposals[row].count
+                             : (tree_active ? tree_node_budget : normal_extents[row]);
             dflash_host_ingress->anchors[row] = sequence.ledger.back();
             dflash_host_ingress->execution_frontiers[row] =
                 checked_i32(frontier, "DFlash batch frontier");
@@ -764,7 +792,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 target_envelope, std::span<const TokenId>(lookup_host), run_drafter);
         } else if (tree_active) {
             execution::dflash_tree_decode(schedule_state, draft_window, envelopes, target_envelope,
-                                          speculative_tree);
+                                          tree_round_options);
         } else {
             execution::dflash_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                            draft_window, envelopes, target_envelope, executable);
@@ -808,15 +836,22 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 request.speculative_stats.rounds += 1;
                 request.speculative_stats.drafted_tokens += extent;
                 request.speculative_stats.accepted_tokens += static_cast<std::uint32_t>(accepted_i);
-                for (std::int32_t i = 0; i < accepted_i; ++i) {
-                    request.speculative_stats.accepted_per_position[static_cast<std::size_t>(i)] +=
-                        1;
+                if (!tree_active) {
+                    for (std::int32_t i = 0; i < accepted_i; ++i) {
+                        request.speculative_stats
+                            .accepted_per_position[static_cast<std::size_t>(i)] += 1;
+                    }
                 }
                 if (tree_active) {
                     ++request.speculative_stats.tree_rounds;
-                    request.speculative_stats.tree_nodes += speculative_tree.nodes;
+                    request.speculative_stats.tree_nodes += tree_round_options.nodes;
                     request.speculative_stats.tree_accepted_drafts +=
                         static_cast<std::uint32_t>(accepted_i);
+                    if (speculative_routing.mode == SpeculativeRoutingMode::Stair) {
+                        request.tree_stair_router.observe(
+                            tree_round_options.nodes, static_cast<std::uint32_t>(accepted_i),
+                            speculative_routing);
+                    }
                 } else if (!lookup_batch &&
                            speculative_routing.mode == SpeculativeRoutingMode::Stair) {
                     request.stair_router.observe(
