@@ -133,7 +133,7 @@ def stop_server(proc: subprocess.Popen) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--serve", type=Path, default=Path("build-ninja/apps/ninfer-serve.exe"))
+    ap.add_argument("--serve", type=Path, default=Path("build-ninja/apps/ninfer-serve"))
     ap.add_argument("--model", type=Path, required=True)
     ap.add_argument("--out", default="profiles/ab-server")
     ap.add_argument("--arms", default="baseline,dflash2-k15,tree15,tree15-stair,lookup-skip")
