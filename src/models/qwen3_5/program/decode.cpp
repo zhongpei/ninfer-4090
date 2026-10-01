@@ -145,6 +145,8 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
     request.stair_router = {};
     request.tree_stair_router = {};
     request.lookup_round = {};
+    request.teacher_trace_id =
+        dflash_teacher_trace && dflash_teacher_trace->enabled() ? next_teacher_trace_id++ : 0;
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
                            request.sampling_host.frequency_penalty != 0.0F;
     if (penalties) { CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream)); }
