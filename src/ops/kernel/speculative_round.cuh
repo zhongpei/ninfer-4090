@@ -933,6 +933,225 @@ __global__ void speculative_tree_gather_bf16_kernel(
     destination[static_cast<std::int64_t>(col) * rows + row] = value;
 }
 
+
+__device__ __forceinline__ float speculative_tree_edge_logp(
+    const float* lattice, int step, int predecessor, int candidate) {
+    const float* row = lattice + (static_cast<std::int64_t>(step) * 16 + predecessor) * 16;
+    float maximum = -CUDART_INF_F;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) maximum = fmaxf(maximum, row[i]);
+    float total = 0.0F;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) total += expf(row[i] - maximum);
+    return row[candidate] - maximum - logf(total);
+}
+
+__global__ void speculative_tree_build_plan_kernel(
+    const std::int32_t* candidate_ids, const float* lattice, const std::int32_t* anchors,
+    const std::int32_t* frontiers, const std::int32_t* rope_starts, int steps, int node_budget,
+    int spine, std::int32_t* tree_tokens, std::int32_t* parents, std::int32_t* depths,
+    std::int32_t* cache_positions, std::int32_t* rope_positions) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    constexpr int MaxRows = 16;
+    constexpr int Candidates = 16;
+    const int physical_width = steps + 1;
+    const int anchor = anchors[0];
+    const int frontier = frontiers[0];
+    const int rope_delta = rope_starts[0] - frontier;
+
+    int node_token[MaxRows];
+    int node_parent[MaxRows];
+    int node_depth[MaxRows];
+    int node_step[MaxRows];
+    int node_rank[MaxRows];
+    float node_logp[MaxRows];
+    float node_score[MaxRows];
+
+    node_token[0] = anchor;
+    node_parent[0] = -1;
+    node_depth[0] = 0;
+    node_step[0] = -1;
+    node_rank[0] = 0;
+    node_logp[0] = 0.0F;
+    node_score[0] = 1.0F;
+    int node_count = 1;
+
+    int parent = 0;
+    int predecessor = 0;
+    const int spine_count = min(min(spine, node_budget), steps);
+    for (int step = 0; step < spine_count; ++step) {
+        const float* row = lattice + (static_cast<std::int64_t>(step) * Candidates + predecessor) *
+                                         Candidates;
+        int selected = 0;
+        for (int cand = 1; cand < Candidates; ++cand) {
+            if (row[cand] > row[selected]) selected = cand;
+        }
+        const float lp = node_logp[parent] +
+                         speculative_tree_edge_logp(lattice, step, predecessor, selected);
+        const int node = node_count++;
+        node_token[node] = candidate_ids[step * Candidates + selected];
+        node_parent[node] = parent;
+        node_depth[node] = node_depth[parent] + 1;
+        node_step[node] = step;
+        node_rank[node] = selected;
+        node_logp[node] = lp;
+        node_score[node] = expf(lp);
+        parent = node;
+        predecessor = selected;
+    }
+
+    // Best-first expansion. With <=15 nodes a serial frontier scan is cheaper than moving a
+    // priority queue through global memory and keeps the whole policy inside one tiny kernel.
+    while (node_count < node_budget + 1) {
+        float best_lp = -CUDART_INF_F;
+        int best_parent = -1;
+        int best_step = -1;
+        int best_rank = -1;
+        for (int p = 0; p < node_count; ++p) {
+            const int next_step = node_step[p] + 1;
+            if (next_step < 0 || next_step >= steps) continue;
+            const int pred_rank = p == 0 ? 0 : node_rank[p];
+            for (int cand = 0; cand < Candidates; ++cand) {
+                bool exists = false;
+                for (int n = 1; n < node_count; ++n) {
+                    if (node_parent[n] == p && node_step[n] == next_step &&
+                        node_rank[n] == cand) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (exists) continue;
+                const float lp = node_logp[p] +
+                                 speculative_tree_edge_logp(lattice, next_step, pred_rank, cand);
+                if (lp > best_lp) {
+                    best_lp = lp;
+                    best_parent = p;
+                    best_step = next_step;
+                    best_rank = cand;
+                }
+            }
+        }
+        if (best_parent < 0) break;
+        const int node = node_count++;
+        node_token[node] = candidate_ids[best_step * Candidates + best_rank];
+        node_parent[node] = best_parent;
+        node_depth[node] = node_depth[best_parent] + 1;
+        node_step[node] = best_step;
+        node_rank[node] = best_rank;
+        node_logp[node] = best_lp;
+        node_score[node] = expf(best_lp);
+    }
+
+    // DFS preorder is required by the depth-position cache reuse used by the target verifier.
+    bool visited[MaxRows] = {};
+    int order[MaxRows] = {};
+    int stack[MaxRows] = {};
+    int top = 0;
+    int current = 0;
+    int out_count = 0;
+    visited[0] = true;
+    order[out_count++] = 0;
+    while (out_count < node_count) {
+        int best_child = -1;
+        float best_score = -1.0F;
+        for (int n = 1; n < node_count; ++n) {
+            if (!visited[n] && node_parent[n] == current && node_score[n] > best_score) {
+                best_child = n;
+                best_score = node_score[n];
+            }
+        }
+        if (best_child >= 0) {
+            stack[top++] = current;
+            current = best_child;
+            visited[current] = true;
+            order[out_count++] = current;
+            continue;
+        }
+        if (top == 0) break;
+        current = stack[--top];
+    }
+
+    for (int i = 0; i < physical_width; ++i) {
+        tree_tokens[i] = anchor;
+        parents[i] = -1;
+        depths[i] = 0;
+        cache_positions[i] = frontier;
+        rope_positions[i] = frontier + rope_delta;
+    }
+    for (int i = 0; i < out_count; ++i) {
+        const int old = order[i];
+        int remapped_parent = -1;
+        if (node_parent[old] >= 0) {
+            for (int j = 0; j < i; ++j) {
+                if (order[j] == node_parent[old]) {
+                    remapped_parent = j;
+                    break;
+                }
+            }
+        }
+        tree_tokens[i] = node_token[old];
+        parents[i] = remapped_parent;
+        depths[i] = node_depth[old];
+        cache_positions[i] = frontier + node_depth[old];
+        rope_positions[i] = cache_positions[i] + rope_delta;
+    }
+}
+
+__global__ void speculative_tree_accept_greedy_kernel(
+    const std::int32_t* target_tokens, const std::int32_t* tree_tokens,
+    const std::int32_t* parents, int live_rows, int physical_width,
+    std::int32_t* path_nodes, std::int32_t* licensed_tokens,
+    std::int32_t* licensed_counts, std::int32_t* accepted_drafts,
+    std::int32_t* path_count, std::int32_t* last_node) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    for (int i = 0; i < physical_width; ++i) {
+        path_nodes[i] = 0;
+        licensed_tokens[i] = 0;
+    }
+
+    int current = 0;
+    int count = 0;
+    int accepted = 0;
+    path_nodes[0] = 0;
+    while (count < live_rows) {
+        const int wanted = target_tokens[current];
+        int child = -1;
+        for (int i = current + 1; i < live_rows; ++i) {
+            if (parents[i] == current && tree_tokens[i] == wanted) {
+                child = i;
+                break;
+            }
+        }
+        licensed_tokens[count++] = wanted;
+        if (child < 0) break;
+        ++accepted;
+        current = child;
+        if (count < physical_width) path_nodes[count] = current;
+    }
+    licensed_counts[0] = count;
+    accepted_drafts[0] = accepted;
+    path_count[0] = count;
+    last_node[0] = current;
+}
+
+__global__ void speculative_tree_gather_bf16_dynamic_kernel(
+    const __nv_bfloat16* source, const std::int32_t* path, const std::int32_t* count_ptr,
+    __nv_bfloat16* destination, std::int32_t rows, std::int32_t source_width,
+    std::int32_t destination_width) {
+    const std::int32_t row = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+    const std::int32_t col = static_cast<std::int32_t>(blockIdx.y);
+    if (row >= rows || col >= destination_width) return;
+    const int count = max(0, min(source_width, count_ptr[0]));
+    __nv_bfloat16 value = __float2bfloat16(0.0F);
+    if (col < count) {
+        const std::int32_t source_col = path[col];
+        if (source_col >= 0 && source_col < source_width) {
+            value = source[static_cast<std::int64_t>(source_col) * rows + row];
+        }
+    }
+    destination[static_cast<std::int64_t>(col) * rows + row] = value;
+}
+
 __global__ void speculative_make_one_hot_sparse_proposal_kernel(
     const std::int32_t* drafts, const std::int32_t* extents, std::int32_t* candidate_ids,
     float* proposal_q, std::int32_t k, std::int32_t token_domain) {
