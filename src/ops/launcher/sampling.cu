@@ -10,6 +10,13 @@
 
 namespace ninfer::ops::detail {
 
+__global__ void broadcast_sampling_config_kernel(const SamplingConfig* source,
+                                                 SamplingConfig* destination,
+                                                 std::int32_t count) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < count) destination[index] = source[0];
+}
+
 __global__ void increment_token_counts_kernel(const std::int32_t* token_ids, std::int32_t count,
                                               std::int32_t* token_counts) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -47,6 +54,14 @@ void sample_batch_launch(const Tensor& logits, Tensor& out, std::int32_t token_d
     sampling_group_finalize_sample_kernel<<<group_grid, kSamplerGroupBlock, 0, stream>>>(
         static_cast<std::int32_t*>(out.data), configs, positions, purpose, token_domain,
         partial_blocks, groups, scratch);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void broadcast_sampling_config_launch(const SamplingConfig* source,
+                                      SamplingConfig* destination,
+                                      std::int32_t count, cudaStream_t stream) {
+    constexpr int kBlock = 32;
+    broadcast_sampling_config_kernel<<<1, kBlock, 0, stream>>>(source, destination, count);
     CUDA_CHECK(cudaGetLastError());
 }
 
