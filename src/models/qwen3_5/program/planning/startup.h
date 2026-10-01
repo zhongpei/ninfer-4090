@@ -94,6 +94,7 @@ struct SequencePlanningInputs {
     models::LoadOptions features;
     bool use_cuda_graph = true;
     bool causal_scoring = false;
+    bool teacher_trace = false;
     float rope_scaling_factor                   = 1.0F;
     std::uint32_t rope_scaling_original_context = 262144;
     int device          = 0;
@@ -122,6 +123,7 @@ struct SequencePlanImpl {
     models::LoadOptions features;
     bool use_cuda_graph = true;
     bool causal_scoring = false;
+    bool teacher_trace = false;
     float rope_scaling_factor                   = 1.0F;
     std::uint32_t rope_scaling_original_context = 262144;
     int device          = 0;
