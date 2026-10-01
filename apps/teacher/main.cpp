@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace {
@@ -91,9 +92,9 @@ Options parse_options(int argc, char** argv) {
             return argv[i];
         };
         if (arg == "--input") {
-            out.input = value("--input");
+            out.input = std::string(value("--input"));
         } else if (arg == "--out") {
-            out.output = value("--out");
+            out.output = std::string(value("--out"));
         } else if (arg == "--max-context") {
             out.max_context = parse_integer<std::uint32_t>(value("--max-context"), "max-context");
         } else if (arg == "--device") {
@@ -177,6 +178,7 @@ int run(const Options& options) {
     ninfer::EngineOptions engine_options;
     engine_options.artifact_path = options.model;
     engine_options.purpose = ninfer::EnginePurpose::CausalScoring;
+    engine_options.enable_teacher_trace = true;
     engine_options.device = options.device;
     engine_options.devices = options.devices;
     engine_options.max_context = options.max_context;
@@ -231,9 +233,9 @@ int run(const Options& options) {
         manifest["sequences"].push_back({
             {"name", name},
             {"stem", stem},
-            {"kind", row.value("kind", "corpus")},
-            {"topic", row.value("topic", "prose")},
-            {"split", row.value("split", "train")},
+            {"kind", row.value("kind", std::string("corpus"))},
+            {"topic", row.value("topic", std::string("prose"))},
+            {"split", row.value("split", std::string("train"))},
             {"rows", trace.input_ids.size()},
             {"input_tokens", tokens.size()},
         });
