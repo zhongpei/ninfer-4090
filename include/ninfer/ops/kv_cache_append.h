@@ -80,6 +80,18 @@ void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
                      PagedKVLayerView cache, cudaStream_t stream);
 
 /**
+ * Append a device-selected prefix of full D256 target K/V through a batched table.
+ *
+ * k/v are BF16 [256,4|2,T,1], positions I32 [T,1], count/table_row I32[1]. Only the first
+ * count[0] rows are published. Unlike the 128x8 backend-prefix Op below, this path supports every
+ * registered target KV storage format (BF16, INT8/rotated variants, FP8, NVFP4/K8V4) by reusing
+ * the normal full-cache append kernels with device valid-columns metadata.
+ */
+void kv_cache_append_full_prefix(const Tensor& k, const Tensor& v, const Tensor& positions,
+                                 const Tensor& count, const Tensor& table_row,
+                                 PagedKVBatchLayerView cache, cudaStream_t stream);
+
+/**
  * Append device-selected BF16 prefixes to batched paged growing-cache storage.
  *
  * k/v are contiguous BF16 [128,8,T,B], positions is contiguous device I32 [T,B], and counts and
