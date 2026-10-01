@@ -144,6 +144,11 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     if (&parameters != plan.parameters || parameters.model.options() != plan.features) {
         throw std::invalid_argument("Program parameters do not match the frozen sequence plan");
     }
+    if (speculative_routing.scope == SpeculativeRouterScope::Engine &&
+        !speculative_routing.state_path.empty()) {
+        (void)load_persistent_spec_router_state(speculative_routing.state_path,
+                                                engine_spec_router);
+    }
     // Hand `work` the extra ranks' storage. From here one arena serves every device: the layer loop
     // switches ranks alongside ScopedDeviceRank and every workspace call site is unchanged.
     for (DeviceArena& rank_storage : workspace_storage_by_rank) {
@@ -461,6 +466,16 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
 ProgramImpl::~ProgramImpl() noexcept {
     if (device.transfer_stream != nullptr) { (void)cudaStreamSynchronize(device.transfer_stream); }
     if (device.stream != nullptr) { (void)cudaStreamSynchronize(device.stream); }
+    if (speculative_routing.scope == SpeculativeRouterScope::Engine &&
+        !speculative_routing.state_path.empty()) {
+        try {
+            save_persistent_spec_router_state(speculative_routing.state_path,
+                                              engine_spec_router);
+        } catch (...) {
+            // Destruction is noexcept. Router persistence is an optimization hint, never model
+            // state authority, so failure to save must not terminate the process.
+        }
+    }
 }
 
 std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
