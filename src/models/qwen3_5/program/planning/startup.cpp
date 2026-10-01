@@ -486,19 +486,21 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         WorkspaceLayoutBuilder causal_score;
         const auto score_columns = static_cast<std::int32_t>(kCausalScoreTile);
         matrix(causal_score, DType::BF16, dimension(config.vocab_size), score_columns);
-        matrix(causal_score, DType::I32, 16, score_columns);
-        matrix(causal_score, DType::FP32, 16, score_columns);
         matrix(causal_score, DType::I32, 1, score_columns);
         matrix(causal_score, DType::FP32, 1, score_columns);
         linear_scratch(causal_score, parameters.text.output_head, 1, kCausalScoreTile);
-        if (execution::rotated(parameters.text.output_head.hadamard_signs)) {
-            matrix(causal_score, DType::BF16, dimension(config.hidden_size), score_columns);
+        if (plan.teacher_trace) {
+            matrix(causal_score, DType::I32, 16, score_columns);
+            matrix(causal_score, DType::FP32, 16, score_columns);
+            if (execution::rotated(parameters.text.output_head.hadamard_signs)) {
+                matrix(causal_score, DType::BF16, dimension(config.hidden_size), score_columns);
+            }
+            scratch(causal_score, ops::linear_topk_workspace_capacity_bytes(
+                                      parameters.text.output_head.weight.qtype,
+                                      parameters.text.output_head.weight.n,
+                                      parameters.text.output_head.weight.k,
+                                      1, score_columns));
         }
-        scratch(causal_score, ops::linear_topk_workspace_capacity_bytes(
-                                  parameters.text.output_head.weight.qtype,
-                                  parameters.text.output_head.weight.n,
-                                  parameters.text.output_head.weight.k,
-                                  1, score_columns));
         out.causal_score = finish(causal_score);
     }
 
@@ -927,6 +929,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->features            = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
     impl->causal_scoring      = inputs.causal_scoring;
+    impl->teacher_trace       = inputs.teacher_trace;
     impl->rope_scaling_factor = inputs.rope_scaling_factor;
     impl->rope_scaling_original_context = inputs.rope_scaling_original_context;
     impl->device              = inputs.device;
@@ -1026,6 +1029,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .features            = models::load_options(options),
         .use_cuda_graph      = options.use_cuda_graph,
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
+        .teacher_trace       = options.enable_teacher_trace,
         .rope_scaling_factor = options.rope_scaling_factor,
         .rope_scaling_original_context = options.rope_scaling_original_context,
         .device              = options.device,
