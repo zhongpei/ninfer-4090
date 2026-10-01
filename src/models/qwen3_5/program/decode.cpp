@@ -669,10 +669,8 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         const SequenceState& sequence = active_sequence(lanes[row]);
         const std::uint32_t extent =
             lookup_batch ? lookup_proposals[row].count : normal_extents[row];
-        const std::uint32_t target_extent =
-            tree_active && row == 0 ? runtime_tree.nodes : extent;
         maximum_target_tokens =
-            std::max(maximum_target_tokens, sequence.execution_frontier + target_extent + 1U);
+            std::max(maximum_target_tokens, sequence.execution_frontier + extent + 1U);
     }
 
     const bool tree_requested = speculative_tree.mode == SpeculativeTreeMode::Lattice;
