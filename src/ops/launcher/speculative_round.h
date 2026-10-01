@@ -42,10 +42,14 @@ void speculative_tree_build_device_launch(const Tensor& candidates, const Tensor
 void speculative_tree_accept_device_launch(const Tensor& verify_ids, const Tensor& parents,
                                            const Tensor& target_tokens, Tensor& path_nodes,
                                            Tensor& licensed_tokens, Tensor& licensed_counts,
-                                           Tensor& accepted_drafts, cudaStream_t stream);
+                                           Tensor& accepted_drafts, Tensor& last_node,
+                                           cudaStream_t stream);
 void speculative_tree_gather_bf16_launch(const Tensor& source, const Tensor& path_nodes,
                                          std::int32_t count, Tensor& destination,
                                          cudaStream_t stream);
+void speculative_tree_gather_bf16_counted_launch(const Tensor& source, const Tensor& path_nodes,
+                                                 const Tensor& count, Tensor& destination,
+                                                 cudaStream_t stream);
 void speculative_make_one_hot_sparse_proposal_launch(
     const Tensor& drafts, const Tensor& current_extents, Tensor& candidate_ids,
     Tensor& proposal_q, std::int32_t token_domain, cudaStream_t stream);
