@@ -142,8 +142,8 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
         .draft_window          = draft_window,
         .accepted_per_position = std::vector<std::uint64_t>(draft_window, 0),
     };
-    request.stair_router = {};
-    request.tree_stair_router = {};
+    request.stair_router = persistent_stair_router;
+    request.tree_stair_router = persistent_tree_stair_router;
     request.lookup_round = {};
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
                            request.sampling_host.frequency_penalty != 0.0F;
@@ -851,10 +851,15 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                         request.tree_stair_router.observe(
                             tree_round_options.nodes, static_cast<std::uint32_t>(accepted_i),
                             speculative_routing);
+                        persistent_tree_stair_router.observe(
+                            tree_round_options.nodes, static_cast<std::uint32_t>(accepted_i),
+                            speculative_routing);
                     }
                 } else if (!lookup_batch &&
                            speculative_routing.mode == SpeculativeRoutingMode::Stair) {
                     request.stair_router.observe(
+                        extent, static_cast<std::uint32_t>(accepted_i), speculative_routing);
+                    persistent_stair_router.observe(
                         extent, static_cast<std::uint32_t>(accepted_i), speculative_routing);
                 }
                 if (lookup_batch) {
