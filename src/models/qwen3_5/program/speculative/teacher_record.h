@@ -10,8 +10,10 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <system_error>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace ninfer::models::qwen3_5::detail {
