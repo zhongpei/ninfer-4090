@@ -917,6 +917,161 @@ __global__ void speculative_select_accepted_hidden_kernel(const __nv_bfloat16* h
         hidden[(static_cast<std::int64_t>(batch) * cols + col) * rows + row];
 }
 
+
+struct SpecTreeFrontierItem {
+    float neg_log_probability;
+    int parent;
+    int step;
+    int candidate_rank;
+};
+
+__device__ inline float spec_tree_log_softmax(const float* row, int candidate) {
+    float maximum = -CUDART_INF_F;
+    for (int i = 0; i < 16; ++i) maximum = fmaxf(maximum, row[i]);
+    float total = 0.0f;
+    for (int i = 0; i < 16; ++i) total += expf(row[i] - maximum);
+    return row[candidate] - maximum - logf(total);
+}
+
+__global__ void speculative_tree_build_device_kernel(
+    const std::int32_t* candidates, const float* lattice, std::int32_t anchor,
+    std::int32_t steps, std::int32_t node_budget, std::int32_t spine,
+    std::int32_t frontier_position, std::int32_t rope_delta,
+    std::int32_t* verify_ids, std::int32_t* positions, std::int32_t* rope_positions,
+    std::int32_t* out_parents, std::int32_t* out_depths) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    constexpr int kMaxNodes = 16;
+    constexpr int kMaxFrontier = 240;
+    int tokens[kMaxNodes]{};
+    int parents[kMaxNodes]{};
+    int depths[kMaxNodes]{};
+    float scores[kMaxNodes]{};
+    int child_count[kMaxNodes]{};
+    int children[kMaxNodes][kMaxNodes]{};
+    SpecTreeFrontierItem queue[kMaxFrontier]{};
+    int queue_count = 0;
+    int node_count = 1;
+    tokens[0] = anchor;
+    parents[0] = -1;
+    depths[0] = 0;
+    scores[0] = 1.0f;
+
+    int parent = 0;
+    int predecessor = 0;
+    float path_lp = 0.0f;
+    const int spine_count = min(min(steps, spine), node_budget);
+    for (int step = 0; step < spine_count; ++step) {
+        const float* edge = lattice + (step * 16 + predecessor) * 16;
+        int selected = 0;
+        for (int i = 1; i < 16; ++i) if (edge[i] > edge[selected]) selected = i;
+        const float base_lp = path_lp;
+        path_lp += spec_tree_log_softmax(edge, selected);
+        const int node = node_count++;
+        tokens[node] = candidates[step * 16 + selected];
+        parents[node] = parent;
+        depths[node] = depths[parent] + 1;
+        scores[node] = expf(path_lp);
+        children[parent][child_count[parent]++] = node;
+        for (int alt = 0; alt < 16 && queue_count < kMaxFrontier; ++alt) {
+            if (alt == selected) continue;
+            queue[queue_count++] = SpecTreeFrontierItem{
+                -(base_lp + spec_tree_log_softmax(edge, alt)), parent, step, alt};
+        }
+        parent = node;
+        predecessor = selected;
+    }
+
+    while (queue_count > 0 && node_count - 1 < node_budget) {
+        int best = 0;
+        for (int i = 1; i < queue_count; ++i) {
+            if (queue[i].neg_log_probability < queue[best].neg_log_probability) best = i;
+        }
+        const SpecTreeFrontierItem item = queue[best];
+        queue[best] = queue[--queue_count];
+        const float lp = -item.neg_log_probability;
+        const int node = node_count++;
+        tokens[node] = candidates[item.step * 16 + item.candidate_rank];
+        parents[node] = item.parent;
+        depths[node] = depths[item.parent] + 1;
+        scores[node] = expf(lp);
+        children[item.parent][child_count[item.parent]++] = node;
+        if (item.step + 1 < steps) {
+            const int next_step = item.step + 1;
+            const float* edge = lattice + (next_step * 16 + item.candidate_rank) * 16;
+            for (int next = 0; next < 16 && queue_count < kMaxFrontier; ++next) {
+                queue[queue_count++] = SpecTreeFrontierItem{
+                    -(lp + spec_tree_log_softmax(edge, next)), node, next_step, next};
+            }
+        }
+    }
+
+    for (int n = 0; n < node_count; ++n) {
+        for (int i = 1; i < child_count[n]; ++i) {
+            int key = children[n][i];
+            int j = i - 1;
+            while (j >= 0 && scores[children[n][j]] < scores[key]) {
+                children[n][j + 1] = children[n][j];
+                --j;
+            }
+            children[n][j + 1] = key;
+        }
+    }
+
+    int order[kMaxNodes]{};
+    int remap[kMaxNodes]{};
+    int stack[kMaxNodes]{};
+    int top = 0, order_count = 0;
+    stack[top++] = 0;
+    while (top > 0) {
+        const int n = stack[--top];
+        order[order_count++] = n;
+        for (int i = child_count[n] - 1; i >= 0; --i) stack[top++] = children[n][i];
+    }
+    for (int i = 0; i < order_count; ++i) remap[order[i]] = i;
+    for (int i = 0; i < order_count; ++i) {
+        const int src = order[i];
+        verify_ids[i] = tokens[src];
+        const int p = parents[src];
+        out_parents[i] = p < 0 ? -1 : remap[p];
+        out_depths[i] = depths[src];
+        positions[i] = frontier_position + depths[src];
+        rope_positions[i] = positions[i] + rope_delta;
+    }
+}
+
+__global__ void speculative_tree_accept_device_kernel(
+    const std::int32_t* verify_ids, const std::int32_t* parents,
+    const std::int32_t* target_tokens, std::int32_t width,
+    std::int32_t* path_nodes, std::int32_t* licensed_tokens,
+    std::int32_t* licensed_counts, std::int32_t* accepted_drafts) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    for (int i = 0; i < width; ++i) {
+        path_nodes[i] = 0;
+        licensed_tokens[i] = 0;
+    }
+    int current = 0;
+    int count = 0;
+    int accepted = 0;
+    path_nodes[0] = 0;
+    while (count < width) {
+        const int wanted = target_tokens[current];
+        licensed_tokens[count++] = wanted;
+        int child = -1;
+        for (int i = current + 1; i < width; ++i) {
+            if (parents[i] == current && verify_ids[i] == wanted) {
+                child = i;
+                break;
+            }
+        }
+        if (child < 0) break;
+        ++accepted;
+        current = child;
+        if (count < width) path_nodes[count] = current;
+    }
+    licensed_counts[0] = count;
+    accepted_drafts[0] = accepted;
+}
+
 __global__ void speculative_tree_gather_bf16_kernel(
     const __nv_bfloat16* source, const std::int32_t* path, __nv_bfloat16* destination,
     std::int32_t rows, std::int32_t width, std::int32_t count) {
