@@ -865,6 +865,12 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 }
                 if (tree_active) {
                     ++request.speculative_stats.tree_rounds;
+                    if (request.sampling_host.temperature > 0.0F) {
+                        ++request.speculative_stats.tree_sampled_rounds;
+                    }
+                    if (lookup_merge_mode && lookup_proposals[row]) {
+                        ++request.speculative_stats.lookup_merge_rounds;
+                    }
                     request.speculative_stats.tree_nodes += tree_round_options.nodes;
                     request.speculative_stats.tree_accepted_drafts +=
                         static_cast<std::uint32_t>(accepted_i);
