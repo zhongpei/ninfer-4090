@@ -156,6 +156,101 @@ void launch_recurrent_record_fixed(const Tensor& q, const Tensor& k, const Tenso
     }
 }
 
+template <class StateT>
+void launch_recurrent_tree_record_typed(
+    const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g, const Tensor& beta,
+    float scale, const Tensor& ssm_states, const Tensor& initial_state_slots,
+    const Tensor& parents, Tensor& key_record, Tensor& value_record, Tensor& gate_record,
+    Tensor& out, cudaStream_t stream) {
+    const auto heads = head_map::of(q.ne[1], v.ne[1]);
+    const dim3 grid(static_cast<unsigned>(v.ne[1]), 1,
+                    static_cast<unsigned>(kStateDim / kBlockDv));
+    const dim3 block(kWarpSize, kNumWarps, 1);
+    const std::int64_t state_slot_stride =
+        static_cast<std::int64_t>(kStateDim) * kStateDim * ssm_states.ne[2];
+    const RecordAccess<false, StateT> access{
+        static_cast<const __nv_bfloat16*>(q.data),
+        static_cast<const __nv_bfloat16*>(k.data),
+        static_cast<const __nv_bfloat16*>(v.data),
+        static_cast<const float*>(g.data),
+        static_cast<const float*>(beta.data),
+        static_cast<const StateT*>(ssm_states.data),
+        nullptr,
+        static_cast<const std::int32_t*>(initial_state_slots.data),
+        static_cast<__nv_bfloat16*>(key_record.data),
+        static_cast<__nv_bfloat16*>(value_record.data),
+        reinterpret_cast<uint2*>(gate_record.data),
+        static_cast<__nv_bfloat16*>(out.data),
+        heads,
+        q.ne[2],
+        state_slot_stride,
+        scale,
+    };
+    recurrent_tree_record_kernel<true, StateT><<<grid, block, 0, stream>>>(
+        access, static_cast<const std::int32_t*>(parents.data));
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_recurrent_tree_record_fixed(
+    const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g, const Tensor& beta,
+    float scale, const Tensor& ssm_states, const Tensor& initial_state_slots,
+    const Tensor& parents, Tensor& key_record, Tensor& value_record, Tensor& gate_record,
+    Tensor& out, cudaStream_t stream) {
+    if (ssm_states.dtype == DType::FP16) {
+        launch_recurrent_tree_record_typed<__half>(
+            q, k, v, g, beta, scale, ssm_states, initial_state_slots, parents,
+            key_record, value_record, gate_record, out, stream);
+    } else {
+        launch_recurrent_tree_record_typed<float>(
+            q, k, v, g, beta, scale, ssm_states, initial_state_slots, parents,
+            key_record, value_record, gate_record, out, stream);
+    }
+}
+
+template <class Geometry, class StateT>
+void launch_replay_tree_fold_typed(
+    const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
+    std::int32_t source_state_slot, std::int32_t destination_state_slot,
+    const Tensor& path_nodes, std::int32_t commit_columns, cudaStream_t stream) {
+    const TreeFoldAccess<Geometry, StateT> access{
+        static_cast<const __nv_bfloat16*>(records.key.data),
+        static_cast<const __nv_bfloat16*>(records.value.data),
+        reinterpret_cast<const uint2*>(records.gate.data),
+        static_cast<const __nv_bfloat16*>(records.conv.data),
+        static_cast<StateT*>(states.recurrent_layer0.data),
+        static_cast<__nv_bfloat16*>(states.conv_layer0.data),
+        states.recurrent_layer_stride_bytes / static_cast<std::int64_t>(sizeof(StateT)),
+        states.conv_layer_stride_bytes / static_cast<std::int64_t>(sizeof(__nv_bfloat16)),
+        records.spec.record_capacity,
+        records.spec.width,
+        source_state_slot,
+        destination_state_slot,
+        static_cast<const std::int32_t*>(path_nodes.data),
+        commit_columns,
+    };
+    const dim3 grid(static_cast<unsigned>(Geometry::kValueHeads), 1,
+                    static_cast<unsigned>(Geometry::kLayers * (kStateDim / kBlockDv)));
+    const dim3 block(kWarpSize, kNumWarps, 1);
+    recurrent_tree_fold_kernel<Geometry, StateT><<<grid, block, 0, stream>>>(access);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <class Geometry>
+void launch_replay_tree_fold_fixed(
+    const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
+    std::int32_t source_state_slot, std::int32_t destination_state_slot,
+    const Tensor& path_nodes, std::int32_t commit_columns, cudaStream_t stream) {
+    if (states.recurrent_layer0.dtype == DType::FP16) {
+        launch_replay_tree_fold_typed<Geometry, __half>(
+            records, states, source_state_slot, destination_state_slot, path_nodes,
+            commit_columns, stream);
+    } else {
+        launch_replay_tree_fold_typed<Geometry, float>(
+            records, states, source_state_slot, destination_state_slot, path_nodes,
+            commit_columns, stream);
+    }
+}
+
 template <class Geometry, class StateT>
 void launch_replay_fold_typed(const GdnReplayRecords& records,
                               LinearAttentionStateAllLayersView states,
@@ -254,6 +349,16 @@ void launch_recurrent_record(const Tensor& q, const Tensor& k, const Tensor& v, 
     }
 }
 
+void launch_recurrent_tree_record(
+    const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g, const Tensor& beta,
+    float scale, const Tensor& ssm_states, const Tensor& initial_state_slots,
+    const Tensor& parents, Tensor& key_record, Tensor& value_record, Tensor& gate_record,
+    Tensor& out, cudaStream_t stream) {
+    launch_recurrent_tree_record_fixed(
+        q, k, v, g, beta, scale, ssm_states, initial_state_slots, parents,
+        key_record, value_record, gate_record, out, stream);
+}
+
 void launch_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
                         const GdnReplayFoldKernelRows& rows, std::int32_t active_rows,
                         cudaStream_t stream) {
@@ -272,6 +377,31 @@ void launch_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAll
         return;
     }
     throw std::invalid_argument("GDN replay fold launcher received an unregistered geometry");
+}
+
+void launch_replay_tree_fold(
+    const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
+    std::int32_t source_state_slot, std::int32_t destination_state_slot,
+    const Tensor& path_nodes, std::int32_t commit_columns, cudaStream_t stream) {
+    if (records.spec.layers == FoldGeometry48x48::kLayers &&
+        records.spec.qk_heads == FoldGeometry48x48::kQkHeads &&
+        records.spec.value_heads == FoldGeometry48x48::kValueHeads &&
+        records.spec.conv_channels == FoldGeometry48x48::kConvChannels) {
+        launch_replay_tree_fold_fixed<FoldGeometry48x48>(
+            records, states, source_state_slot, destination_state_slot, path_nodes,
+            commit_columns, stream);
+        return;
+    }
+    if (records.spec.layers == FoldGeometry30x32::kLayers &&
+        records.spec.qk_heads == FoldGeometry30x32::kQkHeads &&
+        records.spec.value_heads == FoldGeometry30x32::kValueHeads &&
+        records.spec.conv_channels == FoldGeometry30x32::kConvChannels) {
+        launch_replay_tree_fold_fixed<FoldGeometry30x32>(
+            records, states, source_state_slot, destination_state_slot, path_nodes,
+            commit_columns, stream);
+        return;
+    }
+    throw std::invalid_argument("GDN tree replay fold launcher received an unregistered geometry");
 }
 
 } // namespace ninfer::ops::detail::gated_delta_net
