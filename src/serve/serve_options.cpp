@@ -134,7 +134,7 @@ std::string serve_usage_text(const char* argv0) {
            "--prefill-chunk to pay; --no-prefill-cublas-projections keeps the attention and GDN "
            "input projections off that route\n"
            "       --spec-tree lattice enables C1 greedy DFlash2 runtime tree verification; "
-           "nodes/spine are explicit A/B controls and off remains the default\n"
+           "nodes is a maximum budget that Tree-Stair may cut inside the same 16-row buffer; off remains the default\n"
            "       --spec-router stair adaptively cuts DFlash/DFlash2 target verification using "
            "four explicit width/cost rungs; fixed remains the default for A/B comparisons\n"
            "       --lookup-ngram N adds context-lookup drafting alongside --spec: the last N tokens "
