@@ -227,6 +227,14 @@ the opt-in adaptive verification policy described in
 [Adaptive speculative routing](maintainer/speculative-routing.md). The drafter remains at the
 startup maximum K; the router changes only how many proposed rows the target verifies each round.
 
+For RTX 4090 calibration, `tools/calibrate_speculative.py` runs the existing real target
+through forced 3/7/11/15 Stair arms and emits a JSON file accepted by `--spec-profile`. Add
+`--tree` to calibrate the fixed-16-row Tree-Stair path. The wide b16 drafter remains resident in
+all arms; the profile changes target verification economics only.
+
+`--spec-router-persist` is deliberately separate from `--spec-profile`: the profile supplies
+hardware/context priors, while persistent routing retains live acceptance evidence across requests.
+
 The published [performance results](performance.md)
 use MTP with three draft tokens and DFlash with seven draft tokens (block length eight), both with
 the optimized proposal head. DFlash accepts one to fifteen draft tokens; seven forms the measured
@@ -247,6 +255,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--spec-router fixed\|stair` | fixed maximum-K verification or adaptive DFlash/DFlash2 verification width | `fixed` |
+| `--spec-profile FILE` | load a calibrated 3/7/11/15 Stair cost profile before later CLI overrides | unset |
+| `--spec-router-persist` | reuse chain/tree Stair observations across requests for the Program lifetime | off |
 | `--spec-tree off\|lattice` | chain verification or opt-in C1 greedy DFlash2 lattice-tree verification | `off` |
 | `--spec-tree-nodes N` | maximum drafted tree-node budget; must be <= `--draft-tokens`, and Tree-Stair may cut it lower per round | `15` |
 | `--spec-tree-spine N` | greedy lattice levels installed before best-first alternatives | `7` |
@@ -270,6 +280,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--lookup-deep-after N` | full-accept streak before deep copy; 0 disables | `2` |
 | `--lookup-deep-drafts N` | deep-copy policy maximum, clamped to runtime K/budget/context | `15` |
 | `--lookup-persistent-tokens N` | process-lifetime cross-request suffix-memory budget | `0` |
+| `--lookup-persistent-path FILE` | append/restore the bounded suffix history across process restarts; requires persistent-tokens | unset |
 | `--lookup-corpus-prefix PATH` | static corpus prefix built by `tools/build_lookup_corpus.py` | unset |
 | `--lookup-corpus-weight F` | corpus vote weight | `0.50` |
 | `--lookup-corpus-samples N` | sampled corpus matches per query | `64` |
