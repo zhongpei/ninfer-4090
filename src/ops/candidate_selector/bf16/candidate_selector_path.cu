@@ -152,6 +152,30 @@ __global__ __launch_bounds__(32) void selector_lattice_walk_kernel(DeviceArgs a,
 
 } // namespace
 
+void candidate_selector_lattice_launch(
+    const Tensor& candidate_ids, const Tensor& unary_scores, const Tensor& projected_hidden,
+    const Tensor& anchors, const Tensor& predecessor_codebook, const Tensor& successor_codebook,
+    const Tensor& base_positions, const SamplingConfig* configs, Tensor& drafts, Tensor& proposal_q,
+    Tensor& lattice_scores, cudaStream_t stream) {
+    const DeviceArgs args{static_cast<const std::int32_t*>(candidate_ids.data),
+                          static_cast<const float*>(unary_scores.data),
+                          static_cast<const __nv_bfloat16*>(projected_hidden.data),
+                          static_cast<const std::int32_t*>(anchors.data),
+                          static_cast<const __nv_bfloat16*>(predecessor_codebook.data),
+                          static_cast<const __nv_bfloat16*>(successor_codebook.data),
+                          static_cast<const std::int32_t*>(base_positions.data),
+                          configs,
+                          static_cast<std::int32_t*>(drafts.data),
+                          static_cast<float*>(proposal_q.data),
+                          candidate_ids.ne[1]};
+    auto* edges = static_cast<float*>(lattice_scores.data);
+    selector_lattice_kernel<<<dim3(args.steps * candidate_ids.ne[2], kCandidates), 512, 0,
+                              stream>>>(args, edges);
+    CUDA_CHECK(cudaGetLastError());
+    selector_lattice_walk_kernel<<<candidate_ids.ne[2], 32, 0, stream>>>(args, edges);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void candidate_selector_path_launch(SelectorRoute route, const Tensor& candidate_ids,
                                     const Tensor& unary_scores, const Tensor& projected_hidden,
                                     const Tensor& anchors, const Tensor& predecessor_codebook,
