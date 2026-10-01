@@ -150,6 +150,35 @@ private:
 
 } // namespace
 
+void DFlashTreeFeatureSink::begin(const Tensor& value) {
+    if (features == nullptr || layers.empty() || layers.size() > 32 || active_tokens <= 0 ||
+        value.dtype != DType::BF16 || value.ne[1] != active_tokens ||
+        features->dtype != DType::BF16 ||
+        value.ne[0] * static_cast<std::int32_t>(layers.size()) != features->ne[0] ||
+        active_tokens > features->ne[1]) {
+        throw std::logic_error("DFlash tree feature sink is incomplete");
+    }
+    captured_mask = 0;
+}
+
+void DFlashTreeFeatureSink::capture_layer(int layer, const Tensor& value, cudaStream_t stream) {
+    const auto it = std::find(layers.begin(), layers.end(), layer);
+    if (it == layers.end()) return;
+    const std::size_t index = static_cast<std::size_t>(it - layers.begin());
+    if (features == nullptr || value.dtype != DType::BF16 || value.ne[1] != active_tokens) {
+        throw std::logic_error("DFlash tree feature capture shape is invalid");
+    }
+    const std::size_t element_bytes = dtype_size(DType::BF16);
+    const std::size_t width_bytes = static_cast<std::size_t>(value.ne[0]) * element_bytes;
+    const std::size_t source_pitch = static_cast<std::size_t>(value.nb[1]);
+    const std::size_t target_pitch = static_cast<std::size_t>(features->nb[1]);
+    auto* target = static_cast<std::byte*>(features->data) + index * width_bytes;
+    CUDA_CHECK(cudaMemcpy2DAsync(target, target_pitch, value.data, source_pitch, width_bytes,
+                                 static_cast<std::size_t>(active_tokens),
+                                 cudaMemcpyDeviceToDevice, stream));
+    captured_mask |= 1U << index;
+}
+
 void DFlashFeatureSink::begin(const Tensor& value) {
     const bool prefill = features != nullptr && positions != nullptr && batch_features == nullptr;
     const bool batch   = batch_features != nullptr && batch_lanes != nullptr &&
