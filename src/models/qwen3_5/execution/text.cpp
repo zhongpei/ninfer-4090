@@ -150,6 +150,54 @@ private:
 
 } // namespace
 
+void TeacherFeatureSink::begin(const Tensor& value) {
+    if (host_features == nullptr || layers.empty() || layers.size() > 32 || hidden_size <= 0 ||
+        total_tokens == 0 || token_offset >= total_tokens || value.dtype != DType::BF16 ||
+        value.ne[0] != hidden_size || value.ne[1] <= 0 ||
+        token_offset + static_cast<std::uint32_t>(value.ne[1]) > total_tokens) {
+        throw std::logic_error("DFlash teacher feature sink is incomplete");
+    }
+    const std::size_t required =
+        static_cast<std::size_t>(total_tokens) * layers.size() *
+        static_cast<std::size_t>(hidden_size) * sizeof(std::uint16_t);
+    if (host_feature_bytes < required) {
+        throw std::logic_error("DFlash teacher host feature buffer is too small");
+    }
+    active_tokens = value.ne[1];
+    captured_mask = 0;
+}
+
+void TeacherFeatureSink::capture_layer(int layer, const Tensor& value, cudaStream_t stream) {
+    const auto it = std::find(layers.begin(), layers.end(), layer);
+    if (it == layers.end()) return;
+    const std::size_t index = static_cast<std::size_t>(it - layers.begin());
+    if (value.dtype != DType::BF16 || value.ne[0] != hidden_size ||
+        value.ne[1] != active_tokens || active_tokens <= 0) {
+        throw std::logic_error("DFlash teacher target tap has invalid shape");
+    }
+    const std::size_t element_bytes = sizeof(std::uint16_t);
+    const std::size_t width_bytes = static_cast<std::size_t>(hidden_size) * element_bytes;
+    const std::size_t source_pitch = static_cast<std::size_t>(value.nb[1]);
+    const std::size_t fused_rows = layers.size() * static_cast<std::size_t>(hidden_size);
+    const std::size_t target_pitch = fused_rows * element_bytes;
+    auto* target = static_cast<std::byte*>(host_features) +
+                   static_cast<std::size_t>(token_offset) * target_pitch +
+                   index * width_bytes;
+    CUDA_CHECK(cudaMemcpy2DAsync(target, target_pitch, value.data, source_pitch, width_bytes,
+                                 static_cast<std::size_t>(active_tokens),
+                                 cudaMemcpyDeviceToHost, stream));
+    captured_mask |= 1U << index;
+}
+
+void TeacherFeatureSink::capture_positions(const Tensor& source, cudaStream_t) {
+    const std::uint32_t complete =
+        layers.size() == 32 ? ~0U : ((1U << layers.size()) - 1U);
+    if (captured_mask != complete || active_tokens <= 0 || source.dtype != DType::I32 ||
+        source.ne[0] != active_tokens) {
+        throw std::logic_error("DFlash teacher target did not publish complete taps");
+    }
+}
+
 void DFlashTreeFeatureSink::begin(const Tensor& value) {
     if (features == nullptr || layers.empty() || layers.size() > 32 || active_tokens <= 0 ||
         value.dtype != DType::BF16 || value.ne[1] != active_tokens ||
@@ -1749,6 +1797,19 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
         nominal_length > full_ids.size() - begin) {
         throw std::invalid_argument("text prefill chunk is outside the prompt");
     }
+    const TextPrefill text_prefill{full_ids, begin};
+    return prefill_impl(full_ids.subspan(begin, nominal_length), &text_prefill, nullptr, sink,
+                        finalize_at_end);
+}
+
+PrefillChunkResult TextContext::prefill_chunk(
+    std::span<const int> full_ids, std::uint32_t begin, std::uint32_t nominal_length,
+    bool finalize_at_end, TeacherFeatureSink& sink) {
+    if (begin >= full_ids.size() || nominal_length == 0 ||
+        nominal_length > full_ids.size() - begin) {
+        throw std::invalid_argument("teacher text prefill chunk is outside the prompt");
+    }
+    sink.token_offset = begin;
     const TextPrefill text_prefill{full_ids, begin};
     return prefill_impl(full_ids.subspan(begin, nominal_length), &text_prefill, nullptr, sink,
                         finalize_at_end);
