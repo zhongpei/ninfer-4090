@@ -174,6 +174,32 @@ void speculative_accept_sparse_drafts(
 void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& selectors, Tensor& out,
                                         cudaStream_t stream);
 
+/**
+ * Build the C1 DFlash2 verification tree entirely on device.
+ *
+ * candidates is I32 [16,K,1], lattice is FP32 [16,16,K,1]. The planner selects exactly
+ * node_budget draft nodes, emits DFS-preorder ids/parents/depths, and derives target cache/RoPE
+ * positions from frontier + depth. The physical buffers may remain K+1 wide; only the first
+ * node_budget+1 rows are written.
+ */
+void speculative_tree_build_device(const Tensor& candidates, const Tensor& lattice,
+                                   std::int32_t anchor, std::int32_t steps,
+                                   std::int32_t node_budget, std::int32_t spine,
+                                   std::int32_t frontier, std::int32_t rope_delta,
+                                   Tensor& verify_ids, Tensor& positions,
+                                   Tensor& rope_positions, Tensor& parents, Tensor& depths,
+                                   cudaStream_t stream);
+
+/**
+ * Raw-greedy C1 tree acceptance on device. verify_ids/parents/target_tokens are the active
+ * tree width. path_nodes receives root + accepted draft rows; licensed_tokens receives the
+ * accepted draft token sequence followed by the correction/bonus token.
+ */
+void speculative_tree_accept_device(const Tensor& verify_ids, const Tensor& parents,
+                                    const Tensor& target_tokens, Tensor& path_nodes,
+                                    Tensor& licensed_tokens, Tensor& licensed_counts,
+                                    Tensor& accepted_drafts, cudaStream_t stream);
+
 // Gather a C1 BF16 tree matrix [D,T] into accepted-path order. The first count columns are
 // destination[:,i]=source[:,path_nodes[i]] and the physical suffix is zeroed.
 void speculative_tree_gather_bf16(const Tensor& source, const Tensor& path_nodes,
