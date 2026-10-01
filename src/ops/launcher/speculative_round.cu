@@ -218,14 +218,17 @@ void speculative_tree_build_plan_launch(
 }
 
 void speculative_tree_accept_greedy_launch(
-    const Tensor& target_tokens, const Tensor& tree_tokens, const Tensor& parents,
-    std::int32_t live_rows, Tensor& path_nodes, Tensor& licensed_tokens,
+    const Tensor& target_tokens, const Tensor& target_logits, const Tensor& tree_tokens,
+    const Tensor& parents, std::int32_t live_rows, std::int32_t token_domain,
+    Tensor& path_nodes, Tensor& licensed_tokens,
     Tensor& licensed_counts, Tensor& accepted_drafts, Tensor& path_count,
     Tensor& compact_last_index, cudaStream_t stream) {
     speculative_tree_accept_greedy_kernel<<<1, 1, 0, stream>>>(
         static_cast<const std::int32_t*>(target_tokens.data),
+        static_cast<const __nv_bfloat16*>(target_logits.data),
         static_cast<const std::int32_t*>(tree_tokens.data),
         static_cast<const std::int32_t*>(parents.data), live_rows, tree_tokens.ne[0],
+        target_logits.ne[0], token_domain,
         static_cast<std::int32_t*>(path_nodes.data),
         static_cast<std::int32_t*>(licensed_tokens.data),
         static_cast<std::int32_t*>(licensed_counts.data),
