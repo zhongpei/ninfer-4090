@@ -71,6 +71,10 @@ std::size_t current_free_device_bytes() {
 EngineOptions normalize_engine_options(EngineOptions options) {
     switch (options.purpose) {
     case EnginePurpose::Generation:
+        if (options.enable_teacher_trace) {
+            throw std::invalid_argument(
+                "enable_teacher_trace requires EnginePurpose::CausalScoring");
+        }
         break;
     case EnginePurpose::CausalScoring:
         options.max_concurrency      = 1;
