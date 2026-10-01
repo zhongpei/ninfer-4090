@@ -248,7 +248,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--spec-router fixed\|stair` | fixed maximum-K verification or adaptive DFlash/DFlash2 verification width | `fixed` |
 | `--spec-tree off\|lattice` | chain verification or opt-in C1 greedy DFlash2 lattice-tree verification | `off` |
-| `--spec-tree-nodes N` | drafted tree-node budget; runtime v1 requires this to equal `--draft-tokens` | `15` |
+| `--spec-tree-nodes N` | maximum drafted tree-node budget; must be <= `--draft-tokens`, and Tree-Stair may cut it lower per round | `15` |
 | `--spec-tree-spine N` | greedy lattice levels installed before best-first alternatives | `7` |
 | `--spec-stair-widths A,B,C,D` | four strictly increasing Stair draft extents | `3,7,11,15` |
 | `--spec-stair-costs A,B,C,D` | measured relative verify cost at each Stair extent | `1,1.02,1.05,1.10` |
