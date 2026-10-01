@@ -230,18 +230,6 @@ ninfer::PromptInput chinese_chat(bool enable_thinking) {
     return input;
 }
 
-int exercise_registered_frontend(const ninfer::Engine& engine) {
-    if (engine.count_tokens(chinese_chat(true)) != 16) {
-        std::cerr << "registered tokenizer/chat template changed the thinking prompt golden\n";
-        return 1;
-    }
-    if (engine.count_tokens(chinese_chat(false)) != 18) {
-        std::cerr << "registered tokenizer/chat template changed the no-thinking prompt golden\n";
-        return 1;
-    }
-    return 0;
-}
-
 class ObservationSink final : public ninfer::OutputSink {
 public:
     void start(ninfer::GenerationStart start) override {
@@ -280,6 +268,9 @@ public:
 
     [[nodiscard]] bool valid_for(const ninfer::GenerationResult& result) const {
         return valid_ && started_ && timing_seen_ && start_.reused_prompt_tokens == 0 &&
+               start_.prompt.prompt_tokens == result.prompt.prompt_tokens &&
+               start_.prompt.starts_in_reasoning == result.prompt.starts_in_reasoning &&
+               start_.prompt.has_media == result.prompt.has_media &&
                last_processed_ == start_.prompt.prompt_tokens &&
                last_timing_.generated_tokens == result.generated_token_ids.size() &&
                result.timings.prompt_wall_seconds > 0.0 &&
@@ -295,6 +286,45 @@ private:
     bool timing_seen_                       = false;
     bool valid_                             = true;
 };
+
+int exercise_registered_frontend(ninfer::Engine& engine) {
+    for (bool enable_thinking : {true, false}) {
+        const auto counted = engine.count_tokens(chinese_chat(enable_thinking));
+        auto prepared = engine.prepare(chinese_chat(enable_thinking));
+        const auto expected = prepared.summary();
+        if (counted != expected.prompt_tokens) {
+            std::cerr << "registered frontend count/prepare disagree: thinking=" << enable_thinking
+                      << " count=" << counted << " prepared=" << expected.prompt_tokens << '\n';
+            return 1;
+        }
+        ninfer::RequestOptions request;
+        request.execution.requested_output_tokens = 1;
+        request.execution.sampling.temperature = 0.0F;
+        request.execution.allow_prefix_reuse = false;
+        request.stop.include_model_defaults = false;
+        const ninfer::GenerationObservationOptions observation{
+            .phase_timings = true, .live_timings = true, .prompt_progress = true};
+        ObservationSink sink;
+        const auto before = engine.runtime_stats();
+        auto generation = engine.submit(std::move(prepared), std::move(request),
+                                        ninfer::OutputConsumerMode::Streaming, observation);
+        const auto result = generation.wait(&sink);
+        const auto after = engine.runtime_stats();
+        const auto computed = after.computed_prefill_tokens - before.computed_prefill_tokens;
+        if (result.prompt.prompt_tokens != counted ||
+            result.prompt.starts_in_reasoning != expected.starts_in_reasoning ||
+            result.prompt.has_media != expected.has_media || result.reused_prompt_tokens != 0 ||
+            result.generated_token_ids.size() != 1 || computed != counted || !sink.valid_for(result)) {
+            std::cerr << "registered frontend disagrees with generation prompt accounting: thinking="
+                      << enable_thinking << " count=" << counted
+                      << " result=" << result.prompt.prompt_tokens << " computed=" << computed
+                      << " reused=" << result.reused_prompt_tokens
+                      << " generated=" << result.generated_token_ids.size() << '\n';
+            return 1;
+        }
+    }
+    return 0;
+}
 
 int exercise_stream_observations(ninfer::Engine& engine) {
     std::vector<ninfer::TokenId> prompt(2050, 198);
@@ -2134,6 +2164,9 @@ int run() {
     if (scenario == "vision") {
         ninfer::Engine engine(engine_options(artifact));
         result = exercise_vision(engine);
+    } else if (scenario == "frontend") {
+        ninfer::Engine engine(engine_options(artifact));
+        result = exercise_registered_frontend(engine);
     } else if (scenario == "all") {
         result = exercise_artifact(artifact);
     } else if (scenario == "concurrent") {
