@@ -866,8 +866,10 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
     Tensor licensed_counts = frame.licensed_counts.slice(0, 0, 1);
     Tensor accepted_drafts = frame.accepted_drafts.slice(0, 0, 1);
     ops::speculative_tree_accept_greedy(
-        target_tokens, verify_ids, parents, live_width, path_nodes, licensed_tokens,
-        licensed_counts, accepted_drafts, frame.tree_path_count, append_counts, stream);
+        target_tokens, target_logits, verify_ids, parents, live_width,
+        dimension(state.execution.parameters.model.resources().public_token_count),
+        path_nodes, licensed_tokens, licensed_counts, accepted_drafts,
+        frame.tree_path_count, append_counts, stream);
 
     // Canonicalize target hidden and DFlash taps into accepted-path order without a D2H count.
     state.execution.work.reset();
