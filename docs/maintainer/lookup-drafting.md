@@ -71,9 +71,20 @@ won unconditionally.
 
 ### Process history
 
-`--lookup-persistent-tokens N` retains at most N token ids across requests in the current
-server process. It does **not** replace the exact context cache and it is not model state. Restarting
-the process clears it.
+`--lookup-persistent-tokens N` retains at most N token ids across requests. It does **not**
+replace the exact context cache and it is not model state.
+
+By default this memory is process-local. Add:
+
+```text
+--lookup-persistent-tokens 262144
+--lookup-persistent-path /var/lib/ninfer/lookup.tokens.i32
+```
+
+to restore the bounded token history at startup and append successfully finished request ledgers.
+The file is a separator-delimited I32 token stream and is truncated whenever the bounded in-memory
+store rolls over, so it does not become an unbounded log. Disk errors are best-effort lookup
+failures and never become target/model-state authority.
 
 ### Static corpus
 
