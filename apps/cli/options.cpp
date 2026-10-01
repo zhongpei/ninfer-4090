@@ -166,6 +166,8 @@ std::string usage_text(const char* argv0) {
            "perplexity cost (docs/performance.md), off by default, and it wants a larger "
            "--prefill-chunk to pay. --no-prefill-cublas-projections keeps the attention and GDN "
            "input projections off that route.\n"
+           "--dflash-teacher-out DIR records teacher-forced target taps and stable target top-16 "
+           "from the loaded .ninfer artifact during prefill; this is an offline training tool.\n"
            "--spec-tree lattice enables C1 greedy DFlash2 runtime tree verification; "
            "--spec-tree-nodes caps the maximum at 15; Tree-Stair may choose a smaller active prefix, and --spec-tree-spine controls how much "
            "of the greedy lattice is installed before best-first alternatives.\n"
@@ -229,6 +231,8 @@ Options parse_options(int argc, char** argv) {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = parse_u32(value(arg), "draft-tokens");
+        } else if (arg == "--dflash-teacher-out") {
+            options.dflash_teacher_out = value(arg);
         } else if (arg == "--spec-tree") {
             options.speculative.tree.mode = product::parse_speculative_tree_mode(value(arg));
         } else if (arg == "--spec-tree-nodes") {
