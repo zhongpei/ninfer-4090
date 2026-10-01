@@ -409,6 +409,7 @@ struct RequestControl {
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     StairRouterState stair_router;
+    StairRouterState stair_router_seed;
     struct LookupRoundState {
         std::uint32_t full_accept_run = 0;
     } lookup_round;
@@ -587,6 +588,7 @@ public:
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
+    StairRouterState stair_persistent;
     ::ninfer::qwen3_5::LookupPersistentStore lookup_persistent;
     ::ninfer::qwen3_5::LookupCorpusStore lookup_corpus;
     const float rope_scaling_factor;
