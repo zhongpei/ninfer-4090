@@ -44,4 +44,13 @@ namespace ninfer::ops {
 void target_logprobs(const Tensor& logits, const Tensor& target_ids, std::int32_t valid_rows,
                      Tensor& output, cudaStream_t stream);
 
+/**
+ * One logsumexp per column, then exact log-probabilities for a small candidate matrix.
+ * candidate_ids is contiguous I32 [K,C], output contiguous FP32 [K,C], K=1..16.
+ * Values are taken from the represented BF16 logits, not from a top-K projection accumulator.
+ */
+void target_candidate_logprobs(const Tensor& logits, const Tensor& candidate_ids,
+                               std::int32_t valid_rows, Tensor& output,
+                               cudaStream_t stream);
+
 } // namespace ninfer::ops
