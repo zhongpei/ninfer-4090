@@ -163,6 +163,10 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         lookup.corpus_weight < 0.0F || lookup.corpus_samples == 0) {
         throw std::invalid_argument("invalid context-lookup drafting parameter");
     }
+    if (!lookup.history_path.empty() && lookup.persistent_tokens == 0) {
+        throw std::invalid_argument(
+            "--lookup-history-path requires --lookup-persistent-tokens > 0");
+    }
     if (lookup.strategy == LookupDraftStrategy::Vote && options.lookup_ngram != 0 &&
         options.lookup_ngram > lookup.max_order) {
         throw std::invalid_argument(
@@ -194,6 +198,9 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
             !std::isfinite(router.verify_costs[i]) || !(router.verify_costs[i] > 0.0F)) {
             throw std::invalid_argument("invalid speculative Stair router width/cost table");
         }
+    }
+    if (!router.profile_path.empty() && router.mode != SpeculativeRoutingMode::Stair) {
+        throw std::invalid_argument("--spec-stair-profile requires --spec-router stair");
     }
     if (router.mode == SpeculativeRoutingMode::Stair) {
         if (options.backend != SpeculativeBackend::DFlash &&
