@@ -63,6 +63,39 @@ Two sequence types are useful:
 
 Held-out samples are marked in `manifest.json` and must not be used for optimizer steps.
 
+## Native NInfer teacher data
+
+The Hugging Face recorder remains useful for broad data generation, but a quantized/Ternary NInfer
+target does not necessarily have the same target distribution as its BF16 source. Use
+`ninfer-teacher` when training the drafter that will actually ship:
+
+```bash
+ninfer-teacher out/bonsai2-target.ninfer \
+  --input prompts.jsonl --out train/ninfer-teacher \
+  --devices 0,1 --max-context 8192 --kv-dtype int8 \
+  --layers 5,19,33,47,61 --top-k 16
+```
+
+For N input tokens the exporter records N-1 predictor rows. Each row contains:
+
+- the input token at that predictor;
+- raw BF16 bits for the selected target-layer residual taps;
+- actual target argmax;
+- top-16 ids;
+- exact top-16 log-probabilities computed from the represented dense BF16 target logits.
+
+The exporter uses `EnginePurpose::CausalScoring` with an explicit teacher capability. It owns
+fresh StateImage/KV state, does not enter the serving context cache, and reuses one bounded pinned
+host tap buffer per prefill chunk. Generation engines do not reserve this teacher workspace.
+
+Input JSONL accepts either `{"text":"..."}` or `{"tokens":[...]}`, plus optional
+`name/kind/topic/split`. The output manifest/raw-array format is consumed directly by
+`train.py`.
+
+The differentiable trainer still needs the source target embedding/lm-head tensors through
+`--target`. The *teacher labels/taps* come from the real `.ninfer` artifact; this is the
+important part for matching T2/Q5/Ternary target behavior.
+
 ## 2. Fine-tune the drafter
 
 A 24GB card should start with a partial mode:
