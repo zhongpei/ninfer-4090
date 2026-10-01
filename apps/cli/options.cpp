@@ -122,7 +122,7 @@ std::string usage_text(const char* argv0) {
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--devices N,M]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
-           "       [--spec-router fixed|stair] [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
+           "       [--spec-router fixed|stair] [--spec-router-scope request|engine] [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
            "       [--spec-tree off|lattice] [--spec-tree-nodes N] [--spec-tree-spine N]\n"
            "       [--spec-stair-draft-cost F] [--spec-stair-prior F] [--spec-stair-prior-weight F]\n"
            "       [--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F]\n"
@@ -234,6 +234,9 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--spec-router") {
             options.speculative.routing.mode =
                 product::parse_speculative_routing_mode(value(arg));
+        } else if (arg == "--spec-router-scope") {
+            options.speculative.routing.scope =
+                product::parse_speculative_router_scope(value(arg));
         } else if (arg == "--spec-stair-widths") {
             product::parse_speculative_stair_widths(value(arg), options.speculative.routing);
         } else if (arg == "--spec-stair-costs") {
