@@ -25,5 +25,10 @@ KL objective, block-16 fine-tuning, held-out accepted-tokens-per-block gate, res
 and DFlash2 lattice/tree-planning algorithms. The standalone NInfer copy removes the Tandem engine
 dependency and exports the companion tensor names already understood by NInfer's converter.
 
+Runtime tree verification additionally adapts TandemLLM's speculative-tree and recurrent-tree
+verification ideas. NInfer's implementation is specific to its hybrid target: DFS depth-position
+reuse for temporary full-attention KV, ancestor-aware GDN convolution/recurrent evaluation, and
+accepted-path-only ReplaySSM/StateImage commit.
+
 This notice covers code/design adapted from TandemLLM. Model weights and other third-party
 components retain their own licenses and notices.
