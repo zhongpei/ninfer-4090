@@ -2,6 +2,7 @@
 #include "ops/launcher/speculative_round.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
