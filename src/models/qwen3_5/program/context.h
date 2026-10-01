@@ -153,6 +153,12 @@ void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_
                                                     std::uint32_t nominal_length,
                                                     std::optional<std::uint32_t> split_frontier,
                                                     bool finalize_at_end);
+[[nodiscard]] PrefillChunkResult prefill_text_chunk(PrefillContext& state,
+                                                    std::span<const TokenId> ids,
+                                                    std::uint32_t nominal_length,
+                                                    std::optional<std::uint32_t> split_frontier,
+                                                    bool finalize_at_end,
+                                                    TeacherFeatureSink& teacher_sink);
 
 [[nodiscard]] PrefillChunkResult
 prefill_multimodal_chunk(PrefillContext& state, const PreparedPromptData& prompt,
