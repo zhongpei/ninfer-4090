@@ -6,7 +6,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <stdexcept>
+#include <string>
 
 namespace ninfer::models::qwen3_5::detail {
 
@@ -62,6 +66,84 @@ struct TreeStairRouterState {
         last_extent = extent;
     }
 };
+
+struct PersistentSpecRouterState {
+    StairRouterState chain;
+    TreeStairRouterState tree;
+};
+
+inline bool load_persistent_spec_router_state(const std::filesystem::path& path,
+                                              PersistentSpecRouterState& state) {
+    if (path.empty() || !std::filesystem::exists(path)) { return false; }
+    std::ifstream in(path);
+    if (!in) {
+        throw std::runtime_error("cannot open speculative router state: " + path.string());
+    }
+    std::string magic;
+    if (!(in >> magic) || magic != "NINFER_SPEC_ROUTER_V1") {
+        throw std::runtime_error("invalid speculative router state header: " + path.string());
+    }
+    PersistentSpecRouterState loaded;
+    if (!(in >> loaded.chain.rounds >> loaded.chain.last_extent)) {
+        throw std::runtime_error("invalid chain router state: " + path.string());
+    }
+    for (auto& v : loaded.chain.attempted) if (!(in >> v)) throw std::runtime_error("truncated router state");
+    for (auto& v : loaded.chain.accepted) if (!(in >> v)) throw std::runtime_error("truncated router state");
+    for (auto& v : loaded.chain.selected) if (!(in >> v)) throw std::runtime_error("truncated router state");
+    if (!(in >> loaded.tree.rounds >> loaded.tree.last_extent)) {
+        throw std::runtime_error("invalid tree router state: " + path.string());
+    }
+    for (auto& v : loaded.tree.observed) if (!(in >> v)) throw std::runtime_error("truncated router state");
+    for (auto& v : loaded.tree.committed_tokens) if (!(in >> v)) throw std::runtime_error("truncated router state");
+    for (auto& v : loaded.tree.selected) if (!(in >> v)) throw std::runtime_error("truncated router state");
+    state = loaded;
+    return true;
+}
+
+inline void save_persistent_spec_router_state(const std::filesystem::path& path,
+                                              const PersistentSpecRouterState& state) {
+    if (path.empty()) return;
+    const std::filesystem::path parent = path.parent_path();
+    if (!parent.empty()) { std::filesystem::create_directories(parent); }
+    std::filesystem::path temp = path;
+    temp += ".tmp";
+    {
+        std::ofstream out(temp, std::ios::trunc);
+        if (!out) {
+            throw std::runtime_error("cannot write speculative router state: " + temp.string());
+        }
+        out << "NINFER_SPEC_ROUTER_V1\n";
+        out << state.chain.rounds << ' ' << state.chain.last_extent << '\n';
+        for (auto v : state.chain.attempted) out << v << ' ';
+        out << '\n';
+        for (auto v : state.chain.accepted) out << v << ' ';
+        out << '\n';
+        for (auto v : state.chain.selected) out << v << ' ';
+        out << '\n';
+        out << state.tree.rounds << ' ' << state.tree.last_extent << '\n';
+        for (auto v : state.tree.observed) out << v << ' ';
+        out << '\n';
+        for (auto v : state.tree.committed_tokens) out << v << ' ';
+        out << '\n';
+        for (auto v : state.tree.selected) out << v << ' ';
+        out << '\n';
+        out.flush();
+        if (!out) {
+            throw std::runtime_error("failed flushing speculative router state: " + temp.string());
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, path, ec);
+    if (ec) {
+        std::filesystem::remove(path, ec);
+        ec.clear();
+        std::filesystem::rename(temp, path, ec);
+        if (ec) {
+            std::filesystem::remove(temp);
+            throw std::runtime_error("cannot publish speculative router state: " + path.string());
+        }
+    }
+}
 
 [[nodiscard]] inline double stair_expected_commits(const SpeculativeRoutingOptions& options,
                                                    const StairRouterState& state,
