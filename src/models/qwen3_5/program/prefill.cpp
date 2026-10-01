@@ -770,6 +770,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     std::array<ops::GdnReplayFoldRow, kMaximumConcurrency> fold_rows{};
     std::array<std::int32_t, kMaximumConcurrency> hidden_selectors{};
     bool needs_hidden_correction = false;
+    bool tree_pending = false;
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const std::uint32_t lane = lanes[row];
         if (lane >= max_concurrency || requests[lane].lifecycle != Lifecycle::Pending ||
@@ -778,6 +779,13 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
         }
         const PendingCandidate& pending = requests[lane].pending;
         const SequenceState& sequence   = active_sequence(lane);
+        if (pending.tree_verify) {
+            if (lanes.size() != 1 || row != 0 || speculative_backend != SpeculativeBackend::DFlash2 ||
+                !io.dflash_decode || dflash_host_egress->tree_path_count <= 0) {
+                throw std::logic_error("tree speculative pending row has an invalid runtime frame");
+            }
+            tree_pending = true;
+        }
         if (sequence.execution_frontier != pending.base_E ||
             sequence.ledger_frontier != pending.base_S ||
             sequence.ledger.size() != pending.base_S ||
@@ -803,16 +811,33 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                                   .commit_columns         = static_cast<std::int32_t>(committed)};
         const bool partial_terminal =
             !cancelled[row] && terminal[row] && committed < pending.produced;
-        hidden_selectors[row] =
-            static_cast<std::int32_t>(partial_terminal ? committed - 1U : pending.produced - 1U);
+        if (pending.tree_verify && partial_terminal) {
+            if (committed == 0 ||
+                committed > static_cast<std::uint32_t>(dflash_host_egress->tree_path_count)) {
+                throw std::logic_error("tree hidden correction prefix is outside the accepted path");
+            }
+            hidden_selectors[row] =
+                dflash_host_egress->tree_path_nodes[static_cast<std::size_t>(committed - 1U)];
+        } else {
+            hidden_selectors[row] = static_cast<std::int32_t>(
+                partial_terminal ? committed - 1U : pending.produced - 1U);
+        }
         needs_hidden_correction = needs_hidden_correction || partial_terminal;
     }
 
     const auto tail_started = Clock::now();
     try {
         timing.resume_submit();
-        replay_fold->execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
-                             device.stream);
+        if (tree_pending) {
+            const auto& row = fold_rows[0];
+            replay_fold->execute_tree(row.source_state_slot, row.destination_state_slot,
+                                      io.dflash_decode->tree_path_nodes,
+                                      row.commit_columns, device.stream);
+        } else {
+            replay_fold->execute(
+                std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
+                device.stream);
+        }
 
         // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
         if (speculative_backend == SpeculativeBackend::DFlash2) {
