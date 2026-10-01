@@ -201,6 +201,31 @@ void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layou
                 add_tensor(builder, DType::I32, {16, columns - 1, batch}, "DFlash2 candidate ids");
             decode.proposal_q = add_tensor(builder, DType::FP32, {16, columns - 1, batch},
                                            "DFlash2 sampled proposal q");
+            if (layout.spec.tree_verify) {
+                decode.lattice_scores =
+                    add_tensor(builder, DType::FP32, {16, 16, columns - 1, 1},
+                               "DFlash2 tree lattice scores");
+                decode.tree_parents =
+                    add_tensor(builder, DType::I32, {columns}, "target tree parents");
+                decode.tree_depths =
+                    add_tensor(builder, DType::I32, {columns}, "target tree depths");
+                decode.tree_path_nodes =
+                    add_tensor(builder, DType::I32, {columns}, "accepted target tree path");
+                if (layout.spec.attention_head_dim <= 0 || layout.spec.attention_kv_heads <= 0 ||
+                    layout.spec.full_attention_layers <= 0) {
+                    throw std::invalid_argument("tree verify requires target attention geometry");
+                }
+                decode.tree_kv_key = add_tensor(
+                    builder, DType::BF16,
+                    {layout.spec.attention_head_dim, layout.spec.attention_kv_heads, columns,
+                     layout.spec.full_attention_layers},
+                    "target tree attention key replay");
+                decode.tree_kv_value = add_tensor(
+                    builder, DType::BF16,
+                    {layout.spec.attention_head_dim, layout.spec.attention_kv_heads, columns,
+                     layout.spec.full_attention_layers},
+                    "target tree attention value replay");
+            }
         }
         decode.append_positions =
             add_tensor(builder, DType::I32, {columns, batch}, "DFlash append positions");
@@ -342,6 +367,12 @@ DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeState
     verify_positions = layout.verify_positions.bind(backing);
     if (layout.candidate_ids) { candidate_ids = layout.candidate_ids->bind(backing); }
     if (layout.proposal_q) { proposal_q = layout.proposal_q->bind(backing); }
+    if (layout.lattice_scores) { lattice_scores = layout.lattice_scores->bind(backing); }
+    if (layout.tree_parents) { tree_parents = layout.tree_parents->bind(backing); }
+    if (layout.tree_depths) { tree_depths = layout.tree_depths->bind(backing); }
+    if (layout.tree_path_nodes) { tree_path_nodes = layout.tree_path_nodes->bind(backing); }
+    if (layout.tree_kv_key) { tree_kv_key = layout.tree_kv_key->bind(backing); }
+    if (layout.tree_kv_value) { tree_kv_value = layout.tree_kv_value->bind(backing); }
     target_rope_positions = ingress_tensor(offsetof(DFlashDecodeIngress, target_rope_positions),
                                            DType::I32, {width, batch});
     text_kv_table_rows =
@@ -361,6 +392,8 @@ DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeState
         egress_tensor(offsetof(DFlashDecodeEgress, licensed_counts), DType::I32, {batch});
     accepted_drafts =
         egress_tensor(offsetof(DFlashDecodeEgress, accepted_drafts), DType::I32, {batch});
+    // tree_path_nodes/tree_path_count are host-visible egress fields; the device replay selector
+    // itself lives in layout.tree_path_nodes so post-Frontend fold can use the committed prefix.
     proposal_ids               = layout.proposal_ids.bind(backing);
     proposal_positions         = layout.proposal_positions.bind(backing);
     append_positions           = layout.append_positions.bind(backing);
