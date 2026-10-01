@@ -41,6 +41,22 @@ struct PrefillChunkResult {
     runtime::ExecutionTiming timing;
 };
 
+struct TeacherTraceSink {
+    static constexpr bool enabled = true;
+    // Destination is pageable/pinned host memory owned by the caller, laid out
+    // [active_tokens, layers*hidden] with hidden as the fastest dimension inside each tap.
+    std::uint16_t* fused_bf16 = nullptr;
+    std::size_t fused_row_stride_elements = 0;
+    std::uint32_t hidden_size = 0;
+    std::span<const std::uint32_t> layers;
+    std::int32_t active_tokens = 0;
+    std::uint32_t captured_mask = 0;
+
+    void begin(const Tensor& value);
+    void capture_layer(int layer, const Tensor& value, cudaStream_t stream);
+    void capture_positions(const Tensor& source, cudaStream_t stream);
+};
+
 struct DFlashTreeFeatureSink {
     static constexpr bool enabled = true;
     Tensor* features = nullptr; // BF16 [layers*H, physical_width]
@@ -134,6 +150,10 @@ public:
                                                    std::uint32_t begin,
                                                    std::uint32_t nominal_length,
                                                    bool finalize_at_end, DFlashFeatureSink& sink);
+    [[nodiscard]] PrefillChunkResult prefill_chunk(std::span<const int> full_ids,
+                                                   std::uint32_t begin,
+                                                   std::uint32_t nominal_length,
+                                                   bool finalize_at_end, TeacherTraceSink& sink);
     [[nodiscard]] PrefillChunkResult
     prefill_chunk(const qwen3_5::PreparedPromptData& input, std::uint32_t begin,
                   std::uint32_t nominal_length, VisionPrefillSession& vision, bool finalize_at_end);
