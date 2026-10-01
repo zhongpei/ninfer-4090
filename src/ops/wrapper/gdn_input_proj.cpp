@@ -1297,4 +1297,35 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& query_key_value_z
                                   value, z, LinearPolicy::A16Only, workspace, stream);
 }
 
+void gdn_projected_tree_conv_record(const Tensor& projected, const Tensor& conv_weight,
+                                    const Tensor& conv_states,
+                                    const Tensor& initial_state_slots,
+                                    const Tensor& parents, Tensor& conv_record,
+                                    Tensor& query, Tensor& key, Tensor& value,
+                                    cudaStream_t stream) {
+    const std::int32_t channels = projected.ne[0];
+    const std::int32_t width = projected.ne[1];
+    const bool geometry48 =
+        channels == 10240 && query.ne[0] == 2048 && key.ne[0] == 2048 && value.ne[0] == 6144;
+    const bool geometry32 =
+        channels == 8192 && query.ne[0] == 2048 && key.ne[0] == 2048 && value.ne[0] == 4096;
+    if ((!geometry48 && !geometry32) || width < 1 || width > 16 || projected.ne[2] != 1 ||
+        projected.ne[3] != 1 || !projected.is_contiguous() || projected.dtype != DType::BF16 ||
+        conv_weight.dtype != DType::BF16 || conv_weight.ne[0] != channels ||
+        conv_weight.ne[1] != 4 || conv_states.dtype != DType::BF16 ||
+        conv_states.ne[0] != channels || conv_states.ne[1] != 3 ||
+        initial_state_slots.dtype != DType::I32 || initial_state_slots.ne[0] != 1 ||
+        parents.dtype != DType::I32 || parents.ne[0] != width ||
+        conv_record.dtype != DType::BF16 || conv_record.ne[0] != channels ||
+        conv_record.ne[1] != width || conv_record.ne[2] != 1 ||
+        query.dtype != DType::BF16 || query.ne[1] != width || query.ne[2] != 1 ||
+        key.dtype != DType::BF16 || key.ne[1] != width || key.ne[2] != 1 ||
+        value.dtype != DType::BF16 || value.ne[1] != width || value.ne[2] != 1) {
+        throw std::invalid_argument("gdn_projected_tree_conv_record: invalid tree geometry");
+    }
+    detail::gdn_projected_tree_conv_record_launch(
+        projected, conv_weight, conv_states, initial_state_slots, parents, conv_record,
+        query, key, value, stream);
+}
+
 } // namespace ninfer::ops
