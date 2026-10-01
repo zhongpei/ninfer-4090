@@ -211,6 +211,8 @@ void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layou
                     add_tensor(builder, DType::I32, {columns}, "target tree depths");
                 decode.tree_path_nodes =
                     add_tensor(builder, DType::I32, {columns}, "accepted target tree path");
+                decode.tree_lookup_tokens =
+                    add_tensor(builder, DType::I32, {columns - 1}, "lookup tree merge tokens");
                 if (layout.spec.attention_head_dim <= 0 || layout.spec.attention_kv_heads <= 0 ||
                     layout.spec.full_attention_layers <= 0) {
                     throw std::invalid_argument("tree verify requires target attention geometry");
@@ -371,6 +373,9 @@ DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeState
     if (layout.tree_parents) { tree_parents = layout.tree_parents->bind(backing); }
     if (layout.tree_depths) { tree_depths = layout.tree_depths->bind(backing); }
     if (layout.tree_path_nodes) { tree_path_nodes = layout.tree_path_nodes->bind(backing); }
+    if (layout.tree_lookup_tokens) {
+        tree_lookup_tokens = layout.tree_lookup_tokens->bind(backing);
+    }
     if (layout.tree_kv_key) { tree_kv_key = layout.tree_kv_key->bind(backing); }
     if (layout.tree_kv_value) { tree_kv_value = layout.tree_kv_value->bind(backing); }
     target_rope_positions = ingress_tensor(offsetof(DFlashDecodeIngress, target_rope_positions),
