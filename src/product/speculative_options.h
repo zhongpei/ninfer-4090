@@ -17,6 +17,16 @@ namespace ninfer::product {
     throw std::invalid_argument("invalid speculative backend: " + std::string(value));
 }
 
+[[nodiscard]] inline const char* speculative_tree_mode_name(SpeculativeTreeMode mode) noexcept {
+    switch (mode) {
+    case SpeculativeTreeMode::Off:
+        return "off";
+    case SpeculativeTreeMode::Lattice:
+        return "lattice";
+    }
+    return "unknown";
+}
+
 [[nodiscard]] inline SpeculativeTreeMode parse_speculative_tree_mode(std::string_view value) {
     if (value == "off") { return SpeculativeTreeMode::Off; }
     if (value == "lattice") { return SpeculativeTreeMode::Lattice; }
