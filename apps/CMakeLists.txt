@@ -18,3 +18,8 @@ add_executable(ninfer-perplexity
 ninfer_internal_includes(ninfer-perplexity)
 target_link_libraries(ninfer-perplexity PRIVATE
   ninfer_engine ninfer_product_logging ninfer::json)
+
+
+add_executable(ninfer-teacher teacher/main.cpp)
+ninfer_internal_includes(ninfer-teacher)
+target_link_libraries(ninfer-teacher PRIVATE ninfer_engine ninfer::json)
