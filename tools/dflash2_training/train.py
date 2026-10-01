@@ -23,6 +23,7 @@ import random
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -53,18 +54,58 @@ class Sample:
         return int(self.ids.numel())
 
 
+def _native_blob(path: str, manifest: dict, meta: dict) -> dict:
+    rows = int(meta["rows"])
+    hidden = int(manifest["hidden_size"])
+    taps = len(manifest["target_layer_ids"])
+    topk = int(manifest["top_k"])
+    stem = meta["stem"]
+
+    def read(suffix: str, dtype, count: int):
+        filename = os.path.join(path, stem + suffix)
+        values = np.fromfile(filename, dtype=dtype)
+        if values.size != count:
+            raise ValueError(
+                f"{filename}: expected {count} elements, found {values.size}")
+        return values.copy()
+
+    ids = torch.from_numpy(read(".ids.i32", "<i4", rows)).long()
+    bits = torch.from_numpy(
+        read(".fused.bf16", "<u2", rows * taps * hidden)).to(torch.int32)
+    # Expand BF16 bits into the high 16 bits of FP32, reinterpret, then return BF16.
+    fused = (bits << 16).view(torch.float32).to(torch.bfloat16)
+    fused = fused.view(rows, taps * hidden)
+    label = torch.from_numpy(read(".argmax.i32", "<i4", rows)).long()
+    top_ids = torch.from_numpy(
+        read(".top_ids.i32", "<i4", rows * topk)).long().view(rows, topk)
+    top_lp = torch.from_numpy(
+        read(".top_lp.f32", "<f4", rows * topk)).float().view(rows, topk)
+    return {
+        "ids": ids,
+        "fused": fused,
+        "label": label,
+        "top_ids": top_ids,
+        "top_lp": top_lp,
+    }
+
+
 def load_data(path: str, keep_on: str, device: str, limit: int = 0) -> list[Sample]:
     with open(os.path.join(path, "manifest.json"), encoding="utf-8") as f:
         manifest = json.load(f)
     metas = manifest["sequences"]
     if limit:
         metas = metas[:limit]
+    native = manifest.get("format") == "ninfer-native-teacher-v1"
     out = []
     for meta in metas:
-        filename = os.path.join(path, meta["name"] + ".pt")
-        if not os.path.exists(filename):
-            continue
-        out.append(Sample(meta, torch.load(filename, map_location="cpu"), keep_on, device))
+        if native:
+            blob = _native_blob(path, manifest, meta)
+        else:
+            filename = os.path.join(path, meta["name"] + ".pt")
+            if not os.path.exists(filename):
+                continue
+            blob = torch.load(filename, map_location="cpu")
+        out.append(Sample(meta, blob, keep_on, device))
     return out
 
 
