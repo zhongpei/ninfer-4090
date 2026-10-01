@@ -756,7 +756,9 @@ void dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size, std
 void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
                         DFlashEnvelopes envelopes,
                         ops::CausalAttentionExecutionEnvelope target_envelope,
-                        SpeculativeTreeOptions options) {
+                        SpeculativeTreeOptions options,
+                        std::span<const TokenId> lookup_tokens,
+                        float lookup_confidence) {
     if (k == 0 || k > kDFlashDecodeMaximumDrafts || options.mode != SpeculativeTreeMode::Lattice ||
         options.nodes == 0 || options.nodes > k || options.spine == 0 ||
         options.spine > options.nodes || !state.execution.parameters.model.config().draft ||
@@ -775,7 +777,7 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
     const std::int32_t live_width = static_cast<std::int32_t>(options.nodes) + 1;
     if (!frame.lattice_scores.data || !frame.tree_parents.data || !frame.tree_depths.data ||
         !frame.tree_path_nodes.data || !frame.tree_path_count.data ||
-        !frame.tree_kv_key.data || !frame.tree_kv_value.data) {
+        !frame.tree_lookup_tokens.data || !frame.tree_kv_key.data || !frame.tree_kv_value.data) {
         throw std::logic_error("DFlash2 tree decode buffers are not planned");
     }
 
@@ -818,8 +820,18 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
     Tensor rope_start       = target_rope.slice(0, 0, 1);
     Tensor parents          = frame.tree_parents.slice(0, 0, physical_width);
     Tensor depths           = frame.tree_depths.slice(0, 0, physical_width);
+    Tensor merge_tokens     = frame.tree_lookup_tokens.slice(0, 0, static_cast<std::int32_t>(k));
+    if (lookup_tokens.size() > static_cast<std::size_t>(k)) {
+        throw std::invalid_argument("DFlash2 merged lookup spine exceeds the drafter width");
+    }
+    if (!lookup_tokens.empty()) {
+        CUDA_CHECK(cudaMemcpyAsync(merge_tokens.data, lookup_tokens.data(),
+                                   lookup_tokens.size() * sizeof(TokenId),
+                                   cudaMemcpyHostToDevice, stream));
+    }
     ops::speculative_tree_build_plan(
-        candidates, lattice, anchors, frontiers, rope_start,
+        candidates, lattice, anchors, frontiers, rope_start, merge_tokens,
+        static_cast<std::int32_t>(lookup_tokens.size()), lookup_confidence,
         static_cast<std::int32_t>(options.nodes), static_cast<std::int32_t>(options.spine),
         verify_ids, parents, depths, target_positions, target_rope, stream);
 
