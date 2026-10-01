@@ -144,6 +144,18 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
     const auto& router = options.routing;
     const auto& tree = options.tree;
     const auto& lookup = options.lookup;
+    const auto& teacher = options.teacher;
+    if (!teacher.dump_path.empty()) {
+        if (options.backend != SpeculativeBackend::DFlash2) {
+            throw std::invalid_argument(
+                "--dflash-teacher-dump requires --spec dflash2");
+        }
+        if (tree.mode != SpeculativeTreeMode::Off ||
+            lookup.dflash_mode != LookupDFlashMode::Off) {
+            throw std::invalid_argument(
+                "--dflash-teacher-dump currently requires chain DFlash2 without lookup takeover/tree");
+        }
+    }
     if (tree.nodes == 0 || tree.nodes > 15 || tree.spine == 0 || tree.spine > 15) {
         throw std::invalid_argument("invalid speculative tree node/spine policy");
     }
