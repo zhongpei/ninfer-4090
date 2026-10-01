@@ -20,6 +20,7 @@ struct Options {
     std::filesystem::path messages_path;
     // Offline exact-target DFlash teacher capture. Empty keeps the normal generation path.
     std::filesystem::path teacher_out;
+    std::filesystem::path teacher_jsonl;
 
     std::uint32_t max_new        = 128;
     std::uint32_t max_context    = 2048;
