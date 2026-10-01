@@ -954,10 +954,11 @@ __global__ void speculative_tree_build_plan_kernel(
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     constexpr int MaxRows = 16;
     constexpr int Candidates = 16;
+    constexpr int MaxFrontier = 256;
     const int physical_width = steps + 1;
     const int anchor = anchors[0];
-    const int frontier = frontiers[0];
-    const int rope_delta = rope_starts[0] - frontier;
+    const int frontier_position = frontiers[0];
+    const int rope_delta = rope_starts[0] - frontier_position;
 
     int node_token[MaxRows];
     int node_parent[MaxRows];
@@ -966,6 +967,12 @@ __global__ void speculative_tree_build_plan_kernel(
     int node_rank[MaxRows];
     float node_logp[MaxRows];
     float node_score[MaxRows];
+
+    float frontier_lp[MaxFrontier];
+    int frontier_parent[MaxFrontier];
+    int frontier_step[MaxFrontier];
+    int frontier_rank[MaxFrontier];
+    int frontier_count = 0;
 
     node_token[0] = anchor;
     node_parent[0] = -1;
@@ -976,8 +983,18 @@ __global__ void speculative_tree_build_plan_kernel(
     node_score[0] = 1.0F;
     int node_count = 1;
 
+    const auto push_frontier = [&](float lp, int parent, int step, int rank) {
+        if (frontier_count >= MaxFrontier) return;
+        frontier_lp[frontier_count] = lp;
+        frontier_parent[frontier_count] = parent;
+        frontier_step[frontier_count] = step;
+        frontier_rank[frontier_count] = rank;
+        ++frontier_count;
+    };
+
     int parent = 0;
     int predecessor = 0;
+    float path_lp = 0.0F;
     const int spine_count = min(min(spine, node_budget), steps);
     for (int step = 0; step < spine_count; ++step) {
         const float* row = lattice + (static_cast<std::int64_t>(step) * Candidates + predecessor) *
@@ -986,60 +1003,60 @@ __global__ void speculative_tree_build_plan_kernel(
         for (int cand = 1; cand < Candidates; ++cand) {
             if (row[cand] > row[selected]) selected = cand;
         }
-        const float lp = node_logp[parent] +
-                         speculative_tree_edge_logp(lattice, step, predecessor, selected);
+        const float base_lp = path_lp;
+        path_lp += speculative_tree_edge_logp(lattice, step, predecessor, selected);
+
+        const int here = parent;
         const int node = node_count++;
         node_token[node] = candidate_ids[step * Candidates + selected];
-        node_parent[node] = parent;
-        node_depth[node] = node_depth[parent] + 1;
+        node_parent[node] = here;
+        node_depth[node] = node_depth[here] + 1;
         node_step[node] = step;
         node_rank[node] = selected;
-        node_logp[node] = lp;
-        node_score[node] = expf(lp);
+        node_logp[node] = path_lp;
+        node_score[node] = expf(path_lp);
         parent = node;
+
+        for (int alt = 0; alt < Candidates; ++alt) {
+            if (alt == selected) continue;
+            push_frontier(base_lp + speculative_tree_edge_logp(lattice, step, predecessor, alt),
+                          here, step, alt);
+        }
         predecessor = selected;
     }
 
-    // Best-first expansion. With <=15 nodes a serial frontier scan is cheaper than moving a
-    // priority queue through global memory and keeps the whole policy inside one tiny kernel.
-    while (node_count < node_budget + 1) {
-        float best_lp = -CUDART_INF_F;
-        int best_parent = -1;
-        int best_step = -1;
-        int best_rank = -1;
-        for (int p = 0; p < node_count; ++p) {
-            const int next_step = node_step[p] + 1;
-            if (next_step < 0 || next_step >= steps) continue;
-            const int pred_rank = p == 0 ? 0 : node_rank[p];
-            for (int cand = 0; cand < Candidates; ++cand) {
-                bool exists = false;
-                for (int n = 1; n < node_count; ++n) {
-                    if (node_parent[n] == p && node_step[n] == next_step &&
-                        node_rank[n] == cand) {
-                        exists = true;
-                        break;
-                    }
-                }
-                if (exists) continue;
-                const float lp = node_logp[p] +
-                                 speculative_tree_edge_logp(lattice, next_step, pred_rank, cand);
-                if (lp > best_lp) {
-                    best_lp = lp;
-                    best_parent = p;
-                    best_step = next_step;
-                    best_rank = cand;
-                }
+    while (frontier_count > 0 && node_count < node_budget + 1) {
+        int best = 0;
+        for (int i = 1; i < frontier_count; ++i) {
+            if (frontier_lp[i] > frontier_lp[best]) best = i;
+        }
+        const float lp = frontier_lp[best];
+        const int item_parent = frontier_parent[best];
+        const int item_step = frontier_step[best];
+        const int item_rank = frontier_rank[best];
+        --frontier_count;
+        frontier_lp[best] = frontier_lp[frontier_count];
+        frontier_parent[best] = frontier_parent[frontier_count];
+        frontier_step[best] = frontier_step[frontier_count];
+        frontier_rank[best] = frontier_rank[frontier_count];
+
+        const int node = node_count++;
+        node_token[node] = candidate_ids[item_step * Candidates + item_rank];
+        node_parent[node] = item_parent;
+        node_depth[node] = node_depth[item_parent] + 1;
+        node_step[node] = item_step;
+        node_rank[node] = item_rank;
+        node_logp[node] = lp;
+        node_score[node] = expf(lp);
+
+        const int next_step = item_step + 1;
+        if (next_step < steps) {
+            for (int next = 0; next < Candidates; ++next) {
+                push_frontier(
+                    lp + speculative_tree_edge_logp(lattice, next_step, item_rank, next),
+                    node, next_step, next);
             }
         }
-        if (best_parent < 0) break;
-        const int node = node_count++;
-        node_token[node] = candidate_ids[best_step * Candidates + best_rank];
-        node_parent[node] = best_parent;
-        node_depth[node] = node_depth[best_parent] + 1;
-        node_step[node] = best_step;
-        node_rank[node] = best_rank;
-        node_logp[node] = best_lp;
-        node_score[node] = expf(best_lp);
     }
 
     // DFS preorder is required by the depth-position cache reuse used by the target verifier.
@@ -1075,8 +1092,8 @@ __global__ void speculative_tree_build_plan_kernel(
         tree_tokens[i] = anchor;
         parents[i] = -1;
         depths[i] = 0;
-        cache_positions[i] = frontier;
-        rope_positions[i] = frontier + rope_delta;
+        cache_positions[i] = frontier_position;
+        rope_positions[i] = frontier_position + rope_delta;
     }
     for (int i = 0; i < out_count; ++i) {
         const int old = order[i];
@@ -1092,7 +1109,7 @@ __global__ void speculative_tree_build_plan_kernel(
         tree_tokens[i] = node_token[old];
         parents[i] = remapped_parent;
         depths[i] = node_depth[old];
-        cache_positions[i] = frontier + node_depth[old];
+        cache_positions[i] = frontier_position + node_depth[old];
         rope_positions[i] = cache_positions[i] + rope_delta;
     }
 }
