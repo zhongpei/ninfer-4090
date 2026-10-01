@@ -86,8 +86,8 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
             const auto count = static_cast<std::int32_t>(result.processed_tokens);
             state.dflash_teacher_consumer(
                 ids.subspan(begin, result.processed_tokens), begin,
-                dflash_state(state).prefill_features.slice(1, 0, count),
-                dflash_state(state).prefill_positions.slice(0, 0, count),
+                state.dflash->prefill_features.slice(1, 0, count),
+                state.dflash->prefill_positions.slice(0, 0, count),
                 state.execution.prefill_hidden.slice(1, 0, count));
         }
         return result;
@@ -118,8 +118,8 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
             const auto count = static_cast<std::int32_t>(result.processed_tokens);
             state.dflash_teacher_consumer(
                 std::span<const TokenId>(prompt.token_ids).subspan(begin, result.processed_tokens),
-                begin, dflash_state(state).prefill_features.slice(1, 0, count),
-                dflash_state(state).prefill_positions.slice(0, 0, count),
+                begin, state.dflash->prefill_features.slice(1, 0, count),
+                state.dflash->prefill_positions.slice(0, 0, count),
                 state.execution.prefill_hidden.slice(1, 0, count));
         }
         return result;
