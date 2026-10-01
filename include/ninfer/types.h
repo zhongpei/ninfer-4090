@@ -276,6 +276,14 @@ enum class VisionResidency : std::uint8_t {
     Overlay,  // tower host-pinned; each image borrows device memory inside a bounded window
 };
 
+struct DFlashTeacherOptions {
+    // Empty disables native teacher recording. Enabled recording emits one .ndft file per logical
+    // prefill sequence. The data comes from the exact loaded .ninfer target and its prepared head.
+    std::filesystem::path output_directory;
+
+    [[nodiscard]] bool enabled() const noexcept { return !output_directory.empty(); }
+};
+
 struct EngineOptions {
     std::filesystem::path artifact_path;
     std::filesystem::path chat_template_path;
@@ -294,6 +302,7 @@ struct EngineOptions {
     std::uint32_t prefill_chunk        = 1024;
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
+    DFlashTeacherOptions dflash_teacher;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;
     // Zero selects a bounded worker count from the detected host concurrency.
