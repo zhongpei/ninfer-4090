@@ -54,6 +54,7 @@ other references own narrower contracts:
 | [DFlash and DFlash2](maintainer/dflash.md) | conditioning, masked draft computation, proposal distributions and backend state |
 | [DFlash2 training](maintainer/dflash2-training.md) | teacher taps, offline CE+KL distillation, b8/b16 export and speculative-tree calibration |
 | [Runtime DFlash2 tree verification](maintainer/runtime-tree-verification.md) | lattice tree proposal, DFS KV reuse, ancestor-aware ReplaySSM and accepted-path commit |
+| [Tandem 24GB integration status](maintainer/tandem-24g-integration.md) | selected single-b16 profile, completed features, deliberate exclusions and closure workflow |
 | [Adaptive speculative routing](maintainer/speculative-routing.md) | fixed-vs-Stair A/B policy, verify-cost calibration and per-request online learning |
 | [Multi-source lookup drafting](maintainer/lookup-drafting.md) | recent/vote suffix memory, persistent/corpus sources, DFlash replace/head-skip and deep copy |
 | [Resource scheduling and context cache](maintainer/resource-scheduling-and-context-cache.md) | candidate selection, retention, materialization and Device/Host checkpoint policy |
