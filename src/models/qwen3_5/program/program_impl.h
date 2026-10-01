@@ -409,6 +409,7 @@ struct RequestControl {
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
     StairRouterState stair_router;
+    TreeStairRouterState tree_stair_router;
     struct LookupRoundState {
         std::uint32_t full_accept_run = 0;
     } lookup_round;
