@@ -12,73 +12,6 @@ namespace ninfer::models::qwen3_5::detail {
 
 inline constexpr std::size_t kStairTrackedDraftPositions = 15;
 
-struct TreeStairRouterState {
-    std::uint64_t rounds = 0;
-    std::array<std::uint64_t, kSpeculativeStairLevels> attempts{};
-    std::array<std::uint64_t, kSpeculativeStairLevels> accepted_sum{};
-    std::uint32_t last_extent = 0;
-
-    void observe(std::uint32_t extent, std::uint32_t accepted_count,
-                 const SpeculativeRoutingOptions& options) noexcept {
-        ++rounds;
-        for (std::size_t i = 0; i < options.widths.size(); ++i) {
-            if (options.widths[i] == extent) {
-                ++attempts[i];
-                accepted_sum[i] += std::min(accepted_count, extent);
-                last_extent = extent;
-                return;
-            }
-        }
-    }
-};
-
-[[nodiscard]] inline std::uint32_t
-choose_tree_stair_extent(const SpeculativeRoutingOptions& options,
-                         const TreeStairRouterState& state,
-                         std::uint32_t maximum_extent) noexcept {
-    if (options.mode != SpeculativeRoutingMode::Stair || maximum_extent == 0) {
-        return maximum_extent;
-    }
-    std::size_t last_eligible = options.widths.size();
-    for (std::size_t i = 0; i < options.widths.size(); ++i) {
-        if (options.widths[i] <= maximum_extent) last_eligible = i;
-    }
-    if (last_eligible == options.widths.size()) return maximum_extent;
-    if (state.rounds < options.warmup_rounds ||
-        (options.probe_period != 0 && state.rounds != 0 &&
-         state.rounds % options.probe_period == 0)) {
-        return options.widths[last_eligible];
-    }
-
-    double best_score = -std::numeric_limits<double>::infinity();
-    double previous_score = -std::numeric_limits<double>::infinity();
-    std::size_t best = last_eligible;
-    std::size_t previous = options.widths.size();
-    for (std::size_t i = 0; i <= last_eligible; ++i) {
-        const double expected =
-            state.attempts[i] == 0
-                ? 1.0 + static_cast<double>(options.prior_acceptance) * options.widths[i]
-                : 1.0 + static_cast<double>(state.accepted_sum[i]) /
-                            static_cast<double>(state.attempts[i]);
-        const double cost = static_cast<double>(options.draft_cost) +
-                            static_cast<double>(options.verify_costs[i]);
-        const double score = expected / cost;
-        if (score > best_score) {
-            best_score = score;
-            best = i;
-        }
-        if (options.widths[i] == state.last_extent) {
-            previous = i;
-            previous_score = score;
-        }
-    }
-    if (previous != options.widths.size() &&
-        previous_score * (1.0 + static_cast<double>(options.switch_margin)) >= best_score) {
-        return options.widths[previous];
-    }
-    return options.widths[best];
-}
-
 struct StairRouterState {
     std::uint64_t rounds = 0;
     std::array<std::uint64_t, kStairTrackedDraftPositions> attempted{};
@@ -90,11 +23,11 @@ struct StairRouterState {
                  const SpeculativeRoutingOptions& options) noexcept {
         extent = std::min<std::uint32_t>(extent, kStairTrackedDraftPositions);
         accepted_count = std::min(accepted_count, extent);
-        if (extent == 0) { return; }
+        if (extent == 0) return;
         ++rounds;
         for (std::uint32_t i = 0; i < extent; ++i) {
             ++attempted[i];
-            if (i < accepted_count) { ++accepted[i]; }
+            if (i < accepted_count) ++accepted[i];
         }
         for (std::size_t i = 0; i < options.widths.size(); ++i) {
             if (options.widths[i] == extent) {
@@ -111,24 +44,43 @@ struct TreeStairRouterState {
     std::array<std::uint64_t, kSpeculativeStairLevels> observed{};
     std::array<std::uint64_t, kSpeculativeStairLevels> committed_tokens{};
     std::array<std::uint64_t, kSpeculativeStairLevels> selected{};
-    std::uint32_t last_nodes = 0;
+    std::uint32_t last_extent = 0;
 
-    void observe(std::uint32_t nodes, std::uint32_t accepted_drafts,
+    void observe(std::uint32_t extent, std::uint32_t accepted_drafts,
                  const SpeculativeRoutingOptions& options) noexcept {
-        if (nodes == 0) return;
+        if (extent == 0) return;
         ++rounds;
         for (std::size_t i = 0; i < options.widths.size(); ++i) {
-            if (options.widths[i] == nodes) {
+            if (options.widths[i] == extent) {
                 ++observed[i];
                 committed_tokens[i] +=
-                    static_cast<std::uint64_t>(std::min(accepted_drafts, nodes)) + 1ULL;
+                    static_cast<std::uint64_t>(std::min(accepted_drafts, extent)) + 1ULL;
                 ++selected[i];
                 break;
             }
         }
-        last_nodes = nodes;
+        last_extent = extent;
     }
 };
+
+[[nodiscard]] inline double stair_expected_commits(const SpeculativeRoutingOptions& options,
+                                                   const StairRouterState& state,
+                                                   std::uint32_t extent) noexcept {
+    double expected = 1.0;
+    const double prior_weight = static_cast<double>(options.prior_weight);
+    const double prior_hits = static_cast<double>(options.prior_acceptance) * prior_weight;
+    for (std::uint32_t i = 0;
+         i < extent && i < static_cast<std::uint32_t>(kStairTrackedDraftPositions); ++i) {
+        const double attempts = static_cast<double>(state.attempted[i]);
+        const double accepts = static_cast<double>(state.accepted[i]);
+        const double denom = attempts + prior_weight;
+        const double survival =
+            denom > 0.0 ? (accepts + prior_hits) / denom
+                        : static_cast<double>(options.prior_acceptance);
+        expected += std::clamp(survival, 0.0, 1.0);
+    }
+    return expected;
+}
 
 [[nodiscard]] inline double tree_stair_expected_commits(
     const SpeculativeRoutingOptions& options, const TreeStairRouterState& state,
@@ -144,69 +96,6 @@ struct TreeStairRouterState {
                        : prior_expected;
 }
 
-[[nodiscard]] inline std::uint32_t choose_tree_stair_nodes(
-    const SpeculativeRoutingOptions& options, const TreeStairRouterState& state,
-    std::uint32_t maximum_nodes) noexcept {
-    if (maximum_nodes == 0) return 0;
-    if (options.mode != SpeculativeRoutingMode::Stair) return maximum_nodes;
-
-    std::size_t last_eligible = options.widths.size();
-    for (std::size_t i = 0; i < options.widths.size(); ++i) {
-        if (options.widths[i] <= maximum_nodes) last_eligible = i;
-    }
-    if (last_eligible == options.widths.size()) return maximum_nodes;
-
-    if (state.rounds < options.warmup_rounds ||
-        (options.probe_period != 0 && state.rounds != 0 &&
-         state.rounds % options.probe_period == 0)) {
-        return options.widths[last_eligible];
-    }
-
-    double best_score = -std::numeric_limits<double>::infinity();
-    double previous_score = -std::numeric_limits<double>::infinity();
-    std::size_t best = last_eligible;
-    std::size_t previous = options.widths.size();
-    for (std::size_t i = 0; i <= last_eligible; ++i) {
-        const double cost = static_cast<double>(options.draft_cost) +
-                            static_cast<double>(options.verify_costs[i]);
-        const double score = tree_stair_expected_commits(options, state, i) / cost;
-        if (score > best_score) {
-            best_score = score;
-            best = i;
-        }
-        if (options.widths[i] == state.last_nodes) {
-            previous = i;
-            previous_score = score;
-        }
-    }
-    if (previous != options.widths.size() &&
-        previous_score * (1.0 + static_cast<double>(options.switch_margin)) >= best_score) {
-        return options.widths[previous];
-    }
-    return options.widths[best];
-}
-
-[[nodiscard]] inline double stair_expected_commits(const SpeculativeRoutingOptions& options,
-                                                   const StairRouterState& state,
-                                                   std::uint32_t extent) noexcept {
-    // One target correction/bonus token is produced even when no draft is accepted.
-    double expected = 1.0;
-    const double prior_weight = static_cast<double>(options.prior_weight);
-    const double prior_hits =
-        static_cast<double>(options.prior_acceptance) * prior_weight;
-    for (std::uint32_t i = 0;
-         i < extent && i < static_cast<std::uint32_t>(kStairTrackedDraftPositions); ++i) {
-        const double attempts = static_cast<double>(state.attempted[i]);
-        const double accepts = static_cast<double>(state.accepted[i]);
-        const double denom = attempts + prior_weight;
-        const double survival =
-            denom > 0.0 ? (accepts + prior_hits) / denom
-                        : static_cast<double>(options.prior_acceptance);
-        expected += std::clamp(survival, 0.0, 1.0);
-    }
-    return expected;
-}
-
 [[nodiscard]] inline std::uint32_t
 choose_stair_extent(const SpeculativeRoutingOptions& options, const StairRouterState& state,
                     std::uint32_t maximum_extent) noexcept {
@@ -216,13 +105,9 @@ choose_stair_extent(const SpeculativeRoutingOptions& options, const StairRouterS
 
     std::size_t last_eligible = options.widths.size();
     for (std::size_t i = 0; i < options.widths.size(); ++i) {
-        if (options.widths[i] <= maximum_extent) { last_eligible = i; }
+        if (options.widths[i] <= maximum_extent) last_eligible = i;
     }
-    if (last_eligible == options.widths.size()) {
-        // Near an output/context tail no configured rung fits. Verifying the remaining suffix is
-        // cheaper than throwing the already-paid wide proposal away.
-        return maximum_extent;
-    }
+    if (last_eligible == options.widths.size()) return maximum_extent;
 
     if (state.rounds < options.warmup_rounds ||
         (options.probe_period != 0 && state.rounds != 0 &&
@@ -250,8 +135,50 @@ choose_stair_extent(const SpeculativeRoutingOptions& options, const StairRouterS
         }
     }
 
-    // Avoid oscillating on noise. A previous rung stays selected when it is within the configured
-    // fractional margin of the current best.
+    if (previous != options.widths.size() &&
+        previous_score * (1.0 + static_cast<double>(options.switch_margin)) >= best_score) {
+        return options.widths[previous];
+    }
+    return options.widths[best];
+}
+
+[[nodiscard]] inline std::uint32_t choose_tree_stair_extent(
+    const SpeculativeRoutingOptions& options, const TreeStairRouterState& state,
+    std::uint32_t maximum_extent) noexcept {
+    if (maximum_extent == 0) return 0;
+    if (options.mode != SpeculativeRoutingMode::Stair) return maximum_extent;
+
+    std::size_t last_eligible = options.widths.size();
+    for (std::size_t i = 0; i < options.widths.size(); ++i) {
+        if (options.widths[i] <= maximum_extent) last_eligible = i;
+    }
+    if (last_eligible == options.widths.size()) return maximum_extent;
+
+    if (state.rounds < options.warmup_rounds ||
+        (options.probe_period != 0 && state.rounds != 0 &&
+         state.rounds % options.probe_period == 0)) {
+        return options.widths[last_eligible];
+    }
+
+    double best_score = -std::numeric_limits<double>::infinity();
+    double previous_score = -std::numeric_limits<double>::infinity();
+    std::size_t best = last_eligible;
+    std::size_t previous = options.widths.size();
+
+    for (std::size_t i = 0; i <= last_eligible; ++i) {
+        const double cost = static_cast<double>(options.draft_cost) +
+                            static_cast<double>(options.verify_costs[i]);
+        const double score = tree_stair_expected_commits(options, state, i) / cost;
+        if (score > best_score) {
+            best_score = score;
+            best = i;
+        }
+        if (options.widths[i] == state.last_extent) {
+            previous = i;
+            previous_score = score;
+        }
+    }
+
     if (previous != options.widths.size() &&
         previous_score * (1.0 + static_cast<double>(options.switch_margin)) >= best_score) {
         return options.widths[previous];
