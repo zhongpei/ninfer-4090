@@ -110,7 +110,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       rope_scaling_factor(plan.rope_scaling_factor),
       rope_scaling_original_context(plan.rope_scaling_original_context),
       vision_enabled(plan.features.vision), use_cuda_graph(plan.use_cuda_graph),
-      causal_scoring(plan.causal_scoring),
+      causal_scoring(plan.causal_scoring), teacher_trace_enabled(plan.teacher_trace),
       kv_payload_bytes(plan.persistent.kv_payload_bytes),
       graph_allowance_bytes(plan.graph_allowance_bytes), workspace_plan(plan.workspace),
       kv_arena(make_kv_arena(device_in, parameters_in, plan)),
@@ -631,8 +631,10 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
 
 TeacherTrace ProgramImpl::teacher_trace(PreparedPromptData&& prompt,
                                              const TeacherTraceOptions& options) {
-    if (!causal_scoring || !score_hidden || workspace_plan.causal_score == 0) {
-        throw std::logic_error("Program was not constructed for causal scoring/teacher trace");
+    if (!causal_scoring || !teacher_trace_enabled || !score_hidden ||
+        workspace_plan.causal_score == 0) {
+        throw std::logic_error(
+            "Program was not constructed with native teacher trace enabled");
     }
     if (speculative_backend != SpeculativeBackend::None || vision_enabled || use_cuda_graph ||
         context_cache.enabled) {
