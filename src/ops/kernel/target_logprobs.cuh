@@ -66,4 +66,40 @@ __launch_bounds__(BlockSize) __global__
     }
 }
 
+template <int BlockSize>
+__launch_bounds__(BlockSize) __global__
+void target_candidate_logprobs_kernel(const __nv_bfloat16* logits,
+                                      const std::int32_t* candidate_ids,
+                                      float* output, std::int32_t candidates,
+                                      std::int32_t valid_rows,
+                                      std::int32_t physical_rows) {
+    const std::int32_t column = static_cast<std::int32_t>(blockIdx.x);
+    const std::int64_t base = static_cast<std::int64_t>(column) * physical_rows;
+
+    float local_max = -CUDART_INF_F;
+    for (std::int32_t row = static_cast<std::int32_t>(threadIdx.x); row < valid_rows;
+         row += BlockSize) {
+        local_max = fmaxf(local_max, __bfloat162float(logits[base + row]));
+    }
+    const float maximum = target_logprobs_block_max<BlockSize>(local_max);
+
+    float local_sum = 0.0F;
+    for (std::int32_t row = static_cast<std::int32_t>(threadIdx.x); row < valid_rows;
+         row += BlockSize) {
+        local_sum += expf(__bfloat162float(logits[base + row]) - maximum);
+    }
+    __shared__ float warp_sums[BlockSize / kWarpSize];
+    const float sum = block_reduce_sum<BlockSize>(local_sum, warp_sums);
+    if (threadIdx.x == 0) {
+        const float log_z = maximum + logf(sum);
+        const std::int64_t candidate_base =
+            static_cast<std::int64_t>(column) * candidates;
+        for (std::int32_t rank = 0; rank < candidates; ++rank) {
+            const std::int32_t token = candidate_ids[candidate_base + rank];
+            output[candidate_base + rank] =
+                __bfloat162float(logits[base + token]) - log_z;
+        }
+    }
+}
+
 } // namespace ninfer::ops
