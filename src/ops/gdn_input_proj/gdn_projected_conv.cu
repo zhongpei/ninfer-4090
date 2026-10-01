@@ -133,21 +133,26 @@ __global__ void gdn_projected_tree_conv_kernel(
     const float w2 = __bfloat162float(conv_weight[2LL * Channels + row]);
     const float w3 = __bfloat162float(conv_weight[3LL * Channels + row]);
 
-    const auto projected_at = [&](std::int32_t node) {
-        return __bfloat162float(projected[static_cast<std::int64_t>(node) * Channels + row]);
-    };
-
     for (std::int32_t node = 0; node < width; ++node) {
         const std::int32_t p1 = parents[node];
         const std::int32_t p2 = p1 >= 0 ? parents[p1] : -1;
         const std::int32_t p3 = p2 >= 0 ? parents[p2] : -1;
 
         // The convolution history is tail_3(source_history || ancestors(current)).
-        const float newest = p1 >= 0 ? projected_at(p1) : s2;
-        const float middle = p2 >= 0 ? projected_at(p2) : (p1 >= 0 ? s2 : s1);
+        const float newest =
+            p1 >= 0 ? __bfloat162float(
+                          projected[static_cast<std::int64_t>(p1) * Channels + row])
+                    : s2;
+        const float middle =
+            p2 >= 0 ? __bfloat162float(
+                          projected[static_cast<std::int64_t>(p2) * Channels + row])
+                    : (p1 >= 0 ? s2 : s1);
         const float oldest =
-            p3 >= 0 ? projected_at(p3) : (p2 >= 0 ? s2 : (p1 >= 0 ? s1 : s0));
-        const float current = projected_at(node);
+            p3 >= 0 ? __bfloat162float(
+                          projected[static_cast<std::int64_t>(p3) * Channels + row])
+                    : (p2 >= 0 ? s2 : (p1 >= 0 ? s1 : s0));
+        const float current =
+            __bfloat162float(projected[static_cast<std::int64_t>(node) * Channels + row]);
 
         float conv = fmaf(w0, oldest, 0.0F);
         conv = fmaf(w1, middle, conv);
