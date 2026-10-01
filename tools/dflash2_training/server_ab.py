@@ -148,11 +148,9 @@ def main() -> None:
     ap.add_argument("--max-context", type=int, default=32768)
     args = ap.parse_args()
 
+    # select_arms recursively pulls every comparator dependency, so selecting tree15-stair also
+    # keeps tree15 -> dflash2-k15 -> baseline and every reported speedup has a real control.
     arms = select_arms(args.arms)
-    # select_arms pulls dependency baselines; preserve only requested + baseline-ish comparators.
-    requested = {x.strip() for x in args.arms.split(",") if x.strip()}
-    requested |= {a.compare_to for a in arms if a.name in requested}
-    arms = tuple(a for a in arms if a.name in requested)
     workloads = select_workloads(args.workloads)
     levels = [int(x) for x in args.concurrency.split(",") if x.strip()]
     if not levels or max(levels) > 8:
