@@ -82,4 +82,33 @@ void target_logprobs(const Tensor& logits, const Tensor& target_ids, std::int32_
     detail::target_logprobs_launch(logits, target_ids, valid_rows, output, stream);
 }
 
+void target_candidate_logprobs(const Tensor& logits, const Tensor& candidate_ids,
+                               std::int32_t valid_rows, Tensor& output,
+                               cudaStream_t stream) {
+    if (logits.dtype != DType::BF16 || candidate_ids.dtype != DType::I32 ||
+        output.dtype != DType::FP32) {
+        throw std::invalid_argument(
+            "target_candidate_logprobs: expected BF16 logits, I32 ids and FP32 output");
+    }
+    require_rank_two(logits, "candidate logits");
+    require_rank_two(candidate_ids, "candidate ids");
+    require_rank_two(output, "candidate output");
+    const std::int32_t candidates = candidate_ids.ne[0];
+    const std::int32_t columns = logits.ne[1];
+    if (candidates < 1 || candidates > 16 || candidate_ids.ne[1] != columns ||
+        output.ne[0] != candidates || output.ne[1] != columns ||
+        valid_rows <= 0 || valid_rows > logits.ne[0]) {
+        throw std::invalid_argument("target_candidate_logprobs: invalid shape/domain");
+    }
+    require_accessible(logits, alignof(std::uint16_t), "candidate logits");
+    require_accessible(candidate_ids, alignof(std::int32_t), "candidate ids");
+    require_accessible(output, alignof(float), "candidate output");
+    if (overlaps(output, logits) || overlaps(output, candidate_ids)) {
+        throw std::invalid_argument(
+            "target_candidate_logprobs: output must not overlap inputs");
+    }
+    detail::target_candidate_logprobs_launch(
+        logits, candidate_ids, valid_rows, output, stream);
+}
+
 } // namespace ninfer::ops
