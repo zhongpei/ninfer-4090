@@ -71,9 +71,10 @@ won unconditionally.
 
 ### Process history
 
-`--lookup-persistent-tokens N` retains at most N token ids across requests in the current
-server process. It does **not** replace the exact context cache and it is not model state. Restarting
-the process clears it.
+`--lookup-persistent-tokens N` retains at most N token ids across requests. By default this is
+process-local. Add `--lookup-history-path PATH` to load/save the bounded token snapshot across
+restarts. It does **not** replace the exact context cache and it is not model state; failure to save
+the snapshot only lowers future lookup hit rate.
 
 ### Static corpus
 
@@ -157,6 +158,7 @@ this cost on the target 4090 rather than assuming that head-skip is always profi
 | `--lookup-deep-after N` | 2 | consecutive full accepts before deep copy; 0 disables |
 | `--lookup-deep-drafts N` | 15 | deep copy policy maximum |
 | `--lookup-persistent-tokens N` | 0 | process-history token budget |
+| `--lookup-history-path PATH` | empty | optional bounded restart-persistent history snapshot |
 | `--lookup-corpus-prefix PATH` | empty | static corpus prefix |
 | `--lookup-corpus-weight F` | 0.50 | static-corpus vote weight |
 | `--lookup-corpus-samples N` | 64 | sampled matching suffixes |
