@@ -484,12 +484,18 @@ def main() -> None:
             speed = p["median_speedup"]
             verdict = ("better" if p["resolved_better"] else
                        "worse" if p["resolved_worse"] else "unresolved")
+            speed_text = "" if speed is None else f"{speed:.3f}x"
+            accept_text = (
+                "" if p["median_acceptance_pct"] is None
+                else f"{p['median_acceptance_pct']:.2f}"
+            )
+            tpr_text = (
+                "" if p["median_tok_per_round"] is None
+                else f"{p['median_tok_per_round']:.3f}"
+            )
             lines.append(
                 f"| {w} | {'PASS' if item['output']['passed'] else 'FAIL'} | "
-                f"{'' if speed is None else f'{speed:.3f}x'} | "
-                f"{'' if p['median_acceptance_pct'] is None else f'{p['median_acceptance_pct']:.2f}'} | "
-                f"{'' if p['median_tok_per_round'] is None else f'{p['median_tok_per_round']:.3f}'} | "
-                f"{verdict} |"
+                f"{speed_text} | {accept_text} | {tpr_text} | {verdict} |"
             )
         lines.append("")
     summary_path = Path(args.summary or (Path(args.out) / "ab-summary.md"))
