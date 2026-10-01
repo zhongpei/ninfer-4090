@@ -154,6 +154,7 @@ struct DFlashDecodeStateLayout {
     std::optional<TensorRegion> tree_parents;
     std::optional<TensorRegion> tree_depths;
     std::optional<TensorRegion> tree_path_nodes;
+    std::optional<TensorRegion> tree_lookup_tokens;
     std::optional<TensorRegion> tree_kv_key;
     std::optional<TensorRegion> tree_kv_value;
     TensorRegion append_positions;
@@ -297,6 +298,7 @@ struct DFlashDecodeState {
     Tensor tree_depths;
     Tensor tree_path_nodes;
     Tensor tree_path_count;
+    Tensor tree_lookup_tokens;
     Tensor tree_kv_key;
     Tensor tree_kv_value;
     Tensor append_positions;
