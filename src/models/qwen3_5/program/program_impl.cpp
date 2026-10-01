@@ -8,6 +8,7 @@
 #include "core/device.h"
 #include <cuda_runtime.h>
 #include "ninfer/ops/target_logprobs.h"
+#include "ninfer/ops/linear_topk.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -611,6 +612,217 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
         }
         cleanup();
         return output;
+    } catch (...) {
+        try {
+            device.synchronize();
+        } catch (...) {}
+        work.reset();
+        try {
+            cleanup();
+        } catch (...) {}
+        throw;
+    }
+}
+
+TeacherTrace ProgramImpl::teacher_trace(PreparedPromptData&& prompt,
+                                             const TeacherTraceOptions& options) {
+    if (!causal_scoring || !score_hidden || workspace_plan.causal_score == 0) {
+        throw std::logic_error("Program was not constructed for causal scoring/teacher trace");
+    }
+    if (speculative_backend != SpeculativeBackend::None || vision_enabled || use_cuda_graph ||
+        context_cache.enabled) {
+        throw std::logic_error("teacher trace Program has generation-only startup features");
+    }
+    const std::size_t token_count_size = prompt.token_ids.size();
+    if (token_count_size < 2 || token_count_size > capacity) {
+        throw std::invalid_argument("teacher trace token count must be in [2,capacity]");
+    }
+    if (prompt.has_media()) {
+        throw std::invalid_argument("teacher trace accepts text tokens only");
+    }
+    if (options.target_layer_ids.empty() || options.target_layer_ids.size() > 32 ||
+        options.top_k == 0 || options.top_k > 16) {
+        throw std::invalid_argument("teacher trace requires 1..32 taps and top_k in [1,16]");
+    }
+    for (std::size_t i = 0; i < options.target_layer_ids.size(); ++i) {
+        const std::uint32_t layer = options.target_layer_ids[i];
+        if (layer >= parameters.text.layers.size() ||
+            (i != 0 && layer <= options.target_layer_ids[i - 1])) {
+            throw std::invalid_argument(
+                "teacher trace target_layer_ids must be strictly increasing valid layers");
+        }
+    }
+
+    const std::uint32_t predictor_count =
+        static_cast<std::uint32_t>(token_count_size - 1U);
+    const std::uint32_t hidden_size =
+        static_cast<std::uint32_t>(dimension(parameters.model.config().text.hidden_size));
+    const std::size_t fused_width =
+        options.target_layer_ids.size() * static_cast<std::size_t>(hidden_size);
+
+    TeacherTrace trace;
+    trace.hidden_size = hidden_size;
+    trace.top_k = options.top_k;
+    trace.target_layer_ids = options.target_layer_ids;
+    trace.input_ids.assign(prompt.token_ids.begin(),
+                           prompt.token_ids.begin() + predictor_count);
+    trace.fused_bf16.resize(static_cast<std::size_t>(predictor_count) * fused_width);
+    trace.top_ids.resize(static_cast<std::size_t>(predictor_count) * options.top_k);
+    trace.top_logprobs.resize(static_cast<std::size_t>(predictor_count) * options.top_k);
+    trace.argmax.resize(predictor_count);
+
+    const std::uint32_t entitlement = kv_pages_for_frontier(predictor_count);
+    if (entitlement == 0) {
+        throw std::logic_error("teacher trace has no KV entitlement");
+    }
+
+    std::optional<StateImageHandle> state;
+    std::optional<KVAddressSpaceHandle> address;
+    const auto cleanup = [&] {
+        bool released = true;
+        if (address) {
+            if (text_kv_addresses->active(*address)) text_kv_addresses->deactivate(*address);
+            released = text_kv_addresses->release(*address) && released;
+            address.reset();
+        }
+        if (state) {
+            released = state_store->release(*state) && released;
+            state.reset();
+        }
+        if (!released) {
+            throw std::logic_error("teacher trace resources could not be released");
+        }
+    };
+
+    try {
+        state = state_store->reserve_reset(device.stream);
+        if (!state) {
+            throw ninfer::ContextCacheExhausted(
+                "Device StateImage store has no free slot for teacher trace");
+        }
+        address = text_kv_addresses->create_active(entitlement, 0);
+        if (!address) {
+            throw ninfer::ContextCacheExhausted(
+                "text KV address space has no free active entry for teacher trace");
+        }
+        if (text_kv_addresses->bound_row(*address) != 0) {
+            throw std::logic_error("teacher trace did not bind the unique Main KV row");
+        }
+        text_kv_addresses->ensure_mapped_to_tokens(*address, predictor_count, device.stream);
+
+        const std::int32_t state_slot = state_store->physical_slot(*state);
+        std::uint32_t cursor = 0;
+        while (cursor < predictor_count) {
+            const std::uint32_t nominal = std::min(prefill_chunk, predictor_count - cursor);
+            execution::PrefillContext schedule_state{
+                {device, parameters, work, state_images->linear(), nullptr, io, prefill_hidden,
+                 prefill_chunk, proposal_head, rope_scaling_factor,
+                 rope_scaling_original_context},
+                decoder->text_kv.execution_view(text_kv_addresses->execution_row(*address)),
+                {},
+                decoder->text_kv,
+                nullptr,
+                nullptr,
+                cursor,
+                nullptr,
+                nullptr,
+                state_slot,
+                state_slot,
+                0,
+                nullptr};
+
+            execution::TeacherTraceSink sink{
+                .fused_bf16 =
+                    trace.fused_bf16.data() + static_cast<std::size_t>(cursor) * fused_width,
+                .fused_row_stride_elements = fused_width,
+                .hidden_size = hidden_size,
+                .layers = std::span<const std::uint32_t>(options.target_layer_ids),
+                .active_tokens = static_cast<std::int32_t>(nominal),
+            };
+            mark_workspace_usage(workspace_plan.text_prefill);
+            const execution::PrefillChunkResult result =
+                execution::prefill_teacher_chunk(
+                    schedule_state, std::span<const TokenId>(prompt.token_ids), nominal, sink);
+            if (result.finalized || result.processed_tokens == 0 ||
+                result.processed_tokens != nominal) {
+                throw std::logic_error("teacher trace prefill made invalid progress");
+            }
+            const std::uint32_t columns_u32 = result.processed_tokens;
+            const auto columns = static_cast<std::int32_t>(columns_u32);
+            text_kv_addresses->commit_frontier(*address, cursor + columns_u32);
+
+            Tensor hidden = prefill_hidden.slice(1, 0, columns);
+            std::vector<TokenId> host_top_ids(static_cast<std::size_t>(columns) * 16U);
+            std::vector<float> host_top_scores(static_cast<std::size_t>(columns) * 16U);
+            std::vector<TokenId> host_argmax(static_cast<std::size_t>(columns));
+            std::vector<float> host_top1_logprob(static_cast<std::size_t>(columns));
+
+            // First obtain the stable top-16 directly from the artifact's actual head format.
+            work.reset();
+            Tensor top_ids = work.alloc(DType::I32, {16, columns});
+            Tensor top_scores = work.alloc(DType::FP32, {16, columns});
+            {
+                auto scope = work.scope();
+                const Tensor head_input =
+                    execution::rotated_input(hidden, parameters.text.output_head.hadamard_signs,
+                                             work, device.stream);
+                ops::linear_topk(
+                    head_input, parameters.text.output_head.weight,
+                    dimension(parameters.model.resources().public_token_count),
+                    top_ids, top_scores, work, device.stream);
+            }
+            CUDA_CHECK(cudaMemcpyAsync(host_top_ids.data(), top_ids.data, top_ids.bytes(),
+                                       cudaMemcpyDeviceToHost, device.stream));
+            CUDA_CHECK(cudaMemcpyAsync(host_top_scores.data(), top_scores.data, top_scores.bytes(),
+                                       cudaMemcpyDeviceToHost, device.stream));
+
+            // target_logprobs gives exact log p(top1). Since top1_score is also known,
+            // logZ = score(top1) - logp(top1), so every recorded top-K logprob follows without
+            // adding another vocabulary reduction kernel.
+            work.reset();
+            Tensor logits = work.alloc(
+                DType::BF16, {dimension(parameters.model.config().text.vocab_size), columns});
+            Tensor argmax = work.alloc(DType::I32, {columns});
+            Tensor top1_logprob = work.alloc(DType::FP32, {columns});
+            execution::project(hidden, parameters.text.output_head, logits, work, device.stream);
+            ops::argmax(logits, argmax,
+                        dimension(parameters.model.resources().public_token_count),
+                        device.stream);
+            ops::target_logprobs(
+                logits, argmax,
+                dimension(parameters.model.resources().public_token_count),
+                top1_logprob, device.stream);
+            CUDA_CHECK(cudaMemcpyAsync(host_argmax.data(), argmax.data, argmax.bytes(),
+                                       cudaMemcpyDeviceToHost, device.stream));
+            CUDA_CHECK(cudaMemcpyAsync(host_top1_logprob.data(), top1_logprob.data,
+                                       top1_logprob.bytes(), cudaMemcpyDeviceToHost,
+                                       device.stream));
+            device.synchronize();
+
+            for (std::uint32_t row = 0; row < columns_u32; ++row) {
+                const std::size_t source_base = static_cast<std::size_t>(row) * 16U;
+                const std::size_t target_base =
+                    static_cast<std::size_t>(cursor + row) * options.top_k;
+                const float log_z =
+                    host_top_scores[source_base] - host_top1_logprob[row];
+                trace.argmax[cursor + row] = host_argmax[row];
+                for (std::uint32_t rank = 0; rank < options.top_k; ++rank) {
+                    trace.top_ids[target_base + rank] =
+                        host_top_ids[source_base + rank];
+                    trace.top_logprobs[target_base + rank] =
+                        host_top_scores[source_base + rank] - log_z;
+                }
+            }
+
+            cursor += columns_u32;
+            work.reset();
+        }
+
+        if (cursor != predictor_count) {
+            throw std::logic_error("teacher trace produced the wrong predictor count");
+        }
+        cleanup();
+        return trace;
     } catch (...) {
         try {
             device.synchronize();
