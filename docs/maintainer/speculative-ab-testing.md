@@ -11,7 +11,39 @@ The protocol combines four useful practices from existing speculative-decoding p
 3. **DFlash-style acceptance telemetry.** Record target throughput together with acceptance rate, accepted tokens/round and the tree/lookup counters. A faster result without acceptance data cannot explain why it improved.
 4. **Serving throughput separately from serial latency.** A method can improve C1 latency and still lose at larger batches. The server suite therefore measures C1/C2/C4/C8 independently.
 
-The default benchmark is greedy because output SHA equality is then a strong exactness gate. This matrix uses greedy requests. Positive-temperature tree execution is supported when presence/frequency penalties are zero and requires a separate seeded sampling check.
+The default benchmark is greedy because output SHA equality is then a strong exactness gate. Both CLI and server comparisons explicitly set presence/frequency penalties to zero; model generation presets must not silently disable tree execution. Positive-temperature tree execution is supported when presence/frequency penalties are zero and requires a separate seeded sampling check.
+
+## Current RTX 4090 qualification
+
+The 2026-10-02 qualification used CUDA 12.8 on RTX 4090 with
+`Ternary-Bonsai-2-27B-ninfer-v3.ninfer`, INT8 KV, and the `prose,lookup-repeat`
+workloads. Run the same small correctness matrix with an explicit artifact path:
+
+```bash
+python3.11 -m tools.dflash2_training.ab_suite \
+  --exe build/apps/ninfer --model /path/to/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out /tmp/ninfer-ab --kv-dtype int8 \
+  --arms baseline,dflash2-k15,tree15,tree15-stair,lookup-skip \
+  --workloads prose,lookup-repeat --pairs 1 --discard 0 --cooldown 0
+```
+
+All 16 CLI executions completed successfully and both tree arms executed real
+tree rounds. Chain and lookup comparisons passed exact output equality on both
+workloads. Fixed-tree and Tree-Stair comparisons passed on `lookup-repeat` but
+failed on `prose`; the harness correctly exited with status 2. The exact-output
+release gate remains unqualified for this artifact, and this run establishes no
+performance improvement.
+
+At the first fixed-tree divergence, ordinary execution produced BF16 logits
+`18.0/18.0` for token IDs `25/318`, while tree execution produced
+`17.875/18.0`. Both argmax decisions were correct for their represented logits.
+A linear spine reproduced the same divergence, so branching was not required.
+An additional presence-penalty 1.5 chain comparison also diverged at a one-ULP
+BF16 boundary. Independent sampling, branch-state and KV oracles passed, but
+they do not establish bitwise stability of the complete target forward across
+execution routes. The specific source of the target-logit differences remains
+unresolved; neither these observations nor successful generation waive the
+exact-output gate.
 
 ## Workloads
 
