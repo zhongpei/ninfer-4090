@@ -17,6 +17,7 @@
 #include "models/qwen3_5/program/prefix_identity.h"
 #include "models/qwen3_5/program/speculative/stair_router.h"
 #include "models/qwen3_5/program/speculative/lookup_draft.h"
+#include "models/qwen3_5/program/speculative/tree_plan.h"
 #include "models/qwen3_5/program/planning/resource_projection.h"
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
@@ -282,6 +283,7 @@ struct PendingCandidate {
     std::uint32_t base_S        = 0;
     std::uint32_t prompt_tokens = 0;
     std::uint32_t produced      = 0;
+    bool tree_verify            = false;
 };
 
 enum class Lifecycle : std::uint8_t {
@@ -581,6 +583,7 @@ public:
     const std::uint32_t lookup_ngram;
     const LookupDraftOptions lookup_options;
     const SpeculativeRoutingOptions speculative_routing;
+    const SpeculativeTreeOptions speculative_tree;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
