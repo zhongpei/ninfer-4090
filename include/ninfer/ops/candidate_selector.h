@@ -50,4 +50,16 @@ void candidate_selector_path(const Tensor& candidate_ids, const Tensor& unary_sc
                              Tensor& drafts, Tensor& proposal_q, WorkspaceArena& workspace,
                              cudaStream_t stream);
 
+/**
+ * Same selector contract, but forces the lattice route and preserves every conditional edge score
+ * in caller-owned FP32 [16,16,K,B]. This is the proposal source for runtime tree verification.
+ */
+void candidate_selector_lattice(const Tensor& candidate_ids, const Tensor& unary_scores,
+                                const Tensor& projected_hidden, const Tensor& anchors,
+                                const Tensor& predecessor_codebook,
+                                const Tensor& successor_codebook,
+                                const Tensor& base_positions, const SamplingConfig* configs,
+                                Tensor& drafts, Tensor& proposal_q, Tensor& lattice_scores,
+                                cudaStream_t stream);
+
 } // namespace ninfer::ops
