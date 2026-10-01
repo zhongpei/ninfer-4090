@@ -180,6 +180,39 @@ void speculative_tree_gather_bf16(const Tensor& source, const Tensor& path_nodes
                                   std::int32_t count, Tensor& destination,
                                   cudaStream_t stream);
 
+// Device-count variant used by runtime tree verification. count is I32[1]; destination may have
+// the same or a larger physical width than source. Columns >= count are zeroed.
+void speculative_tree_gather_bf16_dynamic(const Tensor& source, const Tensor& path_nodes,
+                                          const Tensor& count, Tensor& destination,
+                                          cudaStream_t stream);
+
+/**
+ * Build a C1 DFlash2 verify tree entirely on device.
+ *
+ * candidate_ids is I32 [16,K], lattice_scores FP32 [16,16,K]. anchors/frontiers/rope_starts are
+ * I32[1]. node_budget is 1..K and spine is 1..node_budget. Outputs are physical vectors of
+ * width K+1; the live prefix [0,node_budget] is DFS preorder and the suffix is neutral.
+ * cache_positions[i]=frontier+depth[i], rope_positions adds the round's existing rope delta.
+ */
+void speculative_tree_build_plan(const Tensor& candidate_ids, const Tensor& lattice_scores,
+                                 const Tensor& anchors, const Tensor& frontiers,
+                                 const Tensor& rope_starts, std::int32_t node_budget,
+                                 std::int32_t spine, Tensor& tree_tokens, Tensor& parents,
+                                 Tensor& depths, Tensor& cache_positions, Tensor& rope_positions,
+                                 cudaStream_t stream);
+
+/**
+ * Greedy C1 tree acceptance entirely on device. The target token at the current node chooses a
+ * matching child if present, otherwise it becomes the correction token. licensed_tokens and
+ * path_nodes have the physical tree width. licensed_counts/accepted_drafts/path_count/last_node
+ * are I32[1].
+ */
+void speculative_tree_accept_greedy(const Tensor& target_tokens, const Tensor& tree_tokens,
+                                    const Tensor& parents, std::int32_t live_rows,
+                                    Tensor& path_nodes, Tensor& licensed_tokens,
+                                    Tensor& licensed_counts, Tensor& accepted_drafts,
+                                    Tensor& path_count, Tensor& last_node, cudaStream_t stream);
+
 /**
  * Rewrite the live DFlash2 proposal distribution as q=1 on the supplied draft token.
  * candidate_ids is I32 [16,K,B], proposal_q is FP32 [16,K,B], drafts is I32 [K,B],
