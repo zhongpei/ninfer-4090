@@ -747,6 +747,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 out.dflash_round =
                     std::max({out.dflash_round, finish(target), accept,
                               dflash_context_capacity(verify, batch, true), proposal});
+                if (plan.speculative_tree.mode != SpeculativeTreeMode::Off && batch == 1) {
+                    out.dflash_round = std::max(
+                        out.dflash_round,
+                        checked_add(finish(target), 2ULL * 1024ULL * 1024ULL,
+                                    "DFlash tree workspace headroom"));
+                }
             }
         }
     }
