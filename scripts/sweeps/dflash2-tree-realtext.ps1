@@ -32,7 +32,10 @@ $configs = @(
                                      '--spec-tree-spine','7') },
     @{ label='chain15'; k=15; args=@('--spec-tree','off') },
     @{ label='tree15';  k=15; args=@('--spec-tree','lattice','--spec-tree-nodes','15',
-                                     '--spec-tree-spine','7') }
+                                     '--spec-tree-spine','7') },
+    @{ label='tree15-staircut'; k=15; args=@('--spec-tree','lattice','--spec-tree-nodes','15',
+                                     '--spec-tree-spine','7','--spec-router','stair',
+                                     '--spec-stair-widths','3,7,11,15') }
 )
 
 "config,rep,decode_tok_s,generated,rounds,drafted,accepted,tree_rounds,tree_fallback,tree_nodes,tree_accepted,sha256"
