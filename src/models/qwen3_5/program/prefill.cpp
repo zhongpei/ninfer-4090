@@ -83,6 +83,20 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, finalize_at_end);
 }
 
+PrefillChunkResult prefill_teacher_chunk(PrefillContext& state,
+                                        std::span<const TokenId> ids,
+                                        std::uint32_t nominal_length,
+                                        TeacherTraceSink& sink) {
+    TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
+                     state.text_kv, state.execution.linear_attention, state.execution.io,
+                     state.execution.prefill_hidden, state.execution.prefill_chunk,
+                     state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache);
+    configure_text_card(card, state.execution, nullptr, state.state_source_slot,
+                        state.state_destination_slot, 0);
+    return card.prefill_chunk(std::span<const int>(ids.data(), ids.size()), state.text_kv_base,
+                              nominal_length, false, sink);
+}
+
 PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const PreparedPromptData& prompt,
                                             VisionPrefillSession& vision,
                                             std::uint32_t nominal_length,
