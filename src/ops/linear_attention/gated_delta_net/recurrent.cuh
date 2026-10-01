@@ -723,24 +723,22 @@ struct TreeFoldAccess {
         const __nv_bfloat16* record =
             conv_record + record_outer(coord) * width * Geometry::kConvChannels + channel;
 
-        const auto record_at = [&](std::int32_t logical) {
-            return record[static_cast<std::int64_t>(selected(logical)) *
-                              Geometry::kConvChannels];
-        };
-
         __nv_bfloat16 h0, h1, h2;
         if (commit == 1) {
             h0 = source_history[Geometry::kConvChannels];
             h1 = source_history[2LL * Geometry::kConvChannels];
-            h2 = record_at(0);
+            h2 = record[static_cast<std::int64_t>(selected(0)) * Geometry::kConvChannels];
         } else if (commit == 2) {
             h0 = source_history[2LL * Geometry::kConvChannels];
-            h1 = record_at(0);
-            h2 = record_at(1);
+            h1 = record[static_cast<std::int64_t>(selected(0)) * Geometry::kConvChannels];
+            h2 = record[static_cast<std::int64_t>(selected(1)) * Geometry::kConvChannels];
         } else {
-            h0 = record_at(commit - 3);
-            h1 = record_at(commit - 2);
-            h2 = record_at(commit - 1);
+            h0 = record[static_cast<std::int64_t>(selected(commit - 3)) *
+                        Geometry::kConvChannels];
+            h1 = record[static_cast<std::int64_t>(selected(commit - 2)) *
+                        Geometry::kConvChannels];
+            h2 = record[static_cast<std::int64_t>(selected(commit - 1)) *
+                        Geometry::kConvChannels];
         }
         destination_history[0] = h0;
         destination_history[Geometry::kConvChannels] = h1;
