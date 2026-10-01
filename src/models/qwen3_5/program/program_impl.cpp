@@ -145,6 +145,11 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     if (&parameters != plan.parameters || parameters.model.options() != plan.features) {
         throw std::invalid_argument("Program parameters do not match the frozen sequence plan");
     }
+    if (!plan.dflash_teacher.dump_path.empty()) {
+        dflash_teacher_trace = std::make_unique<DFlashTeacherTraceWriter>(
+            plan.dflash_teacher.dump_path, plan.dflash_teacher.max_records,
+            dimension(parameters.model.resources().public_token_count));
+    }
     // Hand `work` the extra ranks' storage. From here one arena serves every device: the layer loop
     // switches ranks alongside ScopedDeviceRank and every workspace call site is unchanged.
     for (DeviceArena& rank_storage : workspace_storage_by_rank) {
