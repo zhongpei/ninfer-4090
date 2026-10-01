@@ -811,17 +811,11 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                                   .commit_columns         = static_cast<std::int32_t>(committed)};
         const bool partial_terminal =
             !cancelled[row] && terminal[row] && committed < pending.produced;
-        if (pending.tree_verify && partial_terminal) {
-            if (committed == 0 ||
-                committed > static_cast<std::uint32_t>(dflash_host_egress->tree_path_count)) {
-                throw std::logic_error("tree hidden correction prefix is outside the accepted path");
-            }
-            hidden_selectors[row] =
-                dflash_host_egress->tree_path_nodes[static_cast<std::size_t>(committed - 1U)];
-        } else {
-            hidden_selectors[row] = static_cast<std::int32_t>(
-                partial_terminal ? committed - 1U : pending.produced - 1U);
-        }
+        // Tree decode compacts target_hidden into accepted-path order before publishing the
+        // pending round. Partial terminal correction therefore uses the same linear selector as
+        // chain speculation; the DFS node ids are needed only by ReplaySSM path folding.
+        hidden_selectors[row] = static_cast<std::int32_t>(
+            partial_terminal ? committed - 1U : pending.produced - 1U);
         needs_hidden_correction = needs_hidden_correction || partial_terminal;
     }
 
