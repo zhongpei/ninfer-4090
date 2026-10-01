@@ -155,6 +155,9 @@ struct LookupDraftOptions {
     // Zero disables process-persistent lookup history. When non-zero, completed request ledgers
     // are retained up to this many tokens and indexed by n-gram hash.
     std::uint32_t persistent_tokens = 0;
+    // Optional raw-I32 token log. When set, process history is restored at startup and rewritten
+    // when the bounded in-memory suffix store wraps, so useful copy runs survive server restarts.
+    std::filesystem::path persistent_path;
     // Optional static suffix corpus. PREFIX names PREFIX.tokens.i32 and PREFIX.suffix.u32.
     std::filesystem::path corpus_prefix;
     float corpus_weight          = 0.50F;
