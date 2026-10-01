@@ -247,7 +247,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--spec-router fixed\|stair` | fixed maximum-K verification or adaptive DFlash/DFlash2 verification width | `fixed` |
-| `--spec-tree off\|lattice` | chain verification or opt-in C1 greedy DFlash2 lattice-tree verification | `off` |
+| `--spec-tree off\|lattice` | chain verification or opt-in C1 DFlash2 lattice-tree verification; sampling is supported when penalties are zero | `off` |
 | `--spec-tree-nodes N` | maximum drafted tree-node budget; must be <= `--draft-tokens`, and Tree-Stair may cut it lower per round | `15` |
 | `--spec-tree-spine N` | greedy lattice levels installed before best-first alternatives | `7` |
 | `--spec-stair-widths A,B,C,D` | four strictly increasing Stair draft extents | `3,7,11,15` |
@@ -269,7 +269,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--lookup-base-drafts N` | ordinary lookup depth policy maximum | `7` |
 | `--lookup-deep-after N` | full-accept streak before deep copy; 0 disables | `2` |
 | `--lookup-deep-drafts N` | deep-copy policy maximum, clamped to runtime K/budget/context | `15` |
-| `--lookup-persistent-tokens N` | process-lifetime cross-request suffix-memory budget | `0` |
+| `--lookup-persistent-tokens N` | bounded cross-request suffix-memory budget | `0` |
+| `--lookup-persistent-path FILE` | optional restart-persistent backing file for lookup history | unset |
 | `--lookup-corpus-prefix PATH` | static corpus prefix built by `tools/build_lookup_corpus.py` | unset |
 | `--lookup-corpus-weight F` | corpus vote weight | `0.50` |
 | `--lookup-corpus-samples N` | sampled corpus matches per query | `64` |
