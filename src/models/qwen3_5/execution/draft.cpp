@@ -917,9 +917,20 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
                                sizeof(qwen3_5::DFlashDecodeEgress), cudaMemcpyHostToDevice,
                                stream));
 
+    // Canonicalize target hidden into accepted-path order as well. The Program's existing
+    // partial-terminal correction then keeps using selector=(committed-1) without knowing that
+    // verification originally ran in DFS node order.
+    state.execution.work.reset();
+    Tensor compacted_hidden = state.execution.work.alloc(
+        DType::BF16, {target_hidden.ne[0], width});
+    ops::speculative_tree_gather_bf16(
+        target_hidden.view({target_hidden.ne[0], width}), path_nodes,
+        static_cast<std::int32_t>(accepted.count), compacted_hidden, stream);
+    CUDA_CHECK(cudaMemcpyAsync(target_hidden.data, compacted_hidden.data,
+                               compacted_hidden.bytes(), cudaMemcpyDeviceToDevice, stream));
+
     // Keep only the accepted path in DFlash target-tap storage. A terminal Frontend truncation
     // later consumes a prefix of this already compacted chain.
-    state.execution.work.reset();
     Tensor compacted_features = state.execution.work.alloc(
         DType::BF16, {tree_features.ne[0], width});
     ops::speculative_tree_gather_bf16(tree_features, path_nodes,
