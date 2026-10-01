@@ -2,6 +2,26 @@
 
 This directory contains the NInfer-side adaptation of TandemLLM's DFlash2 distillation workflow.
 
+For the closest match to a deployed quantized/Ternary target, prefer the native exporter over the
+Hugging Face recorder:
+
+```bash
+ninfer-teacher out/bonsai2-target.ninfer \
+  --input prompts.jsonl --out train/ninfer-teacher \
+  --devices 0,1 --kv-dtype int8 \
+  --layers 5,19,33,47,61 --top-k 16
+
+python -m tools.dflash2_training.train \
+  --drafter BASE_DFLASH2 --target /models/Qwen3.8-27B \
+  --data train/ninfer-teacher --out train/dflash2-b16 \
+  --block 16 --train last1 --optimizer adamw8bit
+```
+
+`ninfer-teacher` executes the actual `.ninfer` target kernels and records their target taps,
+argmax and exact top-16 log-probabilities. The Python `--target` directory still supplies the
+borrowed embedding/lm-head tensors used by the differentiable DFlash2 reference module; the
+teacher distribution itself comes from the deployed artifact.
+
 Main commands:
 
 ```bash
