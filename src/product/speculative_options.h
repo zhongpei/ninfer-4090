@@ -43,6 +43,7 @@ namespace ninfer::product {
     if (value == "off") { return LookupDFlashMode::Off; }
     if (value == "replace") { return LookupDFlashMode::Replace; }
     if (value == "skip") { return LookupDFlashMode::HeadSkip; }
+    if (value == "merge") { return LookupDFlashMode::MergeTree; }
     throw std::invalid_argument("invalid lookup DFlash mode: " + std::string(value));
 }
 
@@ -166,7 +167,8 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         lookup.min_confidence < 0.0F || lookup.min_confidence > 1.0F ||
         lookup.base_drafts == 0 || lookup.base_drafts > 15 ||
         lookup.deep_drafts == 0 || lookup.deep_drafts > 15 ||
-        lookup.deep_drafts < lookup.base_drafts || !std::isfinite(lookup.corpus_weight) ||
+        lookup.deep_drafts < lookup.base_drafts || lookup.merge_nodes == 0 ||
+        lookup.merge_nodes > 15 || !std::isfinite(lookup.corpus_weight) ||
         lookup.corpus_weight < 0.0F || lookup.corpus_samples == 0) {
         throw std::invalid_argument("invalid context-lookup drafting parameter");
     }
@@ -178,10 +180,16 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
     if (lookup.dflash_mode != LookupDFlashMode::Off) {
         if (options.lookup_ngram == 0 || lookup.strategy != LookupDraftStrategy::Vote) {
             throw std::invalid_argument(
-                "--lookup-dflash replace|skip requires --lookup-ngram and --lookup-strategy vote");
+                "--lookup-dflash replace|skip|merge requires --lookup-ngram and --lookup-strategy vote");
         }
-        if (options.backend != SpeculativeBackend::DFlash &&
-            options.backend != SpeculativeBackend::DFlash2) {
+        if (lookup.dflash_mode == LookupDFlashMode::MergeTree) {
+            if (options.backend != SpeculativeBackend::DFlash2 ||
+                options.tree.mode != SpeculativeTreeMode::Lattice) {
+                throw std::invalid_argument(
+                    "--lookup-dflash merge requires --spec dflash2 --spec-tree lattice");
+            }
+        } else if (options.backend != SpeculativeBackend::DFlash &&
+                   options.backend != SpeculativeBackend::DFlash2) {
             throw std::invalid_argument(
                 "--lookup-dflash replace|skip requires --spec dflash|dflash2");
         }
