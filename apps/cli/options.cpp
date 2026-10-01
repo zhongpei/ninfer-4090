@@ -129,7 +129,7 @@ std::string usage_text(const char* argv0) {
            "       [--lookup-ngram N] [--lookup-strategy recent|vote] [--lookup-dflash off|replace|skip]\n"
            "       [--lookup-max-order N] [--lookup-max-matches N] [--lookup-min-support N] [--lookup-min-confidence F]\n"
            "       [--lookup-base-drafts N] [--lookup-deep-after N] [--lookup-deep-drafts N]\n"
-           "       [--lookup-persistent-tokens N] [--lookup-corpus-prefix PATH] [--lookup-corpus-weight F] [--lookup-corpus-samples N]\n"
+           "       [--lookup-persistent-tokens N] [--lookup-persistent-path PATH] [--lookup-corpus-prefix PATH] [--lookup-corpus-weight F] [--lookup-corpus-samples N]\n"
            "       [--lm-head-draft] [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4]\n"
            "       [--gdn-state-fp16] [--mlp-a8-decode] [--no-prefill-a8]\n"
            "       [--prefill-cublas [--no-prefill-cublas-projections]]\n"
@@ -302,6 +302,8 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--lookup-persistent-tokens") {
             options.speculative.lookup.persistent_tokens =
                 parse_u32(value(arg), "lookup-persistent-tokens", true);
+        } else if (arg == "--lookup-persistent-path") {
+            options.speculative.lookup.persistent_path = value(arg);
         } else if (arg == "--lookup-corpus-prefix") {
             options.speculative.lookup.corpus_prefix = value(arg);
         } else if (arg == "--lookup-corpus-weight") {
