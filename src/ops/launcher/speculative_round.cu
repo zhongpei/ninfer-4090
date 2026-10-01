@@ -169,6 +169,19 @@ void speculative_select_accepted_hidden_launch(const Tensor& hidden, const Tenso
     CUDA_CHECK(cudaGetLastError());
 }
 
+void speculative_tree_gather_bf16_launch(const Tensor& source, const Tensor& path_nodes,
+                                         std::int32_t count, Tensor& destination,
+                                         cudaStream_t stream) {
+    constexpr int kBlock = 256;
+    const dim3 grid(static_cast<unsigned>(std::max(1, div_up(source.ne[0], kBlock))),
+                    static_cast<unsigned>(source.ne[1]));
+    speculative_tree_gather_bf16_kernel<<<grid, kBlock, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(source.data),
+        static_cast<const std::int32_t*>(path_nodes.data),
+        static_cast<__nv_bfloat16*>(destination.data), source.ne[0], source.ne[1], count);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void speculative_make_one_hot_sparse_proposal_launch(
     const Tensor& drafts, const Tensor& current_extents, Tensor& candidate_ids,
     Tensor& proposal_q, std::int32_t token_domain, cudaStream_t stream) {
