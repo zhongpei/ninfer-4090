@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <string>
 #include <limits>
@@ -493,6 +494,10 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
 
     std::optional<StateImageHandle> state;
     std::optional<KVAddressSpaceHandle> address;
+    void* trace_tap_host = nullptr;
+    const std::size_t trace_tap_capacity_bytes =
+        static_cast<std::size_t>(prefill_chunk) * fused_width * sizeof(std::uint16_t);
+    CUDA_CHECK(cudaHostAlloc(&trace_tap_host, trace_tap_capacity_bytes, cudaHostAllocPortable));
     const auto cleanup = [&] {
         bool released = true;
         if (address) {
@@ -689,6 +694,10 @@ TeacherTrace ProgramImpl::teacher_trace(PreparedPromptData&& prompt,
             released = state_store->release(*state) && released;
             state.reset();
         }
+        if (trace_tap_host != nullptr) {
+            released = (cudaFreeHost(trace_tap_host) == cudaSuccess) && released;
+            trace_tap_host = nullptr;
+        }
         if (!released) {
             throw std::logic_error("teacher trace resources could not be released");
         }
@@ -732,8 +741,7 @@ TeacherTrace ProgramImpl::teacher_trace(PreparedPromptData&& prompt,
                 nullptr};
 
             execution::TeacherTraceSink sink{
-                .fused_bf16 =
-                    trace.fused_bf16.data() + static_cast<std::size_t>(cursor) * fused_width,
+                .fused_bf16 = static_cast<std::uint16_t*>(trace_tap_host),
                 .fused_row_stride_elements = fused_width,
                 .hidden_size = hidden_size,
                 .layers = std::span<const std::uint32_t>(options.target_layer_ids),
@@ -750,6 +758,10 @@ TeacherTrace ProgramImpl::teacher_trace(PreparedPromptData&& prompt,
             const std::uint32_t columns_u32 = result.processed_tokens;
             const auto columns = static_cast<std::int32_t>(columns_u32);
             text_kv_addresses->commit_frontier(*address, cursor + columns_u32);
+            std::memcpy(
+                trace.fused_bf16.data() + static_cast<std::size_t>(cursor) * fused_width,
+                trace_tap_host,
+                static_cast<std::size_t>(columns_u32) * fused_width * sizeof(std::uint16_t));
 
             Tensor hidden = prefill_hidden.slice(1, 0, columns);
             std::vector<TokenId> host_top_ids(static_cast<std::size_t>(columns) * 16U);
@@ -771,10 +783,11 @@ TeacherTrace ProgramImpl::teacher_trace(PreparedPromptData&& prompt,
                     dimension(parameters.model.resources().public_token_count),
                     top_ids, top_scores, work, device.stream);
             }
-            CUDA_CHECK(cudaMemcpyAsync(host_top_ids.data(), top_ids.data, top_ids.bytes(),
-                                       cudaMemcpyDeviceToHost, device.stream));
-            CUDA_CHECK(cudaMemcpyAsync(host_top_scores.data(), top_scores.data, top_scores.bytes(),
-                                       cudaMemcpyDeviceToHost, device.stream));
+            device.synchronize();
+            CUDA_CHECK(cudaMemcpy(host_top_ids.data(), top_ids.data, top_ids.bytes(),
+                                  cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(host_top_scores.data(), top_scores.data, top_scores.bytes(),
+                                  cudaMemcpyDeviceToHost));
 
             // target_logprobs gives exact log p(top1). Since top1_score is also known,
             // logZ = score(top1) - logp(top1), so every recorded top-K logprob follows without
@@ -792,12 +805,11 @@ TeacherTrace ProgramImpl::teacher_trace(PreparedPromptData&& prompt,
                 logits, argmax,
                 dimension(parameters.model.resources().public_token_count),
                 top1_logprob, device.stream);
-            CUDA_CHECK(cudaMemcpyAsync(host_argmax.data(), argmax.data, argmax.bytes(),
-                                       cudaMemcpyDeviceToHost, device.stream));
-            CUDA_CHECK(cudaMemcpyAsync(host_top1_logprob.data(), top1_logprob.data,
-                                       top1_logprob.bytes(), cudaMemcpyDeviceToHost,
-                                       device.stream));
             device.synchronize();
+            CUDA_CHECK(cudaMemcpy(host_argmax.data(), argmax.data, argmax.bytes(),
+                                  cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(host_top1_logprob.data(), top1_logprob.data,
+                                  top1_logprob.bytes(), cudaMemcpyDeviceToHost));
 
             for (std::uint32_t row = 0; row < columns_u32; ++row) {
                 const std::size_t source_base = static_cast<std::size_t>(row) * 16U;
