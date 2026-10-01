@@ -29,6 +29,60 @@ trees offline before any branch-aware target runtime is added.
 
 ## 1. Record target data
 
+### Preferred: record the actual loaded `.ninfer` target
+
+For Ternary Bonsai / mixed T2+Q5 work, the strongest teacher is the artifact NInfer actually
+serves, not an assumed BF16/HF target. The CLI can record the five DFlash target taps and the
+prepared target head's stable top-16 during root prefill:
+
+```bash
+ninfer-cli out/bonsai2-dflash2-b16.ninfer \
+  --prompt "$(cat corpus.txt)" \
+  --spec dflash2 --draft-tokens 15 \
+  --dflash-teacher-out train/native-teacher \
+  --max-context 8192 --max-new 1
+```
+
+Teacher recording requires context-cache reuse to be disabled so every file starts at token zero.
+The single-request CLI already uses that root-prefill behavior. The recorder is an offline path:
+it computes target-head top-16 one token at a time and writes host files, so it intentionally favors
+fidelity and bounded VRAM over serving throughput.
+
+Convert the resulting `.ndft` files into the dataset consumed by `train.py`:
+
+```bash
+python -m tools.dflash2_training.import_ninfer_teacher \
+  --input train/native-teacher \
+  --out train/ninfer-data \
+  --topic code \
+  --holdout-every 10
+```
+
+The native file records:
+
+```text
+ids
+absolute positions
+5 x target residual taps
+target-head top-16 global token ids
+target-head top-16 FP32 scores
+```
+
+The top-16 scores come from the exact prepared NInfer head (including the artifact's actual
+weight representation). The importer stores them in the trainer's `top_lp` field; only a
+per-row softmax is used by the truncated KL objective, so raw scores and normalized
+log-probabilities differ only by an irrelevant additive constant.
+
+**Embedding/head compatibility:** the standalone PyTorch trainer still borrows embedding/head
+weights from `--target`. For a native-teacher run, point `--target` at the HF/base checkpoint
+that corresponds to the `.ninfer` artifact. The hard labels and soft top-16 distribution come
+from the actual NInfer target; the HF/base embedding/head supplies the differentiable training
+projection. If a future artifact intentionally changes the vocabulary embedding/head independently
+of that base checkpoint, export of those prepared tensors would be required for a fully
+self-contained trainer.
+
+### Alternative: Hugging Face teacher recorder
+
 Prepare JSONL, one object per source sequence:
 
 ```json
