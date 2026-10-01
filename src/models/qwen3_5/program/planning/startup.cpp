@@ -876,6 +876,10 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         break;
     }
+    if (!options.speculative.teacher.dump_path.empty() && options.max_concurrency != 1) {
+        throw std::invalid_argument(
+            "DFlash teacher trace is an offline C1 collection mode; use --max-concurrency 1");
+    }
     if (options.speculative.tree.mode != SpeculativeTreeMode::Off) {
         if (options.speculative.backend != SpeculativeBackend::DFlash2 ||
             options.speculative.tree.nodes == 0 || options.speculative.tree.nodes > 15 ||
