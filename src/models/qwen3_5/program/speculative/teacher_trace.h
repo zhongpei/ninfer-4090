@@ -3,10 +3,12 @@
 #include "core/tensor.h"
 #include "ninfer/types.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace ninfer::models::qwen3_5::detail {
