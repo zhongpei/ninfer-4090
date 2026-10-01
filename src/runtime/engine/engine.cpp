@@ -281,6 +281,38 @@ std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32
     return result;
 }
 
+TeacherTrace Engine::trace_tokens(std::vector<TokenId> tokens,
+                                 const TeacherTraceOptions& options) {
+    nvtx::ScopedRange score_range(nvtx::Name::Score, nvtx::Category::Scoring,
+                                  static_cast<std::uint64_t>(tokens.size()));
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    if (impl_->options.purpose != EnginePurpose::CausalScoring) {
+        throw std::logic_error("trace_tokens requires a CausalScoring Engine");
+    }
+    if (tokens.size() < 2 || tokens.size() > impl_->options.max_context) {
+        throw std::invalid_argument("trace_tokens token count must be in [2,max_context]");
+    }
+    PreparedPrompt prompt = prepare_tokens(std::move(tokens), false);
+    const std::size_t expected = prompt.summary().prompt_tokens - 1U;
+    TeacherTrace result = std::visit(
+        [&](auto& core) -> TeacherTrace {
+            using CoreState = std::remove_cvref_t<decltype(core)>;
+            if constexpr (std::is_same_v<CoreState, std::unique_ptr<Impl::ScoringCore>>) {
+                return core->trace(std::move(prompt.impl_->value), options);
+            } else {
+                throw std::logic_error("Engine scoring core is unavailable");
+            }
+        },
+        impl_->core);
+    if (result.input_ids.size() != expected || result.argmax.size() != expected ||
+        result.top_k != options.top_k ||
+        result.top_ids.size() != expected * options.top_k ||
+        result.top_logprobs.size() != expected * options.top_k) {
+        throw std::logic_error("target Program returned an invalid teacher trace");
+    }
+    return result;
+}
+
 std::uint32_t Engine::count_tokens(PromptInput input, const PreparationControl& control) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     return impl_->active->frontend.count_tokens(std::move(input), control);
