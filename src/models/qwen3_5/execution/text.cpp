@@ -1145,7 +1145,7 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
             // Materialize the parent projection once, then apply the convolution along each
             // node's ancestor chain rather than along DFS storage order.
             Tensor raw_qkv = workspace::gdn_prefill_conv(work_, config_, T);
-            Tensor z_flat = z.view({dimension(config_.gdn->value_width), T});
+            Tensor z_flat = z.view({dimension(config_.gdn->value_width()), T});
             gdn_projection(h, p, raw_qkv, z_flat, work_, s, projection_basis);
             GdnReplayRecordLayer records = replay_records_->layer(gidx, 1);
             ops::gdn_projected_tree_conv_record(
