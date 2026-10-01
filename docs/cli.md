@@ -258,6 +258,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--spec-stair-warmup N` | initial widest-rung rounds | `4` |
 | `--spec-stair-probe-period N` | periodic wide probe; zero disables | `16` |
 | `--spec-stair-margin F` | switch hysteresis | `0.02` |
+| `--spec-stair-profile PATH` | restart-persistent Stair survival/selection state | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--lookup-ngram N` | minimum suffix order for exact copy drafting; 0 disables lookup | `0` (off) |
 | `--lookup-strategy recent\|vote` | nearest historical match or counted multi-source continuation vote | `recent` |
@@ -270,6 +271,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--lookup-deep-after N` | full-accept streak before deep copy; 0 disables | `2` |
 | `--lookup-deep-drafts N` | deep-copy policy maximum, clamped to runtime K/budget/context | `15` |
 | `--lookup-persistent-tokens N` | process-lifetime cross-request suffix-memory budget | `0` |
+| `--lookup-history-path PATH` | bounded restart-persistent lookup history snapshot | unset |
 | `--lookup-corpus-prefix PATH` | static corpus prefix built by `tools/build_lookup_corpus.py` | unset |
 | `--lookup-corpus-weight F` | corpus vote weight | `0.50` |
 | `--lookup-corpus-samples N` | sampled corpus matches per query | `64` |
