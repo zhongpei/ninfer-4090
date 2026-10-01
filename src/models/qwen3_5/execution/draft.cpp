@@ -260,7 +260,7 @@ void finish_dynamic_branch(ExecutionCore& execution, const Tensor& input,
 }
 
 void propose_dflash2_batch(DFlashBatchContext& state, qwen3_5::DFlashDecodeState& frame, int batch,
-                           int k, DFlashEnvelopes envelopes) {
+                           int k, DFlashEnvelopes envelopes, Tensor* lattice_scores = nullptr) {
     if (state.execution.parameters.model.config().draft->dflash2) {
         const auto& target = state.execution.parameters.model.config().text;
         const auto& config = *state.execution.parameters.model.config().draft;
@@ -379,11 +379,22 @@ void propose_dflash2_batch(DFlashBatchContext& state, qwen3_5::DFlashDecodeState
         project(hidden, weights.selector->hidden_projection, projected, work, stream);
         Tensor drafts     = frame.draft_tokens.slice(1, 0, batch);
         Tensor proposal_q = frame.proposal_q.slice(2, 0, batch);
-        ops::candidate_selector_path(
-            candidates, scores.view({dimension(config.dflash2->selector_top_k), k, batch}),
-            projected.view({dimension(config.dflash2->selector_rank), k, batch}), anchors,
-            weights.selector->predecessor_codebook, weights.selector->successor_codebook, frontiers,
-            frame.sampling, drafts, proposal_q, work, stream);
+        if (lattice_scores != nullptr) {
+            if (batch != 1) {
+                throw std::logic_error("DFlash2 tree lattice is C1 in the first runtime version");
+            }
+            ops::candidate_selector_lattice(
+                candidates, scores.view({dimension(config.dflash2->selector_top_k), k, batch}),
+                projected.view({dimension(config.dflash2->selector_rank), k, batch}), anchors,
+                weights.selector->predecessor_codebook, weights.selector->successor_codebook,
+                frontiers, frame.sampling, drafts, proposal_q, *lattice_scores, stream);
+        } else {
+            ops::candidate_selector_path(
+                candidates, scores.view({dimension(config.dflash2->selector_top_k), k, batch}),
+                projected.view({dimension(config.dflash2->selector_rank), k, batch}), anchors,
+                weights.selector->predecessor_codebook, weights.selector->successor_codebook,
+                frontiers, frame.sampling, drafts, proposal_q, work, stream);
+        }
         work.reset();
     }
 }
