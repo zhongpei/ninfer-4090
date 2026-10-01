@@ -480,6 +480,18 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 ops::sampling_workspace_capacity_bytes(
                     dimension(parameters.model.resources().public_token_count), 1, 1));
     }
+    if (plan.dflash_teacher.enabled()) {
+        // Native teacher recording projects one final-hidden column at a time. Its transient
+        // capacity is constant in prefill_chunk and therefore does not raise the 24GB memory floor
+        // as corpus sequences grow.
+        matrix(text_prefill, DType::I32, 16, 1);
+        matrix(text_prefill, DType::FP32, 16, 1);
+        const auto& head = parameters.text.output_head;
+        scratch(text_prefill, execution::rotated_workspace_bytes(
+                                  head.hadamard_signs, head.weight.k, 1,
+                                  ops::linear_topk_workspace_capacity_bytes(
+                                      head.weight.qtype, head.weight.n, head.weight.k, 1, 1)));
+    }
     out.text_prefill = finish(text_prefill);
 
     if (plan.causal_scoring) {
