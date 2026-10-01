@@ -98,3 +98,8 @@ Do not optimize on one number. For each arm check, in order:
 8. weighted pooled speedup.
 
 A candidate that wins prose but resolves worse on code or C8 should remain an A/B option rather than becoming the default.
+
+
+## Windows compatibility
+
+The PowerShell wrapper remains available for development machines, but Linux/Bash is the canonical deployment benchmark path.
