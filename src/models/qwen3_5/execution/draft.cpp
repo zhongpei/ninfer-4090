@@ -932,6 +932,9 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
     // reuses depth positions, so the cache currently holds whichever branch visited those depths
     // last; the replay planes preserve every node's BF16 K/V for this compaction.
     const auto& target = state.execution.parameters.model.config().text;
+    if (!target.attention) {
+        throw std::logic_error("DFlash2 tree target requires full-attention geometry");
+    }
     const std::int32_t head_dim = dimension(target.attention->head_dim);
     const std::int32_t kv_heads = dimension(target.attention->num_key_value_heads);
     const std::int32_t kv_rows = head_dim * kv_heads;
