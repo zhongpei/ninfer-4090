@@ -122,6 +122,11 @@ ninfer_add_test(ninfer_qwen3_5_stair_router_test
   LIBRARIES ninfer_core)
 
 
+ninfer_add_test(ninfer_qwen3_5_tree_plan_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_tree_plan.cpp"
+  LIBRARIES ninfer_core)
+
+
 ninfer_add_test(ninfer_qwen3_5_lookup_vote_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_lookup_vote.cpp"
   LIBRARIES ninfer_core)
