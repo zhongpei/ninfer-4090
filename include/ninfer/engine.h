@@ -81,6 +81,12 @@ public:
     [[nodiscard]] std::vector<float> score_tokens(std::vector<TokenId> tokens,
                                                   std::uint32_t first_target);
 
+    // Offline distillation capture from the exact loaded .ninfer target. This API exists only on
+    // CausalScoring engines and adds no persistent generation allocation.
+    [[nodiscard]] DFlashTeacherCapture
+    record_dflash_teacher(std::vector<TokenId> tokens,
+                          std::vector<std::uint32_t> target_layer_ids = {5, 19, 33, 47, 61});
+
     [[nodiscard]] std::uint32_t count_tokens(PromptInput input,
                                              const PreparationControl& control = {}) const;
     [[nodiscard]] ModelSamplingDefaults sampling_defaults() const;
