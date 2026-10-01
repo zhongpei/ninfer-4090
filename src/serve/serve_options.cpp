@@ -482,6 +482,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.speculative.lookup.persistent_tokens = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--lookup-persistent-tokens"),
                                       "lookup-persistent-tokens"));
+        } else if (arg == "--lookup-persistent-path") {
+            options.speculative.lookup.persistent_path =
+                require_value("--lookup-persistent-path");
         } else if (arg == "--lookup-corpus-prefix") {
             options.speculative.lookup.corpus_prefix = require_value("--lookup-corpus-prefix");
         } else if (arg == "--lookup-corpus-weight") {
