@@ -876,6 +876,17 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         break;
     }
+    if (options.speculative.tree.mode != SpeculativeTreeMode::Off) {
+        if (options.speculative.backend != SpeculativeBackend::DFlash2 ||
+            options.speculative.tree.nodes == 0 || options.speculative.tree.nodes > 15 ||
+            options.speculative.tree.nodes != options.speculative.draft_tokens ||
+            options.speculative.tree.spine == 0 ||
+            options.speculative.tree.spine > options.speculative.tree.nodes) {
+            throw std::invalid_argument(
+                "runtime tree verify requires DFlash2 with nodes=draft_tokens in [1,15] "
+                "and spine<=nodes");
+        }
+    }
     if (device.compute_capability() != 86 && device.compute_capability() != 89) {
         throw std::invalid_argument(
             "Qwen3.5 family runtime requires compute capability 8.6 or 8.9");
