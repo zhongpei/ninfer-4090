@@ -608,7 +608,9 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
     const bool lookup_enabled =
         lookup_ngram != 0 && lookup_options.strategy == LookupDraftStrategy::Vote &&
         lookup_options.dflash_mode != LookupDFlashMode::Off;
-    bool lookup_batch = lookup_enabled;
+    const bool lookup_merge_mode =
+        lookup_options.dflash_mode == LookupDFlashMode::MergeTree;
+    bool lookup_batch = lookup_enabled && !lookup_merge_mode;
     std::uint32_t maximum_frontier      = 0;
     std::uint32_t maximum_target_tokens = 1;
     for (std::size_t row = 0; row < lanes.size(); ++row) {
@@ -661,7 +663,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 lookup_options, &lookup_persistent, &lookup_corpus);
             if (lookup_proposals[row]) {
                 ++request.speculative_stats.lookup_hits;
-            } else {
+            } else if (!lookup_merge_mode) {
                 lookup_batch = false;
             }
         } else {
@@ -799,8 +801,17 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 schedule_state, static_cast<std::int32_t>(lanes.size()), draft_window, envelopes,
                 target_envelope, std::span<const TokenId>(lookup_host), run_drafter);
         } else if (tree_active) {
+            std::span<const TokenId> merged_lookup;
+            float merged_confidence = 0.0F;
+            if (lookup_merge_mode && lookup_proposals[0]) {
+                const std::uint32_t reserve =
+                    std::min({lookup_proposals[0].count, lookup_options.merge_nodes,
+                              std::max<std::uint32_t>(1U, tree_node_budget / 2U)});
+                merged_lookup = std::span<const TokenId>(lookup_proposals[0].tokens).first(reserve);
+                merged_confidence = lookup_proposals[0].confidence;
+            }
             execution::dflash_tree_decode(schedule_state, draft_window, envelopes, target_envelope,
-                                          tree_round_options);
+                                          tree_round_options, merged_lookup, merged_confidence);
         } else {
             execution::dflash_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                            draft_window, envelopes, target_envelope, executable);
