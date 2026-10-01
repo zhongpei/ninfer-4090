@@ -322,10 +322,12 @@ Json speculative_json(const GenerationMetrics& metrics) {
                       {"rounds", metrics.lookup_rounds},
                       {"replace_rounds", metrics.lookup_replace_rounds},
                       {"head_skip_rounds", metrics.lookup_head_skip_rounds},
+                      {"merge_rounds", metrics.lookup_merge_rounds},
                       {"drafted_tokens", metrics.lookup_draft_tokens},
                       {"accepted_tokens", metrics.lookup_accepted_tokens}}},
                 {"tree",
                  Json{{"rounds", metrics.tree_rounds},
+                      {"sampled_rounds", metrics.tree_sampled_rounds},
                       {"fallback_rounds", metrics.tree_fallback_rounds},
                       {"nodes", metrics.tree_nodes},
                       {"accepted_drafts", metrics.tree_accepted_drafts}}}};
