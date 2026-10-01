@@ -44,9 +44,22 @@ void launch_recurrent_record(const Tensor& q, const Tensor& k, const Tensor& v, 
                              Tensor& key_record, Tensor& value_record, Tensor& gate_record,
                              Tensor& out, cudaStream_t stream);
 
+void launch_recurrent_tree_record(
+    const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g, const Tensor& beta,
+    float scale, const Tensor& ssm_states, const Tensor& initial_state_slots,
+    const Tensor& parents, Tensor& key_record, Tensor& value_record, Tensor& gate_record,
+    Tensor& out, cudaStream_t stream);
+
 void launch_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAllLayersView states,
                         const GdnReplayFoldKernelRows& rows, std::int32_t active_rows,
                         cudaStream_t stream);
+
+void launch_replay_tree_fold(const GdnReplayRecords& records,
+                             LinearAttentionStateAllLayersView states,
+                             std::int32_t source_state_slot,
+                             std::int32_t destination_state_slot,
+                             const Tensor& path_nodes, std::int32_t commit_columns,
+                             cudaStream_t stream);
 
 std::size_t chunked_workspace_bytes(std::int32_t value_heads, std::int32_t tokens);
 
