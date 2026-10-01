@@ -89,11 +89,11 @@ std::string serve_usage_text(const char* argv0) {
            "[--spec-tree off|lattice] [--spec-tree-nodes N] [--spec-tree-spine N] "
            "[--spec-stair-costs A,B,C,D] [--spec-stair-draft-cost F] "
            "[--spec-stair-prior F] [--spec-stair-prior-weight F] "
-           "[--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F] "
+           "[--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F] [--spec-router-persist] "
            "[--lookup-strategy recent|vote] [--lookup-dflash off|replace|skip] "
            "[--lookup-max-order N] [--lookup-max-matches N] [--lookup-min-support N] "
            "[--lookup-min-confidence F] [--lookup-base-drafts N] [--lookup-deep-after N] "
-           "[--lookup-deep-drafts N] [--lookup-persistent-tokens N] "
+           "[--lookup-deep-drafts N] [--lookup-persistent-tokens N] [--lookup-persistent-path FILE] "
            "[--lookup-corpus-prefix PATH] [--lookup-corpus-weight F] [--lookup-corpus-samples N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-residency resident|overlay] [--vision-max-merged N] "
@@ -387,6 +387,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--spec-stair-margin") {
             options.speculative.routing.switch_margin = parse_float_in(
                 require_value("--spec-stair-margin"), "spec-stair-margin", 0.0F, 10.0F);
+        } else if (arg == "--spec-router-persist") {
+            options.speculative.routing.persist_across_requests = true;
         } else if (arg == "--default-max-tokens") {
             options.default_max_tokens =
                 parse_nonnegative_int(require_value("--default-max-tokens"), "default-max-tokens");
@@ -474,6 +476,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.speculative.lookup.persistent_tokens = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--lookup-persistent-tokens"),
                                       "lookup-persistent-tokens"));
+        } else if (arg == "--lookup-persistent-path") {
+            options.speculative.lookup.persistent_path =
+                require_value("--lookup-persistent-path");
         } else if (arg == "--lookup-corpus-prefix") {
             options.speculative.lookup.corpus_prefix = require_value("--lookup-corpus-prefix");
         } else if (arg == "--lookup-corpus-weight") {
