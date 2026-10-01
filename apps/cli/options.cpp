@@ -122,6 +122,7 @@ std::string usage_text(const char* argv0) {
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N] [--devices N,M]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
+           "       [--dflash-teacher-out DIR]\n"
            "       [--spec-router fixed|stair] [--spec-router-scope request|engine] [--spec-router-state PATH]\n"
            "       [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
            "       [--spec-tree off|lattice] [--spec-tree-nodes N] [--spec-tree-spine N]\n"
