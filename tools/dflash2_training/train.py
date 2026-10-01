@@ -61,7 +61,7 @@ def load_data(path: str, keep_on: str, device: str, limit: int = 0) -> list[Samp
         metas = metas[:limit]
     out = []
     for meta in metas:
-        filename = os.path.join(path, meta["name"] + ".pt")
+        filename = os.path.join(path, meta.get("file", meta["name"] + ".pt"))
         if not os.path.exists(filename):
             continue
         out.append(Sample(meta, torch.load(filename, map_location="cpu"), keep_on, device))
