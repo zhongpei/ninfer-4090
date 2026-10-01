@@ -228,12 +228,18 @@ class LookupPersistentStore {
 public:
     LookupPersistentStore() = default;
     LookupPersistentStore(std::uint32_t max_tokens, std::uint32_t max_order,
-                          std::uint32_t max_matches)
-        : max_tokens_(max_tokens), max_order_(max_order), max_matches_(max_matches) {
-        if (max_tokens_ != 0) { tokens_.reserve(static_cast<std::size_t>(max_tokens_) + 1U); }
+                          std::uint32_t max_matches,
+                          std::filesystem::path persistent_path = {})
+        : max_tokens_(max_tokens), max_order_(max_order), max_matches_(max_matches),
+          persistent_path_(std::move(persistent_path)) {
+        if (max_tokens_ != 0) {
+            tokens_.reserve(static_cast<std::size_t>(max_tokens_) + 1U);
+            restore();
+        }
     }
 
     [[nodiscard]] bool enabled() const noexcept { return max_tokens_ != 0; }
+    [[nodiscard]] bool restart_persistent() const noexcept { return !persistent_path_.empty(); }
 
     void append_sequence(std::span<const TokenId> sequence) {
         if (!enabled() || sequence.empty() || max_tokens_ < 2) { return; }
@@ -251,6 +257,7 @@ public:
             tokens_.push_back(sequence[source]);
             record_follow(follow);
         }
+        persist();
     }
 
     [[nodiscard]] lookup_detail::MatchSet
@@ -304,6 +311,73 @@ public:
     }
 
 private:
+    void rebuild_index() {
+        index_.clear();
+        for (std::size_t follow = 0; follow < tokens_.size(); ++follow) {
+            if (tokens_[follow] != kLookupDocumentSeparator) { record_follow(follow); }
+        }
+    }
+
+    void restore() {
+        if (persistent_path_.empty() || !std::filesystem::exists(persistent_path_)) { return; }
+        std::vector<TokenId> restored = lookup_detail::read_binary_vector<TokenId>(persistent_path_);
+        if (restored.empty()) { return; }
+
+        if (restored.size() > max_tokens_) {
+            restored.erase(restored.begin(),
+                           restored.end() - static_cast<std::ptrdiff_t>(max_tokens_));
+            const auto first_separator =
+                std::find(restored.begin(), restored.end(), kLookupDocumentSeparator);
+            if (first_separator == restored.end()) {
+                restored.clear();
+            } else if (first_separator != restored.begin()) {
+                restored.erase(restored.begin(), first_separator);
+            }
+        }
+        if (!restored.empty() && restored.front() != kLookupDocumentSeparator) {
+            restored.insert(restored.begin(), kLookupDocumentSeparator);
+            if (restored.size() > max_tokens_) { restored.resize(max_tokens_); }
+        }
+        tokens_ = std::move(restored);
+        rebuild_index();
+    }
+
+    void persist() const {
+        if (persistent_path_.empty()) { return; }
+        std::error_code ec;
+        const auto parent = persistent_path_.parent_path();
+        if (!parent.empty()) {
+            std::filesystem::create_directories(parent, ec);
+            if (ec) {
+                throw std::runtime_error("cannot create lookup history directory: " +
+                                         parent.string());
+            }
+        }
+        auto temporary = persistent_path_;
+        temporary += ".tmp";
+        {
+            std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+            if (!output) {
+                throw std::runtime_error("cannot write lookup history: " + temporary.string());
+            }
+            if (!tokens_.empty()) {
+                output.write(reinterpret_cast<const char*>(tokens_.data()),
+                             static_cast<std::streamsize>(tokens_.size() * sizeof(TokenId)));
+            }
+            if (!output) {
+                throw std::runtime_error("failed writing lookup history: " + temporary.string());
+            }
+        }
+        std::filesystem::remove(persistent_path_, ec);
+        ec.clear();
+        std::filesystem::rename(temporary, persistent_path_, ec);
+        if (ec) {
+            std::filesystem::remove(temporary);
+            throw std::runtime_error("cannot publish lookup history: " +
+                                     persistent_path_.string());
+        }
+    }
+
     void record_follow(std::size_t follow) {
         if (follow == 0) { return; }
         for (std::uint32_t order = 1; order <= max_order_ && follow >= order; ++order) {
@@ -325,6 +399,7 @@ private:
     std::uint32_t max_tokens_ = 0;
     std::uint32_t max_order_ = 0;
     std::uint32_t max_matches_ = 0;
+    std::filesystem::path persistent_path_;
     std::vector<TokenId> tokens_;
     std::unordered_map<std::uint64_t, std::vector<std::size_t>> index_;
 };
@@ -340,8 +415,8 @@ public:
         token_path += ".tokens.i32";
         auto suffix_path = prefix;
         suffix_path += ".suffix.u32";
-        tokens_ = lookup_detail::read_binary_vector<TokenId>(token_path);
-        suffix_ = lookup_detail::read_binary_vector<std::uint32_t>(suffix_path);
+        tokens_.open(token_path);
+        suffix_.open(suffix_path);
         if (tokens_.empty() || suffix_.empty()) {
             throw std::runtime_error("lookup corpus arrays must not be empty");
         }
@@ -440,8 +515,8 @@ private:
         return {begin, lo};
     }
 
-    std::vector<TokenId> tokens_;
-    std::vector<std::uint32_t> suffix_;
+    lookup_detail::ReadOnlyBinaryArray<TokenId> tokens_;
+    lookup_detail::ReadOnlyBinaryArray<std::uint32_t> suffix_;
 };
 
 struct LookupDraftProposal {
