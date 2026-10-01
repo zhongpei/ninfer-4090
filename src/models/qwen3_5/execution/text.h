@@ -50,7 +50,7 @@ struct DFlashTreeFeatureSink {
 
     void begin(const Tensor& value);
     void capture_layer(int layer, const Tensor& value, cudaStream_t stream);
-    void capture_positions(const Tensor&, cudaStream_t) {}
+    void capture_positions(const Tensor& source, cudaStream_t stream);
 };
 
 struct DFlashFeatureSink {
