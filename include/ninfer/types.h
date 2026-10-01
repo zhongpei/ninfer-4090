@@ -177,7 +177,7 @@ struct SpeculativeRoutingOptions {
     std::uint32_t probe_period = 16;
     float switch_margin = 0.02F;
     // Optional restart-persistent survival/selection statistics. Empty preserves per-request-only
-    // learning; a configured path is loaded at startup and atomically rewritten after completion.
+    // learning; a configured path is loaded at startup and rewritten after completion.
     std::filesystem::path profile_path;
 };
 
