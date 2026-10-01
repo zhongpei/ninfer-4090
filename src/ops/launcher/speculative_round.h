@@ -32,6 +32,17 @@ void speculative_accept_sparse_drafts_launch(
 
 void speculative_select_accepted_hidden_launch(const Tensor& hidden, const Tensor& selectors,
                                                Tensor& out, cudaStream_t stream);
+void speculative_tree_build_device_launch(const Tensor& candidates, const Tensor& lattice,
+                                          std::int32_t anchor, std::int32_t steps,
+                                          std::int32_t node_budget, std::int32_t spine,
+                                          std::int32_t frontier, std::int32_t rope_delta,
+                                          Tensor& verify_ids, Tensor& positions,
+                                          Tensor& rope_positions, Tensor& parents,
+                                          Tensor& depths, cudaStream_t stream);
+void speculative_tree_accept_device_launch(const Tensor& verify_ids, const Tensor& parents,
+                                           const Tensor& target_tokens, Tensor& path_nodes,
+                                           Tensor& licensed_tokens, Tensor& licensed_counts,
+                                           Tensor& accepted_drafts, cudaStream_t stream);
 void speculative_tree_gather_bf16_launch(const Tensor& source, const Tensor& path_nodes,
                                          std::int32_t count, Tensor& destination,
                                          cudaStream_t stream);
