@@ -242,6 +242,15 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                                          .batch_capacity = plan.max_concurrency,
                                          .draft_window   = plan.draft_window,
                                          .backend        = plan.speculative_backend,
+                                         .tree_verify    = plan.speculative_tree.mode != SpeculativeTreeMode::Off,
+                                         .attention_head_dim = config.attention
+                                                                   ? dimension(config.attention->head_dim)
+                                                                   : 0,
+                                         .attention_kv_heads = config.attention
+                                                                  ? dimension(config.attention->num_key_value_heads)
+                                                                  : 0,
+                                         .full_attention_layers =
+                                             static_cast<std::int32_t>(config.full_attention_layers),
                                          .causal_scoring = plan.causal_scoring});
     out.prefill_hidden =
         add_tensor(builder, DType::BF16, {dimension(config.hidden_size), effective_prefill_chunk},
@@ -885,6 +894,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->lookup_ngram        = inputs.lookup_ngram;
     impl->lookup_options      = inputs.lookup_options;
     impl->speculative_routing = inputs.speculative_routing;
+    impl->speculative_tree    = inputs.speculative_tree;
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
     impl->features            = inputs.features;
@@ -982,6 +992,7 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .lookup_ngram        = options.speculative.lookup_ngram,
         .lookup_options      = options.speculative.lookup,
         .speculative_routing = options.speculative.routing,
+        .speculative_tree    = options.speculative.tree,
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,
