@@ -638,8 +638,12 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                 ? budgets[row].generated_tokens_remaining - 1U
                                                 : 0U;
+        const StairRouterState& chain_router =
+            speculative_routing.scope == SpeculativeRouterScope::Engine
+                ? engine_spec_router.chain
+                : request.stair_router;
         const std::uint32_t policy_extent =
-            choose_stair_extent(speculative_routing, request.stair_router, draft_window);
+            choose_stair_extent(speculative_routing, chain_router, draft_window);
         normal_extents[row] = std::min(
             {policy_extent, max_by_budget, capacity - sequence.execution_frontier - 1U});
 
@@ -697,8 +701,12 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         if (wide_proposal_fits) {
             const std::uint32_t maximum_tree =
                 std::min({speculative_tree.nodes, draft_window, max_by_output});
+            const TreeStairRouterState& tree_router =
+                speculative_routing.scope == SpeculativeRouterScope::Engine
+                    ? engine_spec_router.tree
+                    : requests[lanes[0]].tree_stair_router;
             tree_node_budget = choose_tree_stair_extent(
-                speculative_routing, requests[lanes[0]].tree_stair_router, maximum_tree);
+                speculative_routing, tree_router, maximum_tree);
             tree_round_options.nodes = tree_node_budget;
             tree_round_options.spine = std::min(speculative_tree.spine, tree_node_budget);
         }
@@ -848,13 +856,21 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                     request.speculative_stats.tree_accepted_drafts +=
                         static_cast<std::uint32_t>(accepted_i);
                     if (speculative_routing.mode == SpeculativeRoutingMode::Stair) {
-                        request.tree_stair_router.observe(
+                        TreeStairRouterState& tree_router =
+                            speculative_routing.scope == SpeculativeRouterScope::Engine
+                                ? engine_spec_router.tree
+                                : request.tree_stair_router;
+                        tree_router.observe(
                             tree_round_options.nodes, static_cast<std::uint32_t>(accepted_i),
                             speculative_routing);
                     }
                 } else if (!lookup_batch &&
                            speculative_routing.mode == SpeculativeRoutingMode::Stair) {
-                    request.stair_router.observe(
+                    StairRouterState& chain_router =
+                        speculative_routing.scope == SpeculativeRouterScope::Engine
+                            ? engine_spec_router.chain
+                            : request.stair_router;
+                    chain_router.observe(
                         extent, static_cast<std::uint32_t>(accepted_i), speculative_routing);
                 }
                 if (lookup_batch) {
