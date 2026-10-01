@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -99,11 +100,37 @@ enum class SpeculativeBackend : std::uint8_t {
     DFlash2,
 };
 
+enum class SpeculativeRoutingMode : std::uint8_t {
+    Fixed,
+    Stair,
+};
+
+inline constexpr std::size_t kSpeculativeStairLevels = 4;
+
+// Runtime policy for DFlash/DFlash2 target-verification width. The neural drafter still runs at
+// the startup maximum K; Stair mode decides how much of that proposal is worth paying to verify.
+// Costs are relative units rather than hardware constants so an RTX 4090 can be calibrated from
+// its own verify staircase. Fixed mode is the default and preserves the pre-router behavior.
+struct SpeculativeRoutingOptions {
+    SpeculativeRoutingMode mode = SpeculativeRoutingMode::Fixed;
+    std::array<std::uint32_t, kSpeculativeStairLevels> widths{3, 7, 11, 15};
+    std::array<float, kSpeculativeStairLevels> verify_costs{1.00F, 1.02F, 1.05F, 1.10F};
+    float draft_cost       = 0.25F;
+    float prior_acceptance = 0.70F;
+    float prior_weight     = 2.0F;
+    std::uint32_t warmup_rounds = 4;
+    // Zero disables deliberate wide probes. Probes prevent a narrow policy from censoring all
+    // observations about later proposal positions.
+    std::uint32_t probe_period = 16;
+    float switch_margin = 0.02F;
+};
+
 struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
-    // Startup-fixed K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
+    // Startup maximum K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
     std::uint32_t draft_tokens = 0;
     ProposalHead proposal_head = ProposalHead::Full;
+    SpeculativeRoutingOptions routing;
     // Context-lookup drafting: match this many trailing tokens against the sequence so far and
     // propose whatever followed the last time they appeared. 0 disables it. It costs no device
     // work, it is exact (verify rejects a wrong guess), and it is strongest exactly where a draft

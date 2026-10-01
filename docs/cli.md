@@ -217,7 +217,12 @@ concurrent requests, sampling penalties, and prefix reuse. An artifact without t
 weights reports a missing DFlash2 component when selected. Vision, MTP and DFlash follow the same
 rule: their weights are required only when that component is enabled at startup.
 
-Only one speculative backend can be enabled per Engine. The published [performance results](performance.md)
+Only one speculative backend can be enabled per Engine. DFlash/DFlash2 may additionally enable
+the opt-in adaptive verification policy described in
+[Adaptive speculative routing](maintainer/speculative-routing.md). The drafter remains at the
+startup maximum K; the router changes only how many proposed rows the target verifies each round.
+
+The published [performance results](performance.md)
 use MTP with three draft tokens and DFlash with seven draft tokens (block length eight), both with
 the optimized proposal head. DFlash accepts one to fifteen draft tokens; seven forms the measured
 block length eight, while fifteen uses the maximum supported block length sixteen.
@@ -236,6 +241,15 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--kv-dtype bf16\|int8\|fp8\|rk8v4\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant; all six are accepted on this fork's sm_86/sm_89 targets | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
+| `--spec-router fixed\|stair` | fixed maximum-K verification or adaptive DFlash/DFlash2 verification width | `fixed` |
+| `--spec-stair-widths A,B,C,D` | four strictly increasing Stair draft extents | `3,7,11,15` |
+| `--spec-stair-costs A,B,C,D` | measured relative verify cost at each Stair extent | `1,1.02,1.05,1.10` |
+| `--spec-stair-draft-cost F` | wide drafter cost in the same relative unit | `0.25` |
+| `--spec-stair-prior F` | initial per-position survival prior | `0.70` |
+| `--spec-stair-prior-weight F` | prior pseudo-observation weight | `2` |
+| `--spec-stair-warmup N` | initial widest-rung rounds | `4` |
+| `--spec-stair-probe-period N` | periodic wide probe; zero disables | `16` |
+| `--spec-stair-margin F` | switch hysteresis | `0.02` |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--lookup-ngram N` | context-lookup drafting alongside `--spec`: the last `N` tokens are matched against the sequence so far and what followed is proposed; exact, since verification rejects a wrong guess | `0` (off) |
 | `--prefill-cublas` | hand wide prefill GEMMs to cuBLAS: a large prefill speedup for a small perplexity cost, and it wants a larger `--prefill-chunk` to pay (see [performance](performance.md)) | off |

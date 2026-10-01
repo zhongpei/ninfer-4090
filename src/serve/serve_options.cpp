@@ -85,6 +85,10 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
+           "[--spec-router fixed|stair] [--spec-stair-widths A,B,C,D] "
+           "[--spec-stair-costs A,B,C,D] [--spec-stair-draft-cost F] "
+           "[--spec-stair-prior F] [--spec-stair-prior-weight F] "
+           "[--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-residency resident|overlay] [--vision-max-merged N] "
            "[--no-cuda-graph] [--no-prefix-reuse] [--auto-prefix-grid] [--devices N,M] "
@@ -123,6 +127,8 @@ std::string serve_usage_text(const char* argv0) {
            "small perplexity cost (docs/performance.md), off by default, and it wants a larger "
            "--prefill-chunk to pay; --no-prefill-cublas-projections keeps the attention and GDN "
            "input projections off that route\n"
+           "       --spec-router stair adaptively cuts DFlash/DFlash2 target verification using "
+           "four explicit width/cost rungs; fixed remains the default for A/B comparisons\n"
            "       --lookup-ngram N adds context-lookup drafting alongside --spec: the last N tokens "
            "are matched against the sequence so far and what followed is proposed; it is exact, and "
            "0 (the default) disables it\n"
@@ -335,6 +341,35 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--draft-tokens"), "draft-tokens"));
+        } else if (arg == "--spec-router") {
+            options.speculative.routing.mode =
+                product::parse_speculative_routing_mode(require_value("--spec-router"));
+        } else if (arg == "--spec-stair-widths") {
+            product::parse_speculative_stair_widths(require_value("--spec-stair-widths"),
+                                                    options.speculative.routing);
+        } else if (arg == "--spec-stair-costs") {
+            product::parse_speculative_stair_costs(require_value("--spec-stair-costs"),
+                                                   options.speculative.routing);
+        } else if (arg == "--spec-stair-draft-cost") {
+            options.speculative.routing.draft_cost = parse_float_in(
+                require_value("--spec-stair-draft-cost"), "spec-stair-draft-cost", 0.0F, 1000.0F);
+        } else if (arg == "--spec-stair-prior") {
+            options.speculative.routing.prior_acceptance = parse_float_in(
+                require_value("--spec-stair-prior"), "spec-stair-prior", 0.0F, 1.0F);
+        } else if (arg == "--spec-stair-prior-weight") {
+            options.speculative.routing.prior_weight = parse_float_in(
+                require_value("--spec-stair-prior-weight"), "spec-stair-prior-weight", 0.0F,
+                1000000.0F);
+        } else if (arg == "--spec-stair-warmup") {
+            options.speculative.routing.warmup_rounds = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--spec-stair-warmup"), "spec-stair-warmup"));
+        } else if (arg == "--spec-stair-probe-period") {
+            options.speculative.routing.probe_period = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--spec-stair-probe-period"),
+                                      "spec-stair-probe-period"));
+        } else if (arg == "--spec-stair-margin") {
+            options.speculative.routing.switch_margin = parse_float_in(
+                require_value("--spec-stair-margin"), "spec-stair-margin", 0.0F, 10.0F);
         } else if (arg == "--default-max-tokens") {
             options.default_max_tokens =
                 parse_nonnegative_int(require_value("--default-max-tokens"), "default-max-tokens");

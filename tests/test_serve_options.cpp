@@ -98,7 +98,8 @@ int main() {
                       "--lookup-ngram did not reach the Engine options next to --spec");
     failures += check(route_engine.prefill_cublas && !route_engine.prefill_cublas_projections,
                       "the cuBLAS prefill controls did not reach the Engine options");
-    for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections", "--lookup-ngram"}) {
+    for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections", "--lookup-ngram",
+                             "--spec-router", "--spec-stair-widths", "--spec-stair-costs"}) {
         failures += check(kv_help.find(flag) != std::string::npos,
                           "serve help omits an accepted prefill or drafting control");
     }
@@ -148,6 +149,24 @@ int main() {
                       "--draft-tokens did not preserve the DFlash window");
     failures += check(dflash.speculative.proposal_head == ninfer::ProposalHead::Optimized,
                       "--lm-head-draft did not select the optimized proposal head");
+
+    const ServeOptions stair = parse(
+        {"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "15",
+         "--spec-router", "stair", "--spec-stair-widths", "3,7,11,15",
+         "--spec-stair-costs", "1,1.02,1.05,1.10", "--spec-stair-draft-cost", "0.25",
+         "--spec-stair-prior", "0.65", "--spec-stair-prior-weight", "3",
+         "--spec-stair-warmup", "6", "--spec-stair-probe-period", "12",
+         "--spec-stair-margin", "0.03"});
+    failures += check(stair.speculative.routing.mode == ninfer::SpeculativeRoutingMode::Stair &&
+                          stair.speculative.routing.widths[2] == 11 &&
+                          stair.speculative.routing.probe_period == 12,
+                      "serve options did not preserve Stair router A/B parameters");
+    bool stair_mtp_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3",
+                     "--spec-router", "stair", "--spec-stair-widths", "1,1,2,3"});
+    } catch (const std::invalid_argument&) { stair_mtp_rejected = true; }
+    failures += check(stair_mtp_rejected, "serve accepted Stair routing on MTP or bad widths");
 
     for (const auto k : {1U, 2U, 7U, 15U}) {
         const auto options = parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",

@@ -68,6 +68,26 @@ int main() {
                               dflash2.speculative.draft_tokens == k,
                           "CLI did not preserve the DFlash2 draft count");
     }
+    const auto stair = parse(
+        {"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "dflash2",
+         "--draft-tokens", "15", "--spec-router", "stair", "--spec-stair-widths", "3,7,11,15",
+         "--spec-stair-costs", "1,1.02,1.05,1.10", "--spec-stair-draft-cost", "0.25",
+         "--spec-stair-prior", "0.65", "--spec-stair-prior-weight", "3",
+         "--spec-stair-warmup", "6", "--spec-stair-probe-period", "12",
+         "--spec-stair-margin", "0.03"});
+    failures += check(stair.speculative.routing.mode == ninfer::SpeculativeRoutingMode::Stair &&
+                          stair.speculative.routing.widths[2] == 11 &&
+                          stair.speculative.routing.verify_costs[3] == 1.10F &&
+                          stair.speculative.routing.warmup_rounds == 6 &&
+                          stair.speculative.routing.probe_period == 12,
+                      "CLI did not preserve Stair router A/B parameters");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--spec", "mtp", "--draft-tokens", "3",
+                                       "--spec-router", "stair",
+                                       "--spec-stair-widths", "1,2,3,3"});
+                      }),
+                      "CLI accepted Stair routing on MTP or invalid width ordering");
     for (const auto k : {0U, 16U}) {
         failures +=
             check(rejects([&] {
@@ -101,7 +121,8 @@ int main() {
                           route.speculative.backend == ninfer::SpeculativeBackend::Mtp &&
                           route.speculative.draft_tokens == 3,
                       "CLI did not parse the cuBLAS prefill and context-lookup controls");
-    for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections", "--lookup-ngram"}) {
+    for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections", "--lookup-ngram",
+                             "--spec-router", "--spec-stair-widths", "--spec-stair-costs"}) {
         failures += check(help.find(flag) != std::string::npos,
                           "CLI help omits an accepted prefill or drafting control");
     }

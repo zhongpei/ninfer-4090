@@ -85,6 +85,7 @@ struct SequencePlanningInputs {
     std::uint32_t prefill_chunk             = 0;
     std::uint32_t draft_window              = 0;
     std::uint32_t lookup_ngram             = 0;
+    SpeculativeRoutingOptions speculative_routing;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
@@ -110,6 +111,7 @@ struct SequencePlanImpl {
     std::uint32_t prefill_chunk             = 0;
     std::uint32_t draft_window              = 0;
     std::uint32_t lookup_ngram             = 0;
+    SpeculativeRoutingOptions speculative_routing;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
