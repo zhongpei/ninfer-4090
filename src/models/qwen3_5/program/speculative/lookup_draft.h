@@ -136,9 +136,14 @@ class LookupPersistentStore {
 public:
     LookupPersistentStore() = default;
     LookupPersistentStore(std::uint32_t max_tokens, std::uint32_t max_order,
-                          std::uint32_t max_matches)
-        : max_tokens_(max_tokens), max_order_(max_order), max_matches_(max_matches) {
+                          std::uint32_t max_matches,
+                          std::filesystem::path history_path = {})
+        : max_tokens_(max_tokens), max_order_(max_order), max_matches_(max_matches),
+          history_path_(std::move(history_path)) {
         if (max_tokens_ != 0) { tokens_.reserve(static_cast<std::size_t>(max_tokens_) + 1U); }
+        if (enabled() && !history_path_.empty() && std::filesystem::exists(history_path_)) {
+            load_history();
+        }
     }
 
     [[nodiscard]] bool enabled() const noexcept { return max_tokens_ != 0; }
@@ -159,6 +164,7 @@ public:
             tokens_.push_back(sequence[source]);
             record_follow(follow);
         }
+        persist_history();
     }
 
     [[nodiscard]] lookup_detail::MatchSet
@@ -212,6 +218,73 @@ public:
     }
 
 private:
+    struct HistoryHeader {
+        std::uint64_t magic = 0x4e494e464c4f4f4bULL; // "NINFLOOK"
+        std::uint32_t version = 1;
+        std::uint32_t count = 0;
+    };
+
+    void load_history() {
+        std::ifstream input(history_path_, std::ios::binary);
+        HistoryHeader header;
+        if (!input.read(reinterpret_cast<char*>(&header), sizeof(header)) ||
+            header.magic != HistoryHeader{}.magic || header.version != 1 ||
+            header.count > max_tokens_) {
+            throw std::runtime_error("invalid lookup history snapshot: " +
+                                     history_path_.string());
+        }
+        tokens_.resize(header.count);
+        if (header.count != 0 &&
+            !input.read(reinterpret_cast<char*>(tokens_.data()),
+                        static_cast<std::streamsize>(tokens_.size() * sizeof(TokenId)))) {
+            throw std::runtime_error("truncated lookup history snapshot: " +
+                                     history_path_.string());
+        }
+        char extra = 0;
+        if (input.read(&extra, 1)) {
+            throw std::runtime_error("lookup history snapshot has trailing data: " +
+                                     history_path_.string());
+        }
+        for (std::size_t pos = 0; pos < tokens_.size(); ++pos) {
+            const TokenId token = tokens_[pos];
+            if (token < 0 && token != kLookupDocumentSeparator) {
+                throw std::runtime_error("lookup history snapshot has an invalid token id");
+            }
+            if (token != kLookupDocumentSeparator) { record_follow(pos); }
+        }
+    }
+
+    void persist_history() const {
+        if (history_path_.empty()) { return; }
+        if (!history_path_.parent_path().empty()) {
+            std::filesystem::create_directories(history_path_.parent_path());
+        }
+        auto tmp = history_path_;
+        tmp += ".tmp";
+        {
+            std::ofstream output(tmp, std::ios::binary | std::ios::trunc);
+            const HistoryHeader header{.count = static_cast<std::uint32_t>(tokens_.size())};
+            output.write(reinterpret_cast<const char*>(&header), sizeof(header));
+            if (!tokens_.empty()) {
+                output.write(reinterpret_cast<const char*>(tokens_.data()),
+                             static_cast<std::streamsize>(tokens_.size() * sizeof(TokenId)));
+            }
+            output.flush();
+            if (!output) {
+                throw std::runtime_error("failed writing lookup history snapshot: " +
+                                         tmp.string());
+            }
+        }
+        std::error_code ec;
+        std::filesystem::remove(history_path_, ec);
+        ec.clear();
+        std::filesystem::rename(tmp, history_path_, ec);
+        if (ec) {
+            std::filesystem::remove(tmp);
+            throw std::runtime_error("failed publishing lookup history snapshot: " + ec.message());
+        }
+    }
+
     void record_follow(std::size_t follow) {
         if (follow == 0) { return; }
         for (std::uint32_t order = 1; order <= max_order_ && follow >= order; ++order) {
@@ -233,6 +306,7 @@ private:
     std::uint32_t max_tokens_ = 0;
     std::uint32_t max_order_ = 0;
     std::uint32_t max_matches_ = 0;
+    std::filesystem::path history_path_;
     std::vector<TokenId> tokens_;
     std::unordered_map<std::uint64_t, std::vector<std::size_t>> index_;
 };
