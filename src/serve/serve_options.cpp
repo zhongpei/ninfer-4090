@@ -1,5 +1,6 @@
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
+#include "product/speculative_profile.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -85,7 +86,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] "
            "[--spec mtp|dflash|dflash2 --draft-tokens N] "
-           "[--spec-router fixed|stair] [--spec-stair-widths A,B,C,D] "
+           "[--spec-router fixed|stair] [--spec-profile FILE] [--spec-stair-widths A,B,C,D] "
            "[--spec-tree off|lattice] [--spec-tree-nodes N] [--spec-tree-spine N] "
            "[--spec-stair-costs A,B,C,D] [--spec-stair-draft-cost F] "
            "[--spec-stair-prior F] [--spec-stair-prior-weight F] "
@@ -361,6 +362,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--spec-router") {
             options.speculative.routing.mode =
                 product::parse_speculative_routing_mode(require_value("--spec-router"));
+        } else if (arg == "--spec-profile") {
+            product::apply_speculative_profile(require_value("--spec-profile"),
+                                               options.speculative.routing);
         } else if (arg == "--spec-stair-widths") {
             product::parse_speculative_stair_widths(require_value("--spec-stair-widths"),
                                                     options.speculative.routing);
