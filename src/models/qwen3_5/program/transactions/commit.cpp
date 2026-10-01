@@ -592,17 +592,27 @@ FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
     SequenceState& state                   = active_sequence(lane);
     const std::uint32_t continuation_index = active_continuations[lane];
     if (request.lifecycle != Lifecycle::Finishable) { return out; }
-    const auto retain_lookup_history = [&]() noexcept {
-        if (!lookup_persistent.enabled()) { return; }
+    const auto retain_speculative_history = [&]() noexcept {
         try {
-            lookup_persistent.append_sequence(std::span<const TokenId>(state.ledger));
+            if (lookup_persistent.enabled()) {
+                lookup_persistent.append_sequence(std::span<const TokenId>(state.ledger));
+            }
         } catch (...) {
-            // This cache only affects proposal hit rate. A host-allocation failure may not turn a
+            // Lookup history only affects proposal hit rate. Persistence failure may not turn a
             // successfully generated request into an inference failure.
+        }
+        if (speculative_routing.mode == SpeculativeRoutingMode::Stair) {
+            merge_stair_router_delta(stair_persistent, request.stair_router,
+                                     request.stair_router_seed);
+            try {
+                save_stair_router_state(speculative_routing.profile_path, stair_persistent);
+            } catch (...) {
+                // Routing persistence is advisory performance state, never generation authority.
+            }
         }
     };
     if (!request.publish_continuation) {
-        retain_lookup_history();
+        retain_speculative_history();
         if (!clear_lane_strict(state, request)) { return out; }
         out.disposition = runtime::FinishDisposition::Released;
         out.timings     = request.timings;
@@ -655,7 +665,7 @@ FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
         populate_continuation_summary(state, out.summary);
         out.summary.active_references = 0;
     } catch (...) { return out; }
-    retain_lookup_history();
+    retain_speculative_history();
     release_active_shared_references(state);
     release_sequence_growth_entitlement(state);
     unbind_sequence_kv(state);
