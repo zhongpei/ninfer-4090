@@ -836,9 +836,11 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 request.speculative_stats.rounds += 1;
                 request.speculative_stats.drafted_tokens += extent;
                 request.speculative_stats.accepted_tokens += static_cast<std::uint32_t>(accepted_i);
-                for (std::int32_t i = 0; i < accepted_i; ++i) {
-                    request.speculative_stats.accepted_per_position[static_cast<std::size_t>(i)] +=
-                        1;
+                if (!tree_active) {
+                    for (std::int32_t i = 0; i < accepted_i; ++i) {
+                        request.speculative_stats
+                            .accepted_per_position[static_cast<std::size_t>(i)] += 1;
+                    }
                 }
                 if (tree_active) {
                     ++request.speculative_stats.tree_rounds;
