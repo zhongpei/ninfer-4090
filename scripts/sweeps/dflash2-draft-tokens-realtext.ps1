@@ -61,6 +61,10 @@ foreach ($n in 1,2,3,4,5,6,7,8,10,12) {
   $configs += @{ label="dflash2-$n";      args=@('--spec','dflash2','--draft-tokens',[string]$n) }
   $configs += @{ label="dflash2-$n+head"; args=@('--spec','dflash2','--draft-tokens',[string]$n,'--lm-head-draft') }
 }
+$configs += @{ label='dflash2-7+tree'; args=@('--spec','dflash2','--draft-tokens','7',
+  '--spec-tree','lattice','--spec-tree-nodes','7','--spec-tree-spine','7') }
+$configs += @{ label='dflash2-15+tree'; args=@('--spec','dflash2','--draft-tokens','15',
+  '--spec-tree','lattice','--spec-tree-nodes','15','--spec-tree-spine','7') }
 $configs += @{ label='mtp3';      args=@('--spec','mtp','--draft-tokens','3') }
 $configs += @{ label='mtp3+head'; args=@('--spec','mtp','--draft-tokens','3','--lm-head-draft') }
 
