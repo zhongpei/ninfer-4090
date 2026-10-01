@@ -46,6 +46,13 @@ namespace ninfer::product {
     throw std::invalid_argument("invalid lookup DFlash mode: " + std::string(value));
 }
 
+[[nodiscard]] inline SpeculativeRouterScope
+parse_speculative_router_scope(std::string_view value) {
+    if (value == "request") { return SpeculativeRouterScope::Request; }
+    if (value == "engine") { return SpeculativeRouterScope::Engine; }
+    throw std::invalid_argument("invalid speculative router scope: " + std::string(value));
+}
+
 [[nodiscard]] inline SpeculativeRoutingMode
 parse_speculative_routing_mode(std::string_view value) {
     if (value == "fixed") { return SpeculativeRoutingMode::Fixed; }
