@@ -590,6 +590,11 @@ public:
     const ProposalHead proposal_head;
     ::ninfer::qwen3_5::LookupPersistentStore lookup_persistent;
     ::ninfer::qwen3_5::LookupCorpusStore lookup_corpus;
+    // Server-lifetime routing evidence. Individual requests snapshot these counters at admission
+    // so concurrent requests do not change each other's decisions mid-generation; every observed
+    // round is also published back here for later requests.
+    StairRouterState persistent_stair_router;
+    TreeStairRouterState persistent_tree_stair_router;
     const float rope_scaling_factor;
     const std::uint32_t rope_scaling_original_context;
 
