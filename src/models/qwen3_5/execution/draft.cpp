@@ -759,7 +759,7 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
                         SpeculativeTreeOptions options) {
     if (k == 0 || k > kDFlashDecodeMaximumDrafts || options.mode != SpeculativeTreeMode::Lattice ||
         options.nodes != k || options.spine == 0 || options.spine > k ||
-        state.execution.parameters.model.config().draft == nullptr ||
+        !state.execution.parameters.model.config().draft ||
         !state.execution.parameters.model.config().draft->dflash2 ||
         state.execution.replay_records == nullptr) {
         throw std::invalid_argument("DFlash2 tree decode received an unsupported runtime profile");
