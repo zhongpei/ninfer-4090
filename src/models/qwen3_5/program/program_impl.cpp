@@ -765,12 +765,14 @@ TeacherTrace ProgramImpl::teacher_trace(PreparedPromptData&& prompt,
 
             Tensor hidden = prefill_hidden.slice(1, 0, columns);
             std::vector<TokenId> host_top_ids(static_cast<std::size_t>(columns) * 16U);
-            std::vector<float> host_top_scores(static_cast<std::size_t>(columns) * 16U);
+            std::vector<float> host_top_lp(static_cast<std::size_t>(columns) * 16U);
             std::vector<TokenId> host_argmax(static_cast<std::size_t>(columns));
-            std::vector<float> host_top1_logprob(static_cast<std::size_t>(columns));
 
-            // First obtain the stable top-16 directly from the artifact's actual head format.
+            // First obtain stable top-16 ids from the artifact's actual head format. Scores from
+            // this fused projection are deliberately discarded: distillation probabilities below
+            // are reconstructed from the represented dense BF16 target logits.
             work.reset();
+            mark_workspace_usage(workspace_plan.causal_score);
             Tensor top_ids = work.alloc(DType::I32, {16, columns});
             Tensor top_scores = work.alloc(DType::FP32, {16, columns});
             {
@@ -786,43 +788,43 @@ TeacherTrace ProgramImpl::teacher_trace(PreparedPromptData&& prompt,
             device.synchronize();
             CUDA_CHECK(cudaMemcpy(host_top_ids.data(), top_ids.data, top_ids.bytes(),
                                   cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(host_top_scores.data(), top_scores.data, top_scores.bytes(),
-                                  cudaMemcpyDeviceToHost));
 
-            // target_logprobs gives exact log p(top1). Since top1_score is also known,
-            // logZ = score(top1) - logp(top1), so every recorded top-K logprob follows without
-            // adding another vocabulary reduction kernel.
+            // Project through the ordinary target path, copy the selected ids back to device, and
+            // perform one shared logsumexp per predictor column. This makes the recorded soft
+            // labels exactly correspond to the BF16 logits used by the runtime.
             work.reset();
             Tensor logits = work.alloc(
                 DType::BF16, {dimension(parameters.model.config().text.vocab_size), columns});
+            Tensor candidate_ids = work.alloc(DType::I32, {16, columns});
+            Tensor candidate_lp = work.alloc(DType::FP32, {16, columns});
             Tensor argmax = work.alloc(DType::I32, {columns});
-            Tensor top1_logprob = work.alloc(DType::FP32, {columns});
+            CUDA_CHECK(cudaMemcpyAsync(candidate_ids.data, host_top_ids.data(),
+                                       candidate_ids.bytes(), cudaMemcpyHostToDevice,
+                                       device.stream));
             execution::project(hidden, parameters.text.output_head, logits, work, device.stream);
             ops::argmax(logits, argmax,
                         dimension(parameters.model.resources().public_token_count),
                         device.stream);
-            ops::target_logprobs(
-                logits, argmax,
+            ops::target_candidate_logprobs(
+                logits, candidate_ids,
                 dimension(parameters.model.resources().public_token_count),
-                top1_logprob, device.stream);
+                candidate_lp, device.stream);
             device.synchronize();
             CUDA_CHECK(cudaMemcpy(host_argmax.data(), argmax.data, argmax.bytes(),
                                   cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(host_top1_logprob.data(), top1_logprob.data,
-                                  top1_logprob.bytes(), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(host_top_lp.data(), candidate_lp.data, candidate_lp.bytes(),
+                                  cudaMemcpyDeviceToHost));
 
             for (std::uint32_t row = 0; row < columns_u32; ++row) {
                 const std::size_t source_base = static_cast<std::size_t>(row) * 16U;
                 const std::size_t target_base =
                     static_cast<std::size_t>(cursor + row) * options.top_k;
-                const float log_z =
-                    host_top_scores[source_base] - host_top1_logprob[row];
                 trace.argmax[cursor + row] = host_argmax[row];
                 for (std::uint32_t rank = 0; rank < options.top_k; ++rank) {
                     trace.top_ids[target_base + rank] =
                         host_top_ids[source_base + rank];
                     trace.top_logprobs[target_base + rank] =
-                        host_top_scores[source_base + rank] - log_z;
+                        host_top_lp[source_base + rank];
                 }
             }
 
