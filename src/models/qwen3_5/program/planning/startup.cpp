@@ -484,11 +484,21 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
 
     if (plan.causal_scoring) {
         WorkspaceLayoutBuilder causal_score;
-        matrix(causal_score, DType::BF16, dimension(config.vocab_size),
-               static_cast<std::int32_t>(kCausalScoreTile));
-        matrix(causal_score, DType::I32, 1, static_cast<std::int32_t>(kCausalScoreTile));
-        matrix(causal_score, DType::FP32, 1, static_cast<std::int32_t>(kCausalScoreTile));
+        const auto score_columns = static_cast<std::int32_t>(kCausalScoreTile);
+        matrix(causal_score, DType::BF16, dimension(config.vocab_size), score_columns);
+        matrix(causal_score, DType::I32, 16, score_columns);
+        matrix(causal_score, DType::FP32, 16, score_columns);
+        matrix(causal_score, DType::I32, 1, score_columns);
+        matrix(causal_score, DType::FP32, 1, score_columns);
         linear_scratch(causal_score, parameters.text.output_head, 1, kCausalScoreTile);
+        if (execution::rotated(parameters.text.output_head.hadamard_signs)) {
+            matrix(causal_score, DType::BF16, dimension(config.hidden_size), score_columns);
+        }
+        scratch(causal_score, ops::linear_topk_workspace_capacity_bytes(
+                                  parameters.text.output_head.weight.qtype,
+                                  parameters.text.output_head.weight.n,
+                                  parameters.text.output_head.weight.k,
+                                  1, score_columns));
         out.causal_score = finish(causal_score);
     }
 
