@@ -79,9 +79,22 @@ void check_native_inputs(const qwen::Model& model) {
     const auto linear = [&](qwen::WeightId id) {
         return ops::prepare_linear_weight(model.input(id));
     };
+    const auto rotated_linear = [&](auto id) {
+        return ops::prepare_linear_weight(model.rotated_input(id));
+    };
+    const auto head = [&](qwen::WeightUseId id) {
+        const auto& use = model.weight(id.parameter).uses.at(id.use_index);
+        if (use.hadamard_signs) {
+            ninfer::test::artifact_fixture::rejects<std::invalid_argument>(
+                [&] { (void)model.input(id); },
+                "rotated output head was admitted without rotating its activation");
+        }
+        return rotated_linear(id);
+    };
     const auto dense = [&](const qwen::DenseWeights& weights) {
-        (void)ops::prepare_linear_swiglu_weight(model.input(weights.gate), model.input(weights.up));
-        (void)linear(weights.down);
+        (void)ops::prepare_linear_swiglu_weight(model.rotated_input(weights.gate),
+                                               model.rotated_input(weights.up));
+        (void)rotated_linear(weights.down);
     };
     const auto block = [&](const qwen::BlockWeights& weights, bool mtp = false) {
         if (const auto* attention = std::get_if<qwen::AttentionWeights>(&weights.mixer)) {
@@ -92,17 +105,22 @@ void check_native_inputs(const qwen::Model& model) {
                 for (const auto& input : bank) { (void)ops::prepare_linear_weight(input); }
             } else {
                 (void)ops::prepare_attn_input_proj_weights(
-                    model.input(attention->query), model.input(attention->key),
-                    model.input(attention->gate), model.input(attention->value));
+                    model.rotated_input(attention->query), model.rotated_input(attention->key),
+                    model.rotated_input(attention->gate), model.rotated_input(attention->value));
             }
-            (void)linear(attention->output);
+            if (mtp) {
+                (void)linear(attention->output);
+            } else {
+                (void)rotated_linear(attention->output);
+            }
         } else {
             const auto& gdn = std::get<qwen::GdnWeights>(weights.mixer);
-            (void)ops::prepare_gdn_input_proj_weights(model.input(gdn.query), model.input(gdn.key),
-                                                      model.input(gdn.value), model.input(gdn.z));
+            (void)ops::prepare_gdn_input_proj_weights(
+                model.rotated_input(gdn.query), model.rotated_input(gdn.key),
+                model.rotated_input(gdn.value), model.rotated_input(gdn.z));
             (void)ops::prepare_gdn_gating_proj_weights(model.input(gdn.a_projection),
                                                        model.input(gdn.b_projection));
-            (void)linear(gdn.output);
+            (void)rotated_linear(gdn.output);
         }
         if (const auto* mlp = std::get_if<qwen::DenseWeights>(&weights.ffn)) {
             dense(*mlp);
@@ -122,7 +140,7 @@ void check_native_inputs(const qwen::Model& model) {
     };
     const auto& weights = model.weights();
     (void)native_weight(model.weight(weights.text.token_embedding).view);
-    (void)ops::prepare_linear_weight(model.input(weights.text.output_head_use));
+    (void)head(weights.text.output_head_use);
     for (const auto& layer : weights.text.layers) { block(layer); }
     if (weights.vision) {
         const auto& vision = *weights.vision;
@@ -141,7 +159,7 @@ void check_native_inputs(const qwen::Model& model) {
     if (weights.mtp) {
         (void)linear(weights.mtp->input_projection);
         block(weights.mtp->layer, true);
-        (void)ops::prepare_linear_weight(model.input(weights.mtp->output_head_use));
+        (void)head(weights.mtp->output_head_use);
     }
     if (weights.draft) {
         const auto& draft = *weights.draft;
@@ -158,8 +176,9 @@ void check_native_inputs(const qwen::Model& model) {
             if (layer.mlp_conv) { (void)linear(layer.mlp_conv->kernel_projection); }
         }
         if (draft.selector) { (void)linear(draft.selector->hidden_projection); }
-        (void)ops::prepare_linear_weight(model.input(draft.output_head_use));
+        (void)head(draft.output_head_use);
     }
+    if (weights.proposal) { (void)rotated_linear(weights.proposal->head); }
     if (model.weight(weights.text.output_head).uses.size() > 1) {
         ninfer::test::artifact_fixture::rejects<std::invalid_argument>(
             [&] { (void)model.input(weights.text.output_head); },
