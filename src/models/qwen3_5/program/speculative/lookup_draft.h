@@ -136,12 +136,19 @@ class LookupPersistentStore {
 public:
     LookupPersistentStore() = default;
     LookupPersistentStore(std::uint32_t max_tokens, std::uint32_t max_order,
-                          std::uint32_t max_matches)
-        : max_tokens_(max_tokens), max_order_(max_order), max_matches_(max_matches) {
+                          std::uint32_t max_matches,
+                          std::filesystem::path persistent_path = {})
+        : max_tokens_(max_tokens), max_order_(max_order), max_matches_(max_matches),
+          persistent_path_(std::move(persistent_path)) {
         if (max_tokens_ != 0) { tokens_.reserve(static_cast<std::size_t>(max_tokens_) + 1U); }
+        if (enabled() && !persistent_path_.empty() && std::filesystem::exists(persistent_path_)) {
+            load();
+        }
     }
 
     [[nodiscard]] bool enabled() const noexcept { return max_tokens_ != 0; }
+    [[nodiscard]] bool disk_backed() const noexcept { return !persistent_path_.empty(); }
+    [[nodiscard]] std::size_t token_count() const noexcept { return tokens_.size(); }
 
     void append_sequence(std::span<const TokenId> sequence) {
         if (!enabled() || sequence.empty() || max_tokens_ < 2) { return; }
@@ -159,6 +166,7 @@ public:
             tokens_.push_back(sequence[source]);
             record_follow(follow);
         }
+        if (disk_backed()) { persist(); }
     }
 
     [[nodiscard]] lookup_detail::MatchSet
@@ -179,8 +187,8 @@ public:
                         tokens_[follow] == kLookupDocumentSeparator) {
                         continue;
                     }
-                    const std::size_t start = follow - order;
-                    const auto stored = std::span<const TokenId>(tokens_).subspan(start, order);
+                    const std::size_t begin = follow - order;
+                    const auto stored = std::span<const TokenId>(tokens_).subspan(begin, order);
                     if (std::find(stored.begin(), stored.end(), kLookupDocumentSeparator) !=
                             stored.end() ||
                         !std::equal(stored.begin(), stored.end(), pattern.begin())) {
@@ -212,11 +220,86 @@ public:
     }
 
 private:
+    static constexpr std::uint32_t kFileMagic = 0x4b4f4f4cU; // "LOOK" little endian
+    static constexpr std::uint32_t kFileVersion = 1;
+
+    struct FileHeader {
+        std::uint32_t magic = kFileMagic;
+        std::uint32_t version = kFileVersion;
+        std::uint32_t token_count = 0;
+        std::uint32_t reserved = 0;
+    };
+
+    void rebuild_index() {
+        index_.clear();
+        for (std::size_t follow = 1; follow < tokens_.size(); ++follow) {
+            if (tokens_[follow] != kLookupDocumentSeparator) { record_follow(follow); }
+        }
+    }
+
+    void load() {
+        std::ifstream input(persistent_path_, std::ios::binary);
+        if (!input) {
+            throw std::runtime_error("cannot open persistent lookup store: " +
+                                     persistent_path_.string());
+        }
+        FileHeader header;
+        if (!input.read(reinterpret_cast<char*>(&header), sizeof(header)) ||
+            header.magic != kFileMagic || header.version != kFileVersion) {
+            throw std::runtime_error("persistent lookup store has an invalid header: " +
+                                     persistent_path_.string());
+        }
+        std::vector<TokenId> loaded(header.token_count);
+        if (!loaded.empty() &&
+            !input.read(reinterpret_cast<char*>(loaded.data()),
+                        static_cast<std::streamsize>(loaded.size() * sizeof(TokenId)))) {
+            throw std::runtime_error("persistent lookup store is truncated: " +
+                                     persistent_path_.string());
+        }
+        if (loaded.size() > max_tokens_) {
+            loaded.erase(loaded.begin(),
+                         loaded.begin() + static_cast<std::ptrdiff_t>(loaded.size() - max_tokens_));
+            if (!loaded.empty()) { loaded.front() = kLookupDocumentSeparator; }
+        }
+        tokens_ = std::move(loaded);
+        rebuild_index();
+    }
+
+    void persist() const {
+        const std::filesystem::path parent = persistent_path_.parent_path();
+        if (!parent.empty()) { std::filesystem::create_directories(parent); }
+        std::filesystem::path temporary = persistent_path_;
+        temporary += ".tmp";
+        {
+            std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+            if (!output) {
+                throw std::runtime_error("cannot create persistent lookup store: " +
+                                         temporary.string());
+            }
+            const FileHeader header{.magic = kFileMagic,
+                                    .version = kFileVersion,
+                                    .token_count = static_cast<std::uint32_t>(tokens_.size()),
+                                    .reserved = 0};
+            output.write(reinterpret_cast<const char*>(&header), sizeof(header));
+            if (!tokens_.empty()) {
+                output.write(reinterpret_cast<const char*>(tokens_.data()),
+                             static_cast<std::streamsize>(tokens_.size() * sizeof(TokenId)));
+            }
+            if (!output) {
+                throw std::runtime_error("failed writing persistent lookup store: " +
+                                         temporary.string());
+            }
+        }
+        std::error_code ignored;
+        std::filesystem::remove(persistent_path_, ignored);
+        std::filesystem::rename(temporary, persistent_path_);
+    }
+
     void record_follow(std::size_t follow) {
         if (follow == 0) { return; }
         for (std::uint32_t order = 1; order <= max_order_ && follow >= order; ++order) {
-            const std::size_t start = follow - order;
-            const auto gram = std::span<const TokenId>(tokens_).subspan(start, order);
+            const std::size_t begin = follow - order;
+            const auto gram = std::span<const TokenId>(tokens_).subspan(begin, order);
             if (std::find(gram.begin(), gram.end(), kLookupDocumentSeparator) != gram.end()) {
                 continue;
             }
@@ -233,6 +316,7 @@ private:
     std::uint32_t max_tokens_ = 0;
     std::uint32_t max_order_ = 0;
     std::uint32_t max_matches_ = 0;
+    std::filesystem::path persistent_path_;
     std::vector<TokenId> tokens_;
     std::unordered_map<std::uint64_t, std::vector<std::size_t>> index_;
 };
