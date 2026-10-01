@@ -53,6 +53,22 @@ struct DFlashTreeFeatureSink {
     void capture_positions(const Tensor& source, cudaStream_t stream);
 };
 
+struct TeacherFeatureSink {
+    static constexpr bool enabled = true;
+    void* host_features = nullptr;
+    std::size_t host_feature_bytes = 0;
+    std::span<const std::uint32_t> layers;
+    std::int32_t hidden_size = 0;
+    std::int32_t active_tokens = 0;
+    std::uint32_t token_offset = 0;
+    std::uint32_t total_tokens = 0;
+    std::uint32_t captured_mask = 0;
+
+    void begin(const Tensor& value);
+    void capture_layer(int layer, const Tensor& value, cudaStream_t stream);
+    void capture_positions(const Tensor& source, cudaStream_t stream);
+};
+
 struct DFlashFeatureSink {
     static constexpr bool enabled = true;
     using PrefillConsumer         = std::function<void(const Tensor&, const Tensor&, bool)>;
@@ -134,6 +150,10 @@ public:
                                                    std::uint32_t begin,
                                                    std::uint32_t nominal_length,
                                                    bool finalize_at_end, DFlashFeatureSink& sink);
+    [[nodiscard]] PrefillChunkResult prefill_chunk(std::span<const int> full_ids,
+                                                   std::uint32_t begin,
+                                                   std::uint32_t nominal_length,
+                                                   bool finalize_at_end, TeacherFeatureSink& sink);
     [[nodiscard]] PrefillChunkResult
     prefill_chunk(const qwen3_5::PreparedPromptData& input, std::uint32_t begin,
                   std::uint32_t nominal_length, VisionPrefillSession& vision, bool finalize_at_end);
