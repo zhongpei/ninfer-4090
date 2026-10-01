@@ -124,6 +124,7 @@ std::string usage_text(const char* argv0) {
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
            "       [--spec-router fixed|stair] [--spec-router-scope request|engine] [--spec-stair-widths A,B,C,D] [--spec-stair-costs A,B,C,D]\n"
            "       [--spec-tree off|lattice] [--spec-tree-nodes N] [--spec-tree-spine N]\n"
+           "       [--dflash-teacher-dump PATH] [--dflash-teacher-max-records N]\n"
            "       [--spec-stair-draft-cost F] [--spec-stair-prior F] [--spec-stair-prior-weight F]\n"
            "       [--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F]\n"
            "       [--lookup-ngram N] [--lookup-strategy recent|vote] [--lookup-dflash off|replace|skip|merge]\n"
@@ -231,6 +232,11 @@ Options parse_options(int argc, char** argv) {
             options.speculative.tree.nodes = parse_u32(value(arg), "spec-tree-nodes");
         } else if (arg == "--spec-tree-spine") {
             options.speculative.tree.spine = parse_u32(value(arg), "spec-tree-spine");
+        } else if (arg == "--dflash-teacher-dump") {
+            options.speculative.teacher.dump_path = value(arg);
+        } else if (arg == "--dflash-teacher-max-records") {
+            options.speculative.teacher.max_records =
+                parse_u32(value(arg), "dflash-teacher-max-records", true);
         } else if (arg == "--spec-router") {
             options.speculative.routing.mode =
                 product::parse_speculative_routing_mode(value(arg));
