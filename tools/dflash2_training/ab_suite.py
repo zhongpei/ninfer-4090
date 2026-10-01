@@ -209,6 +209,7 @@ def run_once(args, arm: Arm, workload: Workload, pair: int, order: int) -> dict:
         "--max-context", str(workload.max_context),
         "--kv-dtype", args.kv_dtype,
         "--greedy", "--no-thinking", "--raw-output",
+        "--presence-penalty", "0", "--frequency-penalty", "0",
         *arm.args,
     ]
     env = os.environ.copy()

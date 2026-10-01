@@ -61,6 +61,8 @@ def one_request(base: str, model_id: str, prompt: str, max_tokens: int, timeout:
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0,
+        "presence_penalty": 0,
+        "frequency_penalty": 0,
         "stream": False,
     }
     started = time.perf_counter()

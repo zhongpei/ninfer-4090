@@ -71,6 +71,30 @@ class Gates(unittest.TestCase):
         self.assertFalse(result['comparisons']['dflash2-k7']['correct'])
         self.assertTrue(result['comparisons']['tree7']['correct'])
 
+    def test_cli_tree_matrix_uses_raw_greedy_for_each_actual_pair(self):
+        calls = []
+        def transport(command, **kwargs):
+            calls.append((command, kwargs['env']['NINFER_AB_ARM']))
+            return self.process()
+        rc, result = self.cli(transport, '--arms', 'tree7')
+        self.assertEqual(rc, 0)
+        self.assertEqual([arm for _, arm in calls],
+                         ['baseline', 'dflash2-k7', 'dflash2-k7', 'baseline',
+                          'dflash2-k7', 'tree7', 'tree7', 'dflash2-k7'])
+        self.assertEqual(result['comparisons']['dflash2-k7']['base'], 'baseline')
+        self.assertEqual(result['comparisons']['tree7']['base'], 'dflash2-k7')
+        for command, arm in calls:
+            with self.subTest(arm=arm):
+                for flag in ('--presence-penalty', '--frequency-penalty'):
+                    self.assertIn(flag, command)
+                    self.assertEqual(float(command[command.index(flag) + 1]), 0)
+                for flag in ('--greedy', '--no-thinking', '--raw-output'):
+                    self.assertIn(flag, command)
+                if arm == 'baseline':
+                    self.assertNotIn('--spec', command)
+                elif arm == 'tree7':
+                    self.assertEqual(command[command.index('--spec-tree') + 1], 'lattice')
+
     def test_empty_output_gate_fails(self):
         self.assertFalse(ab_suite.output_gate([])['passed'])
 
@@ -128,6 +152,27 @@ class Gates(unittest.TestCase):
     def test_server_baseline_only_rejected(self):
         rc, _ = self.server(self.response, '--arms', 'baseline')
         self.assertNotEqual(rc, 0)
+
+    def test_server_tree_matrix_sends_zero_penalties_on_every_arm(self):
+        requests = []
+        def transport(url, payload, timeout):
+            requests.append((url, payload))
+            return self.response(url, payload, timeout)
+        rc, result = self.server(transport, '--arms', 'tree7')
+        self.assertEqual(rc, 0)
+        self.assertEqual(result['comparisons']['dflash2-k7']['base'], 'baseline')
+        self.assertEqual(result['comparisons']['tree7']['base'], 'dflash2-k7')
+        self.assertEqual(len(requests), 6)
+        for port in (18080, 18081, 18082):
+            selected = [payload for url, payload in requests if f':{port}/' in url]
+            self.assertEqual(len(selected), 2)
+            self.assertEqual({p['messages'][0]['content'] for p in selected},
+                             {w.prompt for w in server_ab.WORKLOADS[:2]})
+            for payload in selected:
+                with self.subTest(port=port):
+                    self.assertEqual(payload.get('presence_penalty'), 0)
+                    self.assertEqual(payload.get('frequency_penalty'), 0)
+                    self.assertEqual(payload['temperature'], 0)
 
     def test_server_valid_passes(self):
         rc, result = self.server(self.response)
