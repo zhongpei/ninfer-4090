@@ -297,6 +297,9 @@ struct EngineOptions {
     std::filesystem::path artifact_path;
     std::filesystem::path chat_template_path;
     EnginePurpose purpose              = EnginePurpose::Generation;
+    // Opt-in offline capability for trace_tokens. It adds teacher-only scoring workspace and is
+    // rejected for Generation engines so serving memory is unchanged.
+    bool enable_teacher_trace          = false;
     int device                         = 0;
     // Empty or one entry keeps the single-device route and `device` selects it. Two entries open a
     // second endpoint for model-parallel execution, in the given order: primary first. Matching
