@@ -191,6 +191,14 @@ struct SpeculativeRoutingOptions {
     float switch_margin = 0.02F;
 };
 
+struct DFlashTeacherOptions {
+    // Offline-only serving trace. Each record contains the actual .ninfer target inputs, the
+    // accepted linear target-tap prefix and full BF16 logits. Python tooling converts this to the
+    // top-K dataset consumed by the DFlash2 trainer. Empty disables all tracing overhead.
+    std::filesystem::path dump_path;
+    std::uint32_t max_records = 0; // zero = unlimited
+};
+
 struct SpeculativeOptions {
     SpeculativeBackend backend = SpeculativeBackend::None;
     // Startup maximum K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
@@ -199,6 +207,7 @@ struct SpeculativeOptions {
     SpeculativeRoutingOptions routing;
     SpeculativeTreeOptions tree;
     LookupDraftOptions lookup;
+    DFlashTeacherOptions teacher;
     // Context-lookup drafting: match this many trailing tokens against the sequence so far and
     // propose whatever followed the last time they appeared. 0 disables it. It costs no device
     // work, it is exact (verify rejects a wrong guess), and it is strongest exactly where a draft
