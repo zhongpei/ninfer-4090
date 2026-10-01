@@ -13,4 +13,8 @@ namespace ninfer::ops::detail {
 void target_logprobs_launch(const Tensor& logits, const Tensor& target_ids, std::int32_t valid_rows,
                             Tensor& output, cudaStream_t stream);
 
+void target_candidate_logprobs_launch(const Tensor& logits, const Tensor& candidate_ids,
+                                      std::int32_t valid_rows, Tensor& output,
+                                      cudaStream_t stream);
+
 } // namespace ninfer::ops::detail
