@@ -144,24 +144,30 @@ hidden correction contract (`selector = committed - 1`) unchanged.
 
 Requesting tree mode does not force unsupported requests onto an approximate path.
 
-Tree v1 falls back to chain verification when any of these is true:
+Tree verification falls back to chain when any of these is true:
 
 - decode batch has more than one row;
 - lookup replace/head-skip owns the proposal;
-- adaptive/budget/context truncation makes this round narrower than startup K;
+- the wide b16 proposal would cross the target context capacity;
 - positive temperature is used;
 - presence or frequency penalties are active.
 
+Output-budget truncation no longer forces a fallback. The one resident wide drafter can still
+produce its lattice while the target verifies only the smaller tree budget.
+
 The request metrics expose `tree_rounds` and `tree_fallback_rounds` separately.
 
-Tree mode currently bypasses the neural target CUDA Graph because lattice-to-tree construction is
-data-dependent and has two small D2H control transfers (lattice and target argmax). Chain mode
-remains graphed. This is intentionally an A/B-correct first implementation; eliminating those host
-round trips is a later kernelization step.
+Tree mode currently bypasses the neural target CUDA Graph because its active tree and DFS topology
+are data-dependent. Tree construction, greedy tree acceptance, path gathering, target-KV
+canonicalization and continuation selection now stay on the CUDA stream; the only host wait is the
+Program's normal end-of-round boundary that already exists for chain decode. Chain mode remains
+graphed.
 
 ## A/B profiles
 
-Use identical model, prompt, KV format and greedy settings.
+Use identical model, prompt, KV format and greedy settings. In addition to fixed tree widths,
+compare one wide b16 tree with Tree-Stair enabled; that is the intended 24GB production profile.
+
 
 ```text
 A: --spec-tree off
@@ -182,16 +188,31 @@ The runtime reports:
 The supplied `scripts/sweeps/dflash2-tree-realtext.ps1` runs the fixed-chain and tree arms on the
 same production-shaped prompt and records output hashes.
 
-## Interaction with Stair and lookup
+## Tree-StairCut and 24GB policy
 
-Tree v1 is a separate A/B arm.
+A single b16 DFlash2 drafter remains resident. When `--spec-router stair` and
+`--spec-tree lattice` are both enabled, the existing Stair width/cost table is interpreted as
+candidate tree-node budgets. With the default table that means 3/7/11/15 draft nodes, all inside
+the same physical 16-row runtime allocation.
 
-- Strong lookup takeover continues to use the copy chain; it does not build a DFlash tree.
-- Tree-active rounds do not update the chain Stair router.
-- When a requested tree round falls back to chain, the existing Stair policy remains available.
+The tree router scores each rung by observed committed tokens divided by
+`draft_cost + verify_cost[rung]`, with the same warmup, wide probes and switch hysteresis as the
+chain router. No b8 drafter and no 24/32-row KV/replay buffers are introduced.
 
-A later Tree-StairCut can choose a node budget from a measured target-tree verification staircase
-after this runtime path has been profiled on RTX 4090.
+Example:
+
+```bash
+--spec dflash2 --draft-tokens 15 \
+--spec-tree lattice --spec-tree-nodes 15 --spec-tree-spine 7 \
+--spec-router stair \
+--spec-stair-widths 3,7,11,15 \
+--spec-stair-costs 1.00,1.02,1.05,1.10
+```
+
+The cost table must still be calibrated on the actual RTX 4090/KV format.
+
+Strong lookup takeover continues to use its copy chain rather than constructing a DFlash tree.
+When a tree request falls back to chain, the existing chain Stair policy remains available.
 
 ## Provenance
 
