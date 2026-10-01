@@ -1,5 +1,6 @@
 # Core training/recording dependencies
 torch
+numpy
 safetensors
 transformers
 accelerate
