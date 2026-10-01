@@ -586,6 +586,10 @@ public:
     const SpeculativeRoutingOptions speculative_routing;
     const SpeculativeTreeOptions speculative_tree;
     const SpeculativeBackend speculative_backend;
+    // Program-lifetime evidence survives request/lane reuse. Request-local routers remain in
+    // RequestControl for per-request diagnostics but scheduling consults these persistent states.
+    StairRouterState persistent_stair_router;
+    TreeStairRouterState persistent_tree_stair_router;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
     ::ninfer::qwen3_5::LookupPersistentStore lookup_persistent;
