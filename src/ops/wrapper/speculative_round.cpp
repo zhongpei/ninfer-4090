@@ -314,7 +314,7 @@ void speculative_tree_accept_greedy(
     const Tensor& target_tokens, const Tensor& tree_tokens, const Tensor& parents,
     std::int32_t live_rows, Tensor& path_nodes, Tensor& licensed_tokens,
     Tensor& licensed_counts, Tensor& accepted_drafts, Tensor& path_count,
-    Tensor& last_node, cudaStream_t stream) {
+    Tensor& compact_last_index, cudaStream_t stream) {
     constexpr const char* op = "speculative_tree_accept_greedy";
     require_dtype(tree_tokens, DType::I32, op, "tree_tokens");
     const std::int32_t width = tree_tokens.ne[0];
@@ -329,10 +329,10 @@ void speculative_tree_accept_greedy(
     require_vector(licensed_counts, DType::I32, 1, op, "licensed_counts");
     require_vector(accepted_drafts, DType::I32, 1, op, "accepted_drafts");
     require_vector(path_count, DType::I32, 1, op, "path_count");
-    require_vector(last_node, DType::I32, 1, op, "last_node");
+    require_vector(compact_last_index, DType::I32, 1, op, "compact_last_index");
     detail::speculative_tree_accept_greedy_launch(
         target_tokens, tree_tokens, parents, live_rows, path_nodes, licensed_tokens,
-        licensed_counts, accepted_drafts, path_count, last_node, stream);
+        licensed_counts, accepted_drafts, path_count, compact_last_index, stream);
 }
 
 void speculative_make_one_hot_sparse_proposal(
