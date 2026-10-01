@@ -90,10 +90,10 @@ std::string serve_usage_text(const char* argv0) {
            "[--spec-stair-costs A,B,C,D] [--spec-stair-draft-cost F] "
            "[--spec-stair-prior F] [--spec-stair-prior-weight F] "
            "[--spec-stair-warmup N] [--spec-stair-probe-period N] [--spec-stair-margin F] "
-           "[--lookup-strategy recent|vote] [--lookup-dflash off|replace|skip] "
+           "[--lookup-strategy recent|vote] [--lookup-dflash off|replace|skip|merge] "
            "[--lookup-max-order N] [--lookup-max-matches N] [--lookup-min-support N] "
            "[--lookup-min-confidence F] [--lookup-base-drafts N] [--lookup-deep-after N] "
-           "[--lookup-deep-drafts N] [--lookup-persistent-tokens N] "
+           "[--lookup-deep-drafts N] [--lookup-merge-nodes N] [--lookup-persistent-tokens N] "
            "[--lookup-persistent-path PATH] [--lookup-corpus-prefix PATH] "
            "[--lookup-corpus-weight F] [--lookup-corpus-samples N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
@@ -474,6 +474,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--lookup-deep-drafts") {
             options.speculative.lookup.deep_drafts = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--lookup-deep-drafts"), "lookup-deep-drafts"));
+        } else if (arg == "--lookup-merge-nodes") {
+            options.speculative.lookup.merge_nodes = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--lookup-merge-nodes"), "lookup-merge-nodes"));
         } else if (arg == "--lookup-persistent-tokens") {
             options.speculative.lookup.persistent_tokens = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--lookup-persistent-tokens"),
