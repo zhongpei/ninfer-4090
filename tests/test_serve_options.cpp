@@ -161,6 +161,31 @@ int main() {
                           stair.speculative.routing.widths[2] == 11 &&
                           stair.speculative.routing.probe_period == 12,
                       "serve options did not preserve Stair router A/B parameters");
+    const ServeOptions tree = parse(
+        {"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "15",
+         "--spec-tree", "lattice", "--spec-tree-nodes", "15", "--spec-tree-spine", "7"});
+    failures += check(tree.speculative.tree.mode == ninfer::SpeculativeTreeMode::Lattice &&
+                          tree.speculative.tree.nodes == 15 &&
+                          tree.speculative.tree.spine == 7,
+                      "serve options did not preserve runtime tree controls");
+
+    bool tree_mismatch_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "7",
+                     "--spec-tree", "lattice", "--spec-tree-nodes", "15",
+                     "--spec-tree-spine", "7"});
+    } catch (const std::invalid_argument&) { tree_mismatch_rejected = true; }
+    failures += check(tree_mismatch_rejected,
+                      "serve accepted a runtime tree node budget that differs from draft K");
+
+    bool tree_mtp_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3",
+                     "--spec-tree", "lattice", "--spec-tree-nodes", "3",
+                     "--spec-tree-spine", "3"});
+    } catch (const std::invalid_argument&) { tree_mtp_rejected = true; }
+    failures += check(tree_mtp_rejected, "serve accepted runtime tree verification on MTP");
+
     bool stair_mtp_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3",
