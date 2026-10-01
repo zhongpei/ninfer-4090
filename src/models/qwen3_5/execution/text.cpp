@@ -179,6 +179,15 @@ void DFlashTreeFeatureSink::capture_layer(int layer, const Tensor& value, cudaSt
     captured_mask |= 1U << index;
 }
 
+void DFlashTreeFeatureSink::capture_positions(const Tensor& source, cudaStream_t) {
+    const std::uint32_t complete_mask =
+        layers.size() == 32 ? ~0U : ((1U << layers.size()) - 1U);
+    if (captured_mask != complete_mask || source.dtype != DType::I32 ||
+        source.ne[0] != active_tokens) {
+        throw std::logic_error("DFlash tree target call did not publish every feature layer");
+    }
+}
+
 void DFlashFeatureSink::begin(const Tensor& value) {
     const bool prefill = features != nullptr && positions != nullptr && batch_features == nullptr;
     const bool batch   = batch_features != nullptr && batch_lanes != nullptr &&
