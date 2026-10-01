@@ -269,7 +269,8 @@ void speculative_tree_build_device(const Tensor& candidates, const Tensor& latti
 void speculative_tree_accept_device(const Tensor& verify_ids, const Tensor& parents,
                                     const Tensor& target_tokens, Tensor& path_nodes,
                                     Tensor& licensed_tokens, Tensor& licensed_counts,
-                                    Tensor& accepted_drafts, cudaStream_t stream) {
+                                    Tensor& accepted_drafts, Tensor& last_node,
+                                    cudaStream_t stream) {
     constexpr const char* op = "speculative_tree_accept_device";
     const std::int32_t width = verify_ids.ne[0];
     if (width < 2 || width > 16) {
@@ -282,9 +283,32 @@ void speculative_tree_accept_device(const Tensor& verify_ids, const Tensor& pare
     require_matrix(licensed_tokens, DType::I32, width, 1, op, "licensed_tokens");
     require_vector(licensed_counts, DType::I32, 1, op, "licensed_counts");
     require_vector(accepted_drafts, DType::I32, 1, op, "accepted_drafts");
+    require_vector(last_node, DType::I32, 1, op, "last_node");
     detail::speculative_tree_accept_device_launch(
         verify_ids, parents, target_tokens, path_nodes, licensed_tokens,
-        licensed_counts, accepted_drafts, stream);
+        licensed_counts, accepted_drafts, last_node, stream);
+}
+
+void speculative_tree_gather_bf16_counted(const Tensor& source, const Tensor& path_nodes,
+                                          const Tensor& count, Tensor& destination,
+                                          cudaStream_t stream) {
+    constexpr const char* op = "speculative_tree_gather_bf16_counted";
+    require_dtype(source, DType::BF16, op, "source");
+    require_dtype(destination, DType::BF16, op, "destination");
+    if (source.ne[0] <= 0 || source.ne[1] < 1 || source.ne[1] > 16 ||
+        source.ne[2] != 1 || source.ne[3] != 1 ||
+        destination.ne[0] != source.ne[0] || destination.ne[1] != source.ne[1] ||
+        destination.ne[2] != 1 || destination.ne[3] != 1) {
+        throw std::invalid_argument("speculative_tree_gather_bf16_counted: invalid matrix");
+    }
+    require_vector(path_nodes, DType::I32, source.ne[1], op, "path_nodes");
+    require_vector(count, DType::I32, 1, op, "count");
+    if (source.data == destination.data) {
+        throw std::invalid_argument(
+            "speculative_tree_gather_bf16_counted: source/destination must differ");
+    }
+    detail::speculative_tree_gather_bf16_counted_launch(
+        source, path_nodes, count, destination, stream);
 }
 
 void speculative_tree_gather_bf16(const Tensor& source, const Tensor& path_nodes,
