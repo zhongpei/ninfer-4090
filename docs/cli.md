@@ -246,7 +246,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--kv-dtype bf16\|int8\|fp8\|rk8v4\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant; all six are accepted on this fork's sm_86/sm_89 targets | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
-| `--spec-router fixed\|stair` | fixed maximum-K verification or adaptive DFlash/DFlash2 verification width | `fixed` |
+| `--spec-router fixed\|stair` | fixed verification width or adaptive Stair width; with DFlash2 tree mode, `stair` applies Tree-StairCut to target-tree node count while retaining the startup K buffer | `fixed` |
 | `--spec-tree off\|lattice` | chain verification or opt-in C1 greedy DFlash2 lattice-tree verification | `off` |
 | `--spec-tree-nodes N` | drafted tree-node budget; runtime v1 requires this to equal `--draft-tokens` | `15` |
 | `--spec-tree-spine N` | greedy lattice levels installed before best-first alternatives | `7` |
