@@ -30,5 +30,10 @@ verification ideas. NInfer's implementation is specific to its hybrid target: DF
 reuse for temporary full-attention KV, ancestor-aware GDN convolution/recurrent evaluation, and
 accepted-path-only ReplaySSM/StateImage commit.
 
+The final 24GB integration also adapts TandemLLM's server-lifetime router-learning and
+deterministic sampled-tree concepts. NInfer's sampled tree uses its existing position-keyed
+counter RNG and deliberately falls back to chain verification when branch-specific penalty state
+would be required.
+
 This notice covers code/design adapted from TandemLLM. Model weights and other third-party
 components retain their own licenses and notices.
