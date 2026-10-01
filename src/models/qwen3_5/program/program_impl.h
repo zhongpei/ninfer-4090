@@ -585,6 +585,7 @@ public:
     const LookupDraftOptions lookup_options;
     const SpeculativeRoutingOptions speculative_routing;
     const SpeculativeTreeOptions speculative_tree;
+    PersistentSpecRouterState engine_spec_router;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
