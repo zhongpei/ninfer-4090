@@ -112,8 +112,8 @@ Options parse_options(int argc, char** argv) {
             else if (dtype == "fp8") out.kv = ninfer::KvCacheStorage::Fp8E4M3Row256;
             else if (dtype == "rk8v4") out.kv = ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64;
             else if (dtype == "rk4v4") out.kv = ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64;
-            else if (dtype == "rk4v4-e8") out.kv = ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueE8Group64;
-            else if (dtype == "rk2v4-e8") out.kv = ninfer::KvCacheStorage::RotatedInt2KeyInt4ValueE8Group64;
+            else if (dtype == "rk4v4-e8") out.kv = ninfer::KvCacheStorage::RK4V4E8;
+            else if (dtype == "rk2v4-e8") out.kv = ninfer::KvCacheStorage::RK2V4E8;
             else if (dtype == "nvfp4") out.kv = ninfer::KvCacheStorage::Nvfp4Group16;
             else if (dtype == "k8v4") out.kv = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
             else throw std::invalid_argument("invalid --kv-dtype");
