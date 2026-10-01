@@ -92,6 +92,9 @@ struct DFlashDecodeIngress {
     std::array<std::int32_t, kMaximumConcurrency> state_source_slots{};
     std::array<std::int32_t, kMaximumConcurrency> state_destination_slots{};
     std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
+    // C1 tree sampling shares the pinned ingress lifetime through the end-of-round synchronize.
+    // The whole ingress upload publishes these per-node configs in resident device storage.
+    std::array<ops::SamplingConfig, kDFlashDecodeMaximumWidth> tree_sampling{};
 };
 
 struct DFlashDecodeEgress {

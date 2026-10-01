@@ -94,12 +94,14 @@ int main() {
          "--lookup-dflash", "skip", "--lookup-max-order", "12", "--lookup-max-matches", "48",
          "--lookup-min-support", "2", "--lookup-min-confidence", "0.7",
          "--lookup-base-drafts", "7", "--lookup-deep-after", "2", "--lookup-deep-drafts", "15",
-         "--lookup-persistent-tokens", "262144", "--lookup-corpus-prefix", "corpus/qwen",
+         "--lookup-persistent-tokens", "262144", "--lookup-persistent-path", "state/lookup.bin",
+         "--lookup-corpus-prefix", "corpus/qwen",
          "--lookup-corpus-weight", "0.4", "--lookup-corpus-samples", "32"});
     failures += check(lookup.speculative.lookup.strategy == ninfer::LookupDraftStrategy::Vote &&
                           lookup.speculative.lookup.dflash_mode == ninfer::LookupDFlashMode::HeadSkip &&
                           lookup.speculative.lookup.max_order == 12 &&
                           lookup.speculative.lookup.persistent_tokens == 262144 &&
+                          lookup.speculative.lookup.persistent_path == "state/lookup.bin" &&
                           lookup.speculative.lookup.corpus_prefix == "corpus/qwen",
                       "CLI did not preserve multi-source lookup controls");
     failures += check(rejects([] {
@@ -145,6 +147,17 @@ int main() {
     failures += check(!route_defaults.prefill_cublas && route_defaults.prefill_cublas_projections &&
                           route_defaults.speculative.lookup_ngram == 0,
                       "the cuBLAS prefill route or context lookup is on by default");
+    failures += check(route_defaults.speculative.routing.scope == ninfer::SpeculativeRouterScope::Request,
+                      "CLI router state is shared across requests by default");
+    const auto persisted_router = parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                        "--spec-router-scope", "engine", "--spec-router-state", "state/router.bin"});
+    failures += check(persisted_router.speculative.routing.scope == ninfer::SpeculativeRouterScope::Engine &&
+                          persisted_router.speculative.routing.state_path == "state/router.bin",
+                      "CLI did not preserve explicit engine router persistence");
+    failures += check(rejects([] {
+                          parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                 "--spec-router-state", "state/router.bin"});
+                      }), "CLI accepted router persistence with request scope");
     const ninfer::cli::Options route =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "mtp", "--draft-tokens",
                "3", "--lookup-ngram", "5", "--prefill-cublas", "--no-prefill-cublas-projections"});
@@ -155,7 +168,8 @@ int main() {
                       "CLI did not parse the cuBLAS prefill and context-lookup controls");
     for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections", "--lookup-ngram",
                              "--spec-router", "--spec-stair-widths", "--spec-stair-costs",
-                             "--lookup-strategy", "--lookup-dflash", "--lookup-corpus-prefix"}) {
+                             "--lookup-strategy", "--lookup-dflash", "--lookup-persistent-path",
+                             "--lookup-corpus-prefix"}) {
         failures += check(help.find(flag) != std::string::npos,
                           "CLI help omits an accepted prefill or drafting control");
     }

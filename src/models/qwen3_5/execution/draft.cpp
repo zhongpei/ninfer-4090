@@ -764,10 +764,10 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
         state.execution.replay_records == nullptr) {
         throw std::invalid_argument("DFlash2 tree decode received an unsupported runtime profile");
     }
-    if (state.host_ingress.sampling[0].temperature > 0.0F ||
-        state.host_ingress.sampling[0].presence_penalty != 0.0F ||
+    if (state.host_ingress.sampling[0].presence_penalty != 0.0F ||
         state.host_ingress.sampling[0].frequency_penalty != 0.0F) {
-        throw std::invalid_argument("DFlash2 tree decode currently requires raw greedy sampling");
+        throw std::invalid_argument(
+            "DFlash2 tree decode requires zero presence/frequency penalties");
     }
 
     qwen3_5::DFlashDecodeState& frame = state.frame;
@@ -859,6 +859,26 @@ void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,
             verify_ids_live, target_positions_live, target_rope_live, text_rows, state_sources,
             parents_live, target_envelope, target_hidden_live, target_logits_live,
             target_tokens_live, frame.tree_kv_key, frame.tree_kv_value, sink);
+    }
+
+    // Deterministic-tree sampling: each target node draws from its own target distribution at the
+    // logical cache position for that tree depth. Counter-based RNG means siblings at the same
+    // depth use the same position-keyed noise; only the branch reached by the tree walk commits.
+    // Penalty requests never enter this path because branch-specific token-count histories would
+    // otherwise be required for exactness.
+    if (state.host_ingress.sampling[0].temperature > 0.0F) {
+        auto sampling_scope = state.execution.work.scope();
+        const auto* tree_configs = static_cast<const ops::SamplingConfig*>(
+            static_cast<const void*>(static_cast<const std::byte*>(frame.ingress.data) +
+                                     offsetof(qwen3_5::DFlashDecodeIngress, tree_sampling)));
+        Tensor sampled_tree_tokens = target_tokens_live.view({live_width});
+        ops::sample(
+            target_logits_live.view({target_logits_live.ne[0], live_width}),
+            sampled_tree_tokens,
+            dimension(state.execution.parameters.model.resources().public_token_count),
+            tree_configs,
+            target_positions_live.view({live_width}), ops::kSamplePurposeDecode,
+            state.execution.work, stream);
     }
 
     Tensor path_nodes      = frame.tree_path_nodes.slice(0, 0, physical_width);

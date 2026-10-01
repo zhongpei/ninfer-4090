@@ -250,7 +250,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--spec-router-scope request\|engine` | learn Stair statistics per request or reuse them for the Engine lifetime | `request` |
 | `--spec-router-state PATH` | restore/save engine-scoped chain/tree Stair counters across clean restarts | unset |
 | `--dflash-teacher-out DIR` | record exact loaded-.ninfer DFlash target taps and target-head top-16 during root prefill | unset |
-| `--spec-tree off\|lattice` | chain verification or opt-in C1 greedy DFlash2 lattice-tree verification | `off` |
+| `--spec-tree off\|lattice` | chain verification or opt-in C1 DFlash2 lattice-tree verification; sampling is supported when penalties are zero | `off` |
 | `--spec-tree-nodes N` | maximum drafted tree-node budget; must be <= `--draft-tokens`, and Tree-Stair may cut it lower per round | `15` |
 | `--spec-tree-spine N` | greedy lattice levels installed before best-first alternatives | `7` |
 | `--spec-stair-widths A,B,C,D` | four strictly increasing Stair draft extents | `3,7,11,15` |

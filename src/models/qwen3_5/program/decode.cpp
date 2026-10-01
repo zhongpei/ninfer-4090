@@ -680,7 +680,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
 
     const bool tree_requested = speculative_tree.mode == SpeculativeTreeMode::Lattice;
     const bool tree_sampling_ok =
-        lanes.size() == 1 && requests[lanes[0]].sampling_host.temperature <= 0.0F &&
+        lanes.size() == 1 &&
         requests[lanes[0]].sampling_host.presence_penalty == 0.0F &&
         requests[lanes[0]].sampling_host.frequency_penalty == 0.0F;
 
@@ -769,6 +769,12 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             dflash_host_ingress->state_source_slots[row] = selectors.source;
             dflash_host_ingress->state_destination_slots[row] = selectors.destination;
             dflash_host_ingress->sampling[row]                = request.sampling_host;
+            if (tree_active && request.sampling_host.temperature > 0.0F) {
+                for (auto& config : dflash_host_ingress->tree_sampling) {
+                    config = request.sampling_host;
+                    config.token_counts = nullptr;
+                }
+            }
             ensure_sequence_kv_mapped(sequence, frontier + extent + 1U,
                                       backend_kv_cache() ? frontier : 0U);
         }

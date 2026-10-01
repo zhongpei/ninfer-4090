@@ -209,7 +209,27 @@ dflash2/candidate_selector/*
 
 No new artifact format is introduced.
 
-## 4. Runtime A/B
+## 4. Gate the converted NInfer artifact
+
+Training loss and Hugging Face-side acceptance are not the release gate for a T2/Q5/Ternary
+target. After conversion, compare the released and custom companions through the actual NInfer
+runtime:
+
+```bash
+python -m tools.dflash2_training.ninfer_gate \
+  --ninfer build-ninja/apps/ninfer \
+  --artifact released=out/bonsai2-released-dflash2.ninfer \
+  --artifact custom=out/bonsai2-dflash2-b16.ninfer \
+  --prompts train/heldout-prompts.jsonl \
+  --out results/dflash2-ninfer-gate.csv \
+  --draft-tokens 15 --tree
+```
+
+The gate records decode throughput, accepted tokens, tokens/round, tree statistics and the output
+SHA256 for every prompt. This is where conversion/quantization/runtime effects are judged; the HF
+teacher-side metric remains a training signal.
+
+## 5. Runtime A/B
 
 Combine the trained b16 checkpoint with PR #4/#5 controls:
 
@@ -231,7 +251,7 @@ Useful arms are:
 
 Keep the target artifact, prompt set, KV format and sampling profile fixed.
 
-## Tree planning
+## 6. Tree planning
 
 TandemLLM also gets additional acceptance by verifying multiple branches in one target pass. NInfer
 now carries the offline part of that work:

@@ -30,6 +30,18 @@ int main() {
     int failures = 0;
 
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
+    failures += check(defaults.speculative.routing.scope == ninfer::SpeculativeRouterScope::Request,
+                      "serve router state is shared across requests by default");
+    const auto persisted_router = parse({"ninfer-serve", "model.ninfer",
+                                        "--spec-router-scope", "engine", "--spec-router-state", "state/router.bin"});
+    failures += check(persisted_router.speculative.routing.scope == ninfer::SpeculativeRouterScope::Engine &&
+                          persisted_router.speculative.routing.state_path == "state/router.bin",
+                      "serve did not preserve explicit engine router persistence");
+    bool request_persistence_rejected = false;
+    try {
+        parse({"ninfer-serve", "model.ninfer", "--spec-router-state", "state/router.bin"});
+    } catch (const std::invalid_argument&) { request_persistence_rejected = true; }
+    failures += check(request_persistence_rejected, "serve accepted router persistence with request scope");
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");
@@ -186,7 +198,7 @@ int main() {
                      "--spec-tree-spine", "7"});
     } catch (const std::invalid_argument&) { tree_mismatch_rejected = true; }
     failures += check(tree_mismatch_rejected,
-                      "serve accepted a runtime tree node budget that differs from draft K");
+                      "serve accepted a runtime tree node budget above draft K");
 
     bool tree_mtp_rejected = false;
     try {
@@ -208,11 +220,13 @@ int main() {
          "--lookup-ngram", "8", "--lookup-strategy", "vote", "--lookup-dflash", "skip",
          "--lookup-max-order", "12", "--lookup-min-confidence", "0.7",
          "--lookup-base-drafts", "7", "--lookup-deep-after", "2", "--lookup-deep-drafts", "15",
-         "--lookup-persistent-tokens", "262144", "--lookup-corpus-prefix", "corpus/qwen"});
+         "--lookup-persistent-tokens", "262144", "--lookup-persistent-path", "state/lookup.bin",
+         "--lookup-corpus-prefix", "corpus/qwen"});
     failures += check(lookup.speculative.lookup.strategy == ninfer::LookupDraftStrategy::Vote &&
                           lookup.speculative.lookup.dflash_mode == ninfer::LookupDFlashMode::HeadSkip &&
                           lookup.speculative.lookup.max_order == 12 &&
-                          lookup.speculative.lookup.persistent_tokens == 262144,
+                          lookup.speculative.lookup.persistent_tokens == 262144 &&
+                          lookup.speculative.lookup.persistent_path == "state/lookup.bin",
                       "serve options did not preserve multi-source lookup controls");
     const ServeOptions recent16 =
         parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens", "3",

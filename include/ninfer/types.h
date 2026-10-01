@@ -128,7 +128,7 @@ enum class SpeculativeTreeMode : std::uint8_t {
 
 struct SpeculativeTreeOptions {
     // Tree verification is opt-in. The first runtime implementation is deliberately bounded to
-    // one DFlash2 row, greedy target sampling and at most 15 drafted nodes (16 target rows).
+    // one DFlash2 row, zero target penalties and at most 15 drafted nodes (16 target rows).
     SpeculativeTreeMode mode = SpeculativeTreeMode::Off;
     std::uint32_t nodes      = 15;
     // Number of greedy-lattice levels installed before best-first alternatives consume the

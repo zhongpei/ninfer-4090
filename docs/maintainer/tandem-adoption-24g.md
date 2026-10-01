@@ -1,8 +1,8 @@
 # TandemLLM adoption status for 24GB GPUs
 
 This document records the final scope of the TandemLLM-derived work on the RTX 4090 path. The goal
-is not source-level feature parity with a 128GB GB10 system. The production target is one or two
-24GB Ada cards, so persistent VRAM is treated as a first-class constraint.
+is not source-level feature parity with a 128GB GB10 system. The production target is one
+24GB Ada card, so persistent VRAM is treated as a first-class constraint.
 
 ## Adopted
 
@@ -11,7 +11,7 @@ is not source-level feature parity with a 128GB GB10 system. The production targ
 | adaptive speculative width | fixed vs Stair A/B, explicit measured cost rungs | host-only state |
 | runtime speculative tree | DFlash2 lattice tree, hybrid attention + GDN/ReplaySSM correctness | <=16-row replay buffers |
 | Tree-Stair | one b16 drafter, dynamic 3/7/11/15 node target cuts | no second drafter |
-| GPU tree control | device tree build, greedy path walk, dynamic accepted-path gather | transient only |
+| GPU tree control | device tree build, target-sampled path walk, dynamic accepted-path gather | transient only |
 | lookup drafting | recent/vote, local/process/static sources, replace/head-skip/deep | host history only |
 | lookup persistence | bounded suffix snapshot across clean restarts | host/disk only |
 | router persistence | request or Engine lifetime, optional disk snapshot | host/disk only |
@@ -96,11 +96,12 @@ class (256GB host RAM) this is not a GPU-memory constraint. Cross-restart proces
 state were prioritized because they change serving behavior directly. An mmap storage backend can
 be added later without changing the lookup contract.
 
-### Sampling tree and merged lookup+DFlash tree
+### Merged lookup+DFlash tree
 
-Tree v1 remains raw-greedy C1; sampled requests and lookup takeover fall back to exact existing
-paths. Lookup and DFlash are not merged into one branch tree in this 24GB closure. Both remain
-possible future throughput work, but neither is required to keep the current runtime exact.
+The runtime tree supports greedy and positive-temperature target sampling when presence and
+frequency penalties are zero. Target draws use the existing position-keyed decode RNG. Penalty
+requests and lookup takeover use the existing chain paths. Lookup and DFlash proposals are not
+merged into one branch tree.
 
 ## Remaining performance work is measurement-driven
 
@@ -110,7 +111,17 @@ Tandem's GB10 numbers. In particular:
 - measure K7/K11/K15 chain vs tree;
 - calibrate target verify costs by context/KV profile;
 - train the native-teacher b16 checkpoint and compare accepted tokens/round;
-- only consider >16 rows or sampled/merged trees if those results show material remaining headroom.
+- only consider >16 rows or merged trees if those results show material remaining headroom.
 
 The final architecture therefore optimizes for a low VRAM floor first and keeps every larger
 Tandem-style optimization behind evidence rather than making it a permanent resident cost.
+
+## Converted-artifact qualification and calibration
+
+`tools/dflash2_training/ninfer_gate.py` compares released and custom companions through the
+public NInfer Engine after conversion. Native teacher data is available from the loaded artifact;
+the differentiable trainer still needs the matching base checkpoint.
+
+Run `scripts/sweeps/dflash2-tree-realtext.ps1` on the selected RTX 4090 and KV format, then use
+`tools/calibrate_spec_4090.py` to derive the measured 3/7/11/15 target cost table. Kernel fusion
+and ancestor-state reuse remain performance experiments to evaluate against that workload.

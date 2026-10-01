@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -40,7 +41,7 @@ int main() {
     options.min_confidence = 0.5F;
 
     std::vector<TokenId> ledger{1, 2, 3, 4, 8, 1, 2, 3, 4, 8, 1, 2, 3, 4};
-    const auto local = lookup_draft_vote(ledger, 4, 7, options, nullptr, nullptr);
+    const auto local = lookup_draft_vote(ledger, 4, 2, options, nullptr, nullptr);
     failures += check(local && local.match_order == 4 && local.tokens[0] == 8 &&
                           local.support == 2,
                       "local voting did not combine repeated continuation");
@@ -54,8 +55,24 @@ int main() {
                           (remembered.sources & 2) != 0,
                       "persistent suffix history did not propose continuation");
 
-    const std::filesystem::path prefix =
-        std::filesystem::temp_directory_path() / "ninfer_lookup_vote_test";
+    const std::filesystem::path prefix = std::filesystem::temp_directory_path() /
+        ("ninfer_lookup_vote_test_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    auto snapshot_path = prefix;
+    snapshot_path += ".snapshot";
+    {
+        LookupPersistentStore original(256, 4, 16, snapshot_path);
+        original.append_sequence(prior);
+    }
+    {
+        LookupPersistentStore restored(256, 4, 16, snapshot_path);
+        const auto replay = lookup_draft_vote(query, 4, 2, options, &restored, nullptr);
+        failures += check(replay && replay.count == 2 && replay.tokens[0] == 42 &&
+                              replay.tokens[1] == 43 && replay.support == 1 &&
+                              (replay.sources & 2) != 0,
+                          "lookup snapshot did not preserve indexed continuation after restart");
+    }
+    std::filesystem::remove(snapshot_path);
     std::filesystem::path token_path = prefix;
     token_path += ".tokens.i32";
     std::filesystem::path suffix_path = prefix;

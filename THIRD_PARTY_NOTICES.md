@@ -35,5 +35,10 @@ operational ideas while retaining NInfer's own bounded host structures. Native t
 an NInfer-specific extension: it records the target taps and top-k distribution from the exact
 loaded artifact so DFlash fine-tuning can follow quantized/Ternary target behavior.
 
+The final 24GB integration also adapts TandemLLM's server-lifetime router-learning and
+deterministic sampled-tree concepts. NInfer's sampled tree uses its existing position-keyed
+counter RNG and deliberately falls back to chain verification when branch-specific penalty state
+would be required.
+
 This notice covers code/design adapted from TandemLLM. Model weights and other third-party
 components retain their own licenses and notices.

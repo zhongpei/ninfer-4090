@@ -79,6 +79,12 @@ int main() {
         tree.observe(3, 3, options);
         tree.observe(15, 1, options);
     }
+    failures += check(choose_tree_stair_extent(options, tree, 15) == 11,
+                      "Tree-Stair ignored the prior for an unobserved eligible rung");
+    for (int i = 0; i < 12; ++i) {
+        tree.observe(7, 1, options);
+        tree.observe(11, 1, options);
+    }
     failures += check(choose_tree_stair_extent(options, tree, 15) == 3,
                       "Tree-Stair did not prefer the higher committed-token-per-cost rung");
     options.mode = SpeculativeRoutingMode::Fixed;

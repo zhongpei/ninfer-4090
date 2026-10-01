@@ -169,7 +169,8 @@ std::string usage_text(const char* argv0) {
            "input projections off that route.\n"
            "--dflash-teacher-out DIR records teacher-forced target taps and stable target top-16 "
            "from the loaded .ninfer artifact during prefill; this is an offline training tool.\n"
-           "--spec-tree lattice enables C1 greedy DFlash2 runtime tree verification; "
+           "--spec-tree lattice enables C1 DFlash2 runtime tree verification; greedy and "
+           "positive-temperature sampling require zero presence/frequency penalties; "
            "--spec-tree-nodes caps the maximum at 15; Tree-Stair may choose a smaller active prefix, and --spec-tree-spine controls how much "
            "of the greedy lattice is installed before best-first alternatives.\n"
            "--spec-router-scope engine reuses Stair evidence across requests; "
@@ -178,7 +179,7 @@ std::string usage_text(const char* argv0) {
            "choosing the target-verify extent from an explicit measured cost staircase; fixed is "
            "the default and all Stair parameters are exposed for A/B calibration.\n"
            "--lookup-ngram N enables exact copy drafting. recent preserves the old nearest hit; "
-           "vote counts same-order continuations from the request, optional process history and a "
+           "vote counts same-order continuations from the request, optional persistent history and a "
            "static suffix corpus. --lookup-dflash replace isolates proposal quality; skip also "
            "removes the neural DFlash proposal on an all-lane confident hit.\n"
            "--kv-capacity auto leaves " +

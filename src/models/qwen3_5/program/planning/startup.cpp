@@ -760,10 +760,15 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     std::max({out.dflash_round, finish(target), accept,
                               dflash_context_capacity(verify, batch, true), proposal});
                 if (plan.speculative_tree.mode != SpeculativeTreeMode::Off && batch == 1) {
+                    const std::size_t tree_sampling = ops::sampling_workspace_capacity_bytes(
+                        dimension(parameters.model.resources().public_token_count), 2, verify);
+                    // Preserve bounded headroom for accepted-path K/V/tap gathers while explicitly
+                    // accounting for positive-temperature tree sampling.
                     out.dflash_round = std::max(
                         out.dflash_round,
-                        checked_add(finish(target), 2ULL * 1024ULL * 1024ULL,
-                                    "DFlash tree workspace headroom"));
+                        std::max(checked_add(finish(target), 2ULL * 1024ULL * 1024ULL,
+                                             "DFlash tree workspace headroom"),
+                                 tree_sampling));
                 }
             }
         }
