@@ -333,7 +333,12 @@ void speculative_tree_accept_greedy(
         tree_tokens.ne[3] != 1 || live_rows < 2 || live_rows > width) {
         throw std::invalid_argument("speculative_tree_accept_greedy: invalid tree width");
     }
-    require_vector(target_tokens, DType::I32, width, op, "target_tokens");
+    require_dtype(target_tokens, DType::I32, op, "target_tokens");
+    if (target_tokens.ne[0] < live_rows || target_tokens.ne[0] > width ||
+        target_tokens.ne[1] != 1 || target_tokens.ne[2] != 1 || target_tokens.ne[3] != 1) {
+        throw std::invalid_argument(
+            "speculative_tree_accept_greedy: target tokens must cover the live tree prefix");
+    }
     require_dtype(target_logits, DType::BF16, op, "target_logits");
     if (target_logits.ne[0] <= 0 || target_logits.ne[1] != width ||
         target_logits.ne[2] != 1 || target_logits.ne[3] != 1 ||
