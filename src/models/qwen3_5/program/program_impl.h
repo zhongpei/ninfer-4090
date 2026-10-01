@@ -590,6 +590,10 @@ public:
     const ProposalHead proposal_head;
     ::ninfer::qwen3_5::LookupPersistentStore lookup_persistent;
     ::ninfer::qwen3_5::LookupCorpusStore lookup_corpus;
+    // Optional engine-lifetime Stair state. Request-local states remain present for the historical
+    // A/B arm; routing selects one scope without changing request statistics or model state.
+    StairRouterState persistent_stair_router;
+    TreeStairRouterState persistent_tree_stair_router;
     const float rope_scaling_factor;
     const std::uint32_t rope_scaling_original_context;
 
