@@ -395,7 +395,7 @@ def select_arms(names: str) -> tuple[Arm, ...]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--exe", type=Path, default=Path("build-ninja/apps/ninfer.exe"))
+    ap.add_argument("--exe", type=Path, default=Path("build-ninja/apps/ninfer"))
     ap.add_argument("--model", type=Path, required=True)
     ap.add_argument("--out", default="profiles/ab-suite")
     ap.add_argument("--pairs", type=int, default=4)
