@@ -84,6 +84,24 @@ A new server per arm prevents prefix cache, adaptive routing history and allocat
 
 The suite intentionally does not include BF16 KV in the default 24 GB matrix. It may be requested manually when the selected artifact/context capacity fits, but it should not cause the standard 4090 validation to fail from a configuration outside the intended memory envelope.
 
+## Linux Stair calibration
+
+The 4090 cost calibration also has a native Bash entry point:
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+export NINFER_DFLASH2_MODEL=/models/qwen3_8_27b_dflash2.ninfer
+
+bash scripts/sweeps/dflash2-stair-cost-calibration.sh \
+  > profiles/sweeps/staircost.csv
+
+python3 -m tools.dflash2_training.calibrate_4090 \
+  profiles/sweeps/staircost.csv \
+  --out profiles/4090-stair.json
+```
+
+This keeps calibration and the subsequent A/B matrix on the same Linux build, CUDA driver and GPU.
+
 ## Reading the result
 
 Do not optimize on one number. For each arm check, in order:
