@@ -237,6 +237,56 @@ void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& sele
     detail::speculative_select_accepted_hidden_launch(hidden, selectors, out, stream);
 }
 
+void speculative_tree_build_device(const Tensor& candidates, const Tensor& lattice,
+                                   std::int32_t anchor, std::int32_t steps,
+                                   std::int32_t node_budget, std::int32_t spine,
+                                   std::int32_t frontier, std::int32_t rope_delta,
+                                   Tensor& verify_ids, Tensor& positions,
+                                   Tensor& rope_positions, Tensor& parents, Tensor& depths,
+                                   cudaStream_t stream) {
+    constexpr const char* op = "speculative_tree_build_device";
+    if (steps < 1 || steps > 15 || node_budget < 1 || node_budget > steps ||
+        spine < 1 || spine > node_budget) {
+        throw std::invalid_argument("speculative_tree_build_device: invalid steps/budget/spine");
+    }
+    require_tensor3(candidates, DType::I32, 16, steps, 1, op, "candidates");
+    require_dtype(lattice, DType::FP32, op, "lattice");
+    if (lattice.ne[0] != 16 || lattice.ne[1] != 16 || lattice.ne[2] != steps ||
+        lattice.ne[3] != 1) {
+        throw std::invalid_argument("speculative_tree_build_device: lattice must be [16,16,K,1]");
+    }
+    const std::int32_t width = node_budget + 1;
+    require_matrix(verify_ids, DType::I32, width, 1, op, "verify_ids");
+    require_matrix(positions, DType::I32, width, 1, op, "positions");
+    require_matrix(rope_positions, DType::I32, width, 1, op, "rope_positions");
+    require_vector(parents, DType::I32, width, op, "parents");
+    require_vector(depths, DType::I32, width, op, "depths");
+    detail::speculative_tree_build_device_launch(
+        candidates, lattice, anchor, steps, node_budget, spine, frontier, rope_delta,
+        verify_ids, positions, rope_positions, parents, depths, stream);
+}
+
+void speculative_tree_accept_device(const Tensor& verify_ids, const Tensor& parents,
+                                    const Tensor& target_tokens, Tensor& path_nodes,
+                                    Tensor& licensed_tokens, Tensor& licensed_counts,
+                                    Tensor& accepted_drafts, cudaStream_t stream) {
+    constexpr const char* op = "speculative_tree_accept_device";
+    const std::int32_t width = verify_ids.ne[0];
+    if (width < 2 || width > 16) {
+        throw std::invalid_argument("speculative_tree_accept_device: width must be in [2,16]");
+    }
+    require_matrix(verify_ids, DType::I32, width, 1, op, "verify_ids");
+    require_vector(parents, DType::I32, width, op, "parents");
+    require_matrix(target_tokens, DType::I32, width, 1, op, "target_tokens");
+    require_vector(path_nodes, DType::I32, width, op, "path_nodes");
+    require_matrix(licensed_tokens, DType::I32, width, 1, op, "licensed_tokens");
+    require_vector(licensed_counts, DType::I32, 1, op, "licensed_counts");
+    require_vector(accepted_drafts, DType::I32, 1, op, "accepted_drafts");
+    detail::speculative_tree_accept_device_launch(
+        verify_ids, parents, target_tokens, path_nodes, licensed_tokens,
+        licensed_counts, accepted_drafts, stream);
+}
+
 void speculative_tree_gather_bf16(const Tensor& source, const Tensor& path_nodes,
                                   std::int32_t count, Tensor& destination,
                                   cudaStream_t stream) {
