@@ -880,6 +880,22 @@ struct GenerationEngineTiming {
     std::uint64_t control_units                 = 0;
 };
 
+struct DFlashTeacherCapture {
+    // The exact token window executed by the target. Predictor row i corresponds to token_ids[i]
+    // and predicts token_ids[i+1].
+    std::vector<TokenId> token_ids;
+    std::vector<std::uint32_t> target_layer_ids;
+    std::uint32_t hidden_size = 0;
+    std::uint32_t predictor_count = 0;
+    std::uint32_t top_k = 16;
+    // Raw BF16 bits, token-major [predictor_count, target_layer_ids.size()*hidden_size].
+    std::vector<std::uint16_t> fused_bf16;
+    // Actual NInfer target top-K at every predictor row. Rank 0 is the exact greedy label.
+    std::vector<TokenId> labels;
+    std::vector<TokenId> top_ids;
+    std::vector<float> top_logits;
+};
+
 struct SpeculativeStats {
     SpeculativeBackend backend    = SpeculativeBackend::None;
     bool enabled                  = false;
