@@ -917,6 +917,22 @@ __global__ void speculative_select_accepted_hidden_kernel(const __nv_bfloat16* h
         hidden[(static_cast<std::int64_t>(batch) * cols + col) * rows + row];
 }
 
+__global__ void speculative_tree_gather_bf16_kernel(
+    const __nv_bfloat16* source, const std::int32_t* path, __nv_bfloat16* destination,
+    std::int32_t rows, std::int32_t width, std::int32_t count) {
+    const std::int32_t row = static_cast<std::int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
+    const std::int32_t col = static_cast<std::int32_t>(blockIdx.y);
+    if (row >= rows || col >= width) return;
+    __nv_bfloat16 value = __float2bfloat16(0.0F);
+    if (col < count) {
+        const std::int32_t source_col = path[col];
+        if (source_col >= 0 && source_col < width) {
+            value = source[static_cast<std::int64_t>(source_col) * rows + row];
+        }
+    }
+    destination[static_cast<std::int64_t>(col) * rows + row] = value;
+}
+
 __global__ void speculative_make_one_hot_sparse_proposal_kernel(
     const std::int32_t* drafts, const std::int32_t* extents, std::int32_t* candidate_ids,
     float* proposal_q, std::int32_t k, std::int32_t token_domain) {
