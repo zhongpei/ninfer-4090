@@ -256,6 +256,13 @@ std::vector<float> Program::causal_score(PreparedPrompt&& prompt, std::uint32_t 
     return impl_->causal_score(PreparedPromptAccess::take(std::move(prompt)), first_target);
 }
 
+DFlashTeacherCapture
+Program::causal_teacher(PreparedPrompt&& prompt,
+                        std::span<const std::uint32_t> target_layer_ids) {
+    return impl_->causal_teacher(PreparedPromptAccess::take(std::move(prompt)),
+                                 target_layer_ids);
+}
+
 std::optional<AdmissionCandidate> Program::inspect_admission(
     const PreparedPrompt& prompt, const RequestBasePlan& base, runtime::LaneId destination,
     const ContinuationHandle* source, const SharedPrefixHandle* shared_source,
