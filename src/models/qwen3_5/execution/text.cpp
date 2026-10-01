@@ -393,7 +393,50 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
 
     Tensor a = results.attention.view({dimension(config_.attention->head_dim),
                                        dimension(config_.attention->num_attention_heads), T});
-    if (active_sequence_batch_ != 0) {
+    if (active_tree_parents_ != nullptr) {
+        const std::int32_t width = active_sequence_width_;
+        if (active_sequence_batch_ != 1 || width != T || batch_text_kv_ == nullptr ||
+            active_tree_kv_key_ == nullptr || active_tree_kv_value_ == nullptr) {
+            throw std::logic_error("Text tree attention binding is incomplete");
+        }
+        const std::int32_t head_dim = dimension(config_.attention->head_dim);
+        const std::int32_t kv_heads = dimension(config_.attention->num_key_value_heads);
+        if (fidx < 0 || fidx >= active_tree_kv_key_->ne[3] ||
+            active_tree_kv_key_->ne[2] < width || active_tree_kv_value_->ne[2] < width) {
+            throw std::logic_error("Text tree attention replay layer is out of range");
+        }
+
+        Tensor key_record = active_tree_kv_key_->slice(3, fidx, 1)
+                                .slice(2, 0, width)
+                                .view({head_dim * kv_heads, width});
+        Tensor value_record = active_tree_kv_value_->slice(3, fidx, 1)
+                                  .slice(2, 0, width)
+                                  .view({head_dim * kv_heads, width});
+        Tensor key_source = kn.view({head_dim * kv_heads, width});
+        Tensor value_source = v.view({head_dim * kv_heads, width});
+        CUDA_CHECK(cudaMemcpyAsync(key_record.data, key_source.data, key_record.bytes(),
+                                   cudaMemcpyDeviceToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(value_record.data, value_source.data, value_record.bytes(),
+                                   cudaMemcpyDeviceToDevice, s));
+
+        for (std::int32_t node = 0; node < width; ++node) {
+            Tensor q_node = qn.slice(2, node, 1)
+                                .view({head_dim,
+                                       dimension(config_.attention->num_attention_heads), 1, 1});
+            Tensor k_node = kn.slice(2, node, 1).view({head_dim, kv_heads, 1, 1});
+            Tensor v_node = v.slice(2, node, 1).view({head_dim, kv_heads, 1, 1});
+            Tensor a_node = a.slice(2, node, 1)
+                                .view({head_dim,
+                                       dimension(config_.attention->num_attention_heads), 1, 1});
+            Tensor position_node = cache_positions.slice(0, node, 1).view({1, 1});
+            ops::causal_softmax_attention(
+                q_node, k_node, v_node, position_node, Tensor{}, kv_table_rows,
+                {head_dim, dimension(config_.attention->num_attention_heads), kv_heads},
+                static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim))),
+                batch_text_kv_->batch_layer_view(fidx), *active_causal_attention_envelope_,
+                work_, a_node, s);
+        }
+    } else if (active_sequence_batch_ != 0) {
         const std::int32_t width = active_sequence_width_;
         if (width <= 0 || width * active_sequence_batch_ != T ||
             active_backend_kv_table_rows_ == nullptr || active_valid_columns_ == nullptr) {
