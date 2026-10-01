@@ -150,6 +150,10 @@ struct LookupDraftOptions {
     // Zero disables process-persistent lookup history. When non-zero, completed request ledgers
     // are retained up to this many tokens and indexed by n-gram hash.
     std::uint32_t persistent_tokens = 0;
+    // Optional append-only token history. When set, the bounded process store is restored from
+    // this file at startup and every successful finished request appends one separator-delimited
+    // sequence, so lookup survives process restarts without becoming model/cache authority.
+    std::filesystem::path persistent_path;
     // Optional static suffix corpus. PREFIX names PREFIX.tokens.i32 and PREFIX.suffix.u32.
     std::filesystem::path corpus_prefix;
     float corpus_weight          = 0.50F;
@@ -174,6 +178,9 @@ struct SpeculativeRoutingOptions {
     // observations about later proposal positions.
     std::uint32_t probe_period = 16;
     float switch_margin = 0.02F;
+    // Request keeps historical behavior. Engine keeps Stair observations for the lifetime of the
+    // Program and lets later requests reuse measured acceptance/cost evidence.
+    bool persist_across_requests = false;
 };
 
 struct SpeculativeOptions {
