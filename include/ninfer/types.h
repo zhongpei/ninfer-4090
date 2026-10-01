@@ -105,6 +105,11 @@ enum class SpeculativeRoutingMode : std::uint8_t {
     Stair,
 };
 
+enum class SpeculativeRouterScope : std::uint8_t {
+    Request,
+    Engine,
+};
+
 enum class LookupDraftStrategy : std::uint8_t {
     Recent,
     Vote,
@@ -164,6 +169,10 @@ inline constexpr std::size_t kSpeculativeStairLevels = 4;
 // its own verify staircase. Fixed mode is the default and preserves the pre-router behavior.
 struct SpeculativeRoutingOptions {
     SpeculativeRoutingMode mode = SpeculativeRoutingMode::Fixed;
+    // Request preserves the original A/B behavior. Engine reuses observed chain/tree economics
+    // across requests. A nonempty state_path also restores/saves that engine state across restarts.
+    SpeculativeRouterScope scope = SpeculativeRouterScope::Request;
+    std::filesystem::path state_path;
     std::array<std::uint32_t, kSpeculativeStairLevels> widths{3, 7, 11, 15};
     std::array<float, kSpeculativeStairLevels> verify_costs{1.00F, 1.02F, 1.05F, 1.10F};
     float draft_cost       = 0.25F;
