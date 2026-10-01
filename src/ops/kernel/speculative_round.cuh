@@ -1122,8 +1122,9 @@ __global__ void speculative_tree_build_plan_kernel(
 }
 
 __global__ void speculative_tree_accept_greedy_kernel(
-    const std::int32_t* target_tokens, const std::int32_t* tree_tokens,
-    const std::int32_t* parents, int live_rows, int physical_width,
+    const std::int32_t* target_tokens, const __nv_bfloat16* target_logits,
+    const std::int32_t* tree_tokens, const std::int32_t* parents, int live_rows,
+    int physical_width, int physical_rows, int token_domain,
     std::int32_t* path_nodes, std::int32_t* licensed_tokens,
     std::int32_t* licensed_counts, std::int32_t* accepted_drafts,
     std::int32_t* path_count, std::int32_t* compact_last_index) {
@@ -1139,6 +1140,20 @@ __global__ void speculative_tree_accept_greedy_kernel(
     path_nodes[0] = 0;
     while (count < live_rows) {
         const int wanted = target_tokens[current];
+        const bool finite =
+            wanted >= 0 && wanted < token_domain &&
+            isfinite(__bfloat162float(
+                target_logits[static_cast<std::int64_t>(current) * physical_rows + wanted]));
+        if (!finite) {
+            for (int i = 0; i < physical_width; ++i) licensed_tokens[i] = 0;
+            licensed_tokens[0] = kSamplerNonFiniteToken;
+            licensed_counts[0] = 1;
+            accepted_drafts[0] = 0;
+            path_count[0] = 1;
+            compact_last_index[0] = 0;
+            path_nodes[0] = 0;
+            return;
+        }
         int child = -1;
         for (int i = current + 1; i < live_rows; ++i) {
             if (parents[i] == current && tree_tokens[i] == wanted) {
