@@ -896,6 +896,11 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
             throw std::invalid_argument(
                 "native DFlash teacher recording requires a Generation Engine with DFlash2");
         }
+        if (options.context_cache.enabled) {
+            throw std::invalid_argument(
+                "native DFlash teacher recording requires context-cache disabled so every "
+                "teacher sequence starts at token zero");
+        }
     }
     if (options.speculative.tree.mode != SpeculativeTreeMode::Off) {
         if (options.speculative.backend != SpeculativeBackend::DFlash2 ||
