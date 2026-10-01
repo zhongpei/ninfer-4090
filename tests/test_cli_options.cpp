@@ -88,6 +88,38 @@ int main() {
                                        "--spec-stair-widths", "1,2,3,3"});
                       }),
                       "CLI accepted Stair routing on MTP or invalid width ordering");
+    const auto lookup = parse(
+        {"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "dflash2",
+         "--draft-tokens", "15", "--lookup-ngram", "8", "--lookup-strategy", "vote",
+         "--lookup-dflash", "skip", "--lookup-max-order", "12", "--lookup-max-matches", "48",
+         "--lookup-min-support", "2", "--lookup-min-confidence", "0.7",
+         "--lookup-base-drafts", "7", "--lookup-deep-after", "2", "--lookup-deep-drafts", "15",
+         "--lookup-persistent-tokens", "262144", "--lookup-corpus-prefix", "corpus/qwen",
+         "--lookup-corpus-weight", "0.4", "--lookup-corpus-samples", "32"});
+    failures += check(lookup.speculative.lookup.strategy == ninfer::LookupDraftStrategy::Vote &&
+                          lookup.speculative.lookup.dflash_mode == ninfer::LookupDFlashMode::HeadSkip &&
+                          lookup.speculative.lookup.max_order == 12 &&
+                          lookup.speculative.lookup.persistent_tokens == 262144 &&
+                          lookup.speculative.lookup.corpus_prefix == "corpus/qwen",
+                      "CLI did not preserve multi-source lookup controls");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--spec", "dflash2", "--draft-tokens", "15",
+                                       "--lookup-ngram", "8", "--lookup-dflash", "skip"});
+                      }),
+                      "CLI accepted DFlash lookup takeover without vote strategy");
+    const auto recent16 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "mtp",
+               "--draft-tokens", "3", "--lookup-ngram", "16"});
+    failures += check(recent16.speculative.lookup_ngram == 16 &&
+                          recent16.speculative.lookup.strategy == ninfer::LookupDraftStrategy::Recent,
+                      "historical recent --lookup-ngram 16 no longer parses");
+    const auto clamped_deep =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec", "dflash2",
+               "--draft-tokens", "7", "--lookup-ngram", "5", "--lookup-strategy", "vote",
+               "--lookup-dflash", "skip", "--lookup-deep-drafts", "15"});
+    failures += check(clamped_deep.speculative.lookup.deep_drafts == 15,
+                      "lookup deep policy could not exceed startup K for runtime clamping");
     for (const auto k : {0U, 16U}) {
         failures +=
             check(rejects([&] {
@@ -122,7 +154,8 @@ int main() {
                           route.speculative.draft_tokens == 3,
                       "CLI did not parse the cuBLAS prefill and context-lookup controls");
     for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections", "--lookup-ngram",
-                             "--spec-router", "--spec-stair-widths", "--spec-stair-costs"}) {
+                             "--spec-router", "--spec-stair-widths", "--spec-stair-costs",
+                             "--lookup-strategy", "--lookup-dflash", "--lookup-corpus-prefix"}) {
         failures += check(help.find(flag) != std::string::npos,
                           "CLI help omits an accepted prefill or drafting control");
     }

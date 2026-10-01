@@ -114,3 +114,22 @@ real server and consumes the repository fixture:
 python3 tools/smoke/serve_thinking_preservation.py \
   --artifact out/qwen3_6_27b.ninfer --backend mtp
 ```
+
+
+## Lookup corpus builder
+
+`build_lookup_corpus.py` builds the static suffix-memory input used by
+`--lookup-corpus-prefix`. It needs NumPy plus either `tokenizers` (for a local
+`tokenizer.json`) or Transformers (for a Hugging Face tokenizer directory):
+
+```bash
+python tools/build_lookup_corpus.py \
+  --tokenizer /models/qwen/tokenizer.json \
+  --src /work/code --src /work/docs \
+  --out-prefix /data/qwen_lookup
+```
+
+It writes raw little-endian `.tokens.i32` and `.suffix.u32` arrays plus a metadata JSON with
+the tokenizer hash and source accounting. See
+[Multi-source lookup drafting](../docs/maintainer/lookup-drafting.md) for runtime flags and A/B
+methodology.

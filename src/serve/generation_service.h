@@ -46,6 +46,13 @@ struct GenerationMetrics {
     std::uint64_t speculative_accepted_tokens = 0;
     std::uint64_t speculative_fallback_steps  = 0;
     std::vector<std::uint64_t> speculative_accepted_per_position;
+    std::uint64_t lookup_queries          = 0;
+    std::uint64_t lookup_hits             = 0;
+    std::uint64_t lookup_rounds           = 0;
+    std::uint64_t lookup_replace_rounds   = 0;
+    std::uint64_t lookup_head_skip_rounds = 0;
+    std::uint64_t lookup_draft_tokens     = 0;
+    std::uint64_t lookup_accepted_tokens  = 0;
     std::uint32_t prefix_cache_hit_tokens     = 0;
     ninfer::PrefixReusePath prefix_reuse_path = ninfer::PrefixReusePath::Root;
     ninfer::MaterializationDiagnostics materialization;

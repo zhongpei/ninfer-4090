@@ -569,8 +569,10 @@ void propose_batch_impl(DFlashBatchContext& state, qwen3_5::DFlashDecodeState& f
 
 auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size, std::uint32_t k,
                               DFlashEnvelopes envelopes,
-                              ops::CausalAttentionExecutionEnvelope target_envelope) {
-    return [&state, batch_size, k, envelopes, target_envelope] {
+                              ops::CausalAttentionExecutionEnvelope target_envelope,
+                              std::span<const TokenId> lookup_tokens = {},
+                              bool run_drafter = true) {
+    return [&state, batch_size, k, envelopes, target_envelope, lookup_tokens, run_drafter] {
         if (batch_size <= 0 || batch_size > static_cast<std::int32_t>(kMaximumConcurrency) ||
             k == 0 || k > kDFlashDecodeMaximumDrafts) {
             throw std::logic_error("DFlash decode batch state is incomplete");
@@ -614,8 +616,39 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                                    append_counts, state.execution.device.stream);
         append_context_impl(state, compact_features, append_positions, append_counts,
                             state_destinations, dflash_rows, envelopes.append);
+        // append_context_impl has consumed compact_features on the same stream. Release its
+        // logical workspace before either the neural proposal or direct lookup verification.
+        // The neural path also resets internally; the explicit reset is essential for head-skip.
+        state.execution.work.reset();
 
-        propose_batch_impl(state, frame, batch_size, k, envelopes);
+        if (run_drafter) {
+            propose_batch_impl(state, frame, batch_size, k, envelopes);
+        }
+        const bool lookup_override = !lookup_tokens.empty();
+        if (lookup_override) {
+            const std::size_t expected =
+                static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(k);
+            if (lookup_tokens.size() != expected) {
+                throw std::logic_error("DFlash lookup override has the wrong host extent");
+            }
+            // Tensor storage is [K,B] with the first dimension contiguous, i.e. each lane owns one
+            // contiguous K-token column. The host contract is lane-major [B,K], the same bytes.
+            CUDA_CHECK(cudaMemcpyAsync(drafts.data, lookup_tokens.data(),
+                                       expected * sizeof(TokenId), cudaMemcpyHostToDevice,
+                                       state.execution.device.stream));
+            // DFlash2 normally uses sparse rejection sampling. Keep that exact accounting route:
+            // lookup is a one-hot proposal (q=1), not a request to switch to the dense accept Op.
+            // In particular, sparse acceptance leaves token-count publication to Program commit,
+            // which is required for partial terminal prefixes and presence/frequency penalties.
+            if (frame.candidate_ids.data && frame.proposal_q.data) {
+                Tensor candidates = frame.candidate_ids.slice(2, 0, batch_size);
+                Tensor proposal_q = frame.proposal_q.slice(2, 0, batch_size);
+                ops::speculative_make_one_hot_sparse_proposal(
+                    drafts, extents, candidates, proposal_q,
+                    dimension(state.execution.parameters.model.resources().public_token_count),
+                    state.execution.device.stream);
+            }
+        }
         ops::speculative_prepare_verify_inputs(anchors, drafts, frontiers, extents, verify_ids,
                                                target_positions, state.execution.device.stream);
 
@@ -646,8 +679,9 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                     .candidate_ids           = frame.candidate_ids.data
                                                    ? frame.candidate_ids.slice(2, 0, batch_size)
                                                    : Tensor{},
-                    .proposal_q =
-                        frame.proposal_q.data ? frame.proposal_q.slice(2, 0, batch_size) : Tensor{},
+                    .proposal_q = frame.proposal_q.data
+                                      ? frame.proposal_q.slice(2, 0, batch_size)
+                                      : Tensor{},
                     .frontiers       = frontiers,
                     .anchors         = anchors,
                     .licensed_tokens = licensed_tokens,
@@ -701,6 +735,20 @@ void dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size, std
                          DecodeGraphExecutable* executable) {
     auto body = dflash_decode_batch_body(state, batch_size, k, envelopes, target_envelope);
     run_prepared(state, executable, body);
+}
+
+void dflash_lookup_decode_batch(DFlashBatchContext& state, std::int32_t batch_size,
+                                std::uint32_t k, DFlashEnvelopes envelopes,
+                                ops::CausalAttentionExecutionEnvelope target_envelope,
+                                std::span<const TokenId> lookup_tokens, bool run_drafter) {
+    if (lookup_tokens.empty()) {
+        throw std::invalid_argument("DFlash lookup path requires copied tokens");
+    }
+    auto body = dflash_decode_batch_body(state, batch_size, k, envelopes, target_envelope,
+                                         lookup_tokens, run_drafter);
+    // Lookup choice is request data and intentionally is not captured into a CUDA Graph. The
+    // fixed neural path stays graphed; this branch exists only on a confident copy hit.
+    run_prepared(state, nullptr, body);
 }
 
 } // namespace ninfer::models::qwen3_5::execution

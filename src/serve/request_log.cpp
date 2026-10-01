@@ -315,7 +315,15 @@ Json speculative_json(const GenerationMetrics& metrics) {
                 {"drafted_tokens", metrics.speculative_draft_tokens},
                 {"accepted_tokens", metrics.speculative_accepted_tokens},
                 {"fallback_steps", metrics.speculative_fallback_steps},
-                {"accepted_per_position", metrics.speculative_accepted_per_position}};
+                {"accepted_per_position", metrics.speculative_accepted_per_position},
+                {"lookup",
+                 Json{{"queries", metrics.lookup_queries},
+                      {"hits", metrics.lookup_hits},
+                      {"rounds", metrics.lookup_rounds},
+                      {"replace_rounds", metrics.lookup_replace_rounds},
+                      {"head_skip_rounds", metrics.lookup_head_skip_rounds},
+                      {"drafted_tokens", metrics.lookup_draft_tokens},
+                      {"accepted_tokens", metrics.lookup_accepted_tokens}}}};
 }
 
 Json materialization_json(const ninfer::MaterializationDiagnostics& diagnostics) {
@@ -473,6 +481,18 @@ std::string speculative_str(const GenerationMetrics& metrics) {
         const double accept_pct = 100.0 * static_cast<double>(metrics.speculative_accepted_tokens) /
                                   static_cast<double>(metrics.speculative_draft_tokens);
         out << " (" << std::setprecision(1) << accept_pct << "%)";
+    }
+    if (metrics.lookup_queries != 0) {
+        const double hit_pct = 100.0 * static_cast<double>(metrics.lookup_hits) /
+                               static_cast<double>(metrics.lookup_queries);
+        out << " lookup=" << metrics.lookup_rounds << "r/" << std::setprecision(1) << hit_pct
+            << "%hit skip=" << metrics.lookup_head_skip_rounds;
+        if (metrics.lookup_draft_tokens != 0) {
+            const double lookup_accept =
+                100.0 * static_cast<double>(metrics.lookup_accepted_tokens) /
+                static_cast<double>(metrics.lookup_draft_tokens);
+            out << "/" << lookup_accept << "%acc";
+        }
     }
     return out.str();
 }

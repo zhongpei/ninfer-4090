@@ -105,6 +105,41 @@ enum class SpeculativeRoutingMode : std::uint8_t {
     Stair,
 };
 
+enum class LookupDraftStrategy : std::uint8_t {
+    Recent,
+    Vote,
+};
+
+enum class LookupDFlashMode : std::uint8_t {
+    Off,
+    Replace,
+    HeadSkip,
+};
+
+struct LookupDraftOptions {
+    // Recent preserves the historical nearest-occurrence lookup. Vote counts all matching
+    // continuations from the active sequence plus optional process history and static corpus.
+    LookupDraftStrategy strategy = LookupDraftStrategy::Recent;
+    // DFlash integration is opt-in. Replace runs the neural drafter then replaces its chain,
+    // isolating proposal quality. HeadSkip omits the neural proposal when every active row has a
+    // sufficiently confident lookup and directly verifies the copied chain.
+    LookupDFlashMode dflash_mode = LookupDFlashMode::Off;
+    std::uint32_t max_order      = 8;
+    std::uint32_t max_matches    = 64;
+    std::uint32_t min_support    = 1;
+    float min_confidence         = 0.60F;
+    std::uint32_t base_drafts    = 7;
+    std::uint32_t deep_after     = 2;
+    std::uint32_t deep_drafts    = 15;
+    // Zero disables process-persistent lookup history. When non-zero, completed request ledgers
+    // are retained up to this many tokens and indexed by n-gram hash.
+    std::uint32_t persistent_tokens = 0;
+    // Optional static suffix corpus. PREFIX names PREFIX.tokens.i32 and PREFIX.suffix.u32.
+    std::filesystem::path corpus_prefix;
+    float corpus_weight          = 0.50F;
+    std::uint32_t corpus_samples = 64;
+};
+
 inline constexpr std::size_t kSpeculativeStairLevels = 4;
 
 // Runtime policy for DFlash/DFlash2 target-verification width. The neural drafter still runs at
@@ -131,6 +166,7 @@ struct SpeculativeOptions {
     std::uint32_t draft_tokens = 0;
     ProposalHead proposal_head = ProposalHead::Full;
     SpeculativeRoutingOptions routing;
+    LookupDraftOptions lookup;
     // Context-lookup drafting: match this many trailing tokens against the sequence so far and
     // propose whatever followed the last time they appeared. 0 disables it. It costs no device
     // work, it is exact (verify rejects a wrong guess), and it is strongest exactly where a draft
@@ -833,6 +869,13 @@ struct SpeculativeStats {
     std::uint64_t accepted_tokens = 0;
     std::uint64_t fallback_steps  = 0;
     std::vector<std::uint64_t> accepted_per_position;
+    std::uint64_t lookup_queries          = 0;
+    std::uint64_t lookup_hits             = 0;
+    std::uint64_t lookup_rounds           = 0;
+    std::uint64_t lookup_replace_rounds   = 0;
+    std::uint64_t lookup_head_skip_rounds = 0;
+    std::uint64_t lookup_drafted_tokens   = 0;
+    std::uint64_t lookup_accepted_tokens  = 0;
 };
 
 struct ThinkingBudgetStats {

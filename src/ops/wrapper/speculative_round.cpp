@@ -237,6 +237,24 @@ void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& sele
     detail::speculative_select_accepted_hidden_launch(hidden, selectors, out, stream);
 }
 
+void speculative_make_one_hot_sparse_proposal(
+    const Tensor& drafts, const Tensor& current_extents, Tensor& candidate_ids,
+    Tensor& proposal_q, std::int32_t token_domain, cudaStream_t stream) {
+    constexpr const char* op = "speculative_make_one_hot_sparse_proposal";
+    const std::int32_t k = drafts.ne[0];
+    const std::int32_t batch = drafts.ne[1];
+    if (k < 1 || k > 15 || batch < 1 || batch > 8 || token_domain <= 16) {
+        throw std::invalid_argument(
+            "speculative_make_one_hot_sparse_proposal: unsupported profile");
+    }
+    require_matrix(drafts, DType::I32, k, batch, op, "drafts");
+    require_vector(current_extents, DType::I32, batch, op, "current_extents");
+    require_tensor3(candidate_ids, DType::I32, 16, k, batch, op, "candidate_ids");
+    require_tensor3(proposal_q, DType::FP32, 16, k, batch, op, "proposal_q");
+    detail::speculative_make_one_hot_sparse_proposal_launch(
+        drafts, current_extents, candidate_ids, proposal_q, token_domain, stream);
+}
+
 void proposal_remap_token_ids(Tensor& proposal_tokens, const std::int32_t* id_map, std::int32_t n,
                               cudaStream_t stream) {
     constexpr const char* op = "proposal_remap_token_ids";

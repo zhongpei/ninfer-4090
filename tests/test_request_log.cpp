@@ -402,6 +402,13 @@ int main() {
     outcome.metrics.speculative_accepted_tokens       = 720;
     outcome.metrics.speculative_fallback_steps        = 2;
     outcome.metrics.speculative_accepted_per_position = {290, 240, 190};
+    outcome.metrics.lookup_queries                    = 100;
+    outcome.metrics.lookup_hits                       = 25;
+    outcome.metrics.lookup_rounds                     = 20;
+    outcome.metrics.lookup_replace_rounds             = 8;
+    outcome.metrics.lookup_head_skip_rounds           = 12;
+    outcome.metrics.lookup_draft_tokens               = 180;
+    outcome.metrics.lookup_accepted_tokens            = 150;
     outcome.metrics.materialization                   = {
                           .predicted_now_ns           = 200000,
                           .predicted_future_loss_ns   = 50000,
@@ -474,6 +481,15 @@ int main() {
     failures +=
         check(done.at("speculative").at("accepted_per_position") == Json::array({290, 240, 190}),
               "speculative position counts missing");
+    failures +=
+        check(done.at("speculative").at("lookup").at("queries") == 100 &&
+                  done.at("speculative").at("lookup").at("hits") == 25 &&
+                  done.at("speculative").at("lookup").at("rounds") == 20 &&
+                  done.at("speculative").at("lookup").at("replace_rounds") == 8 &&
+                  done.at("speculative").at("lookup").at("head_skip_rounds") == 12 &&
+                  done.at("speculative").at("lookup").at("drafted_tokens") == 180 &&
+                  done.at("speculative").at("lookup").at("accepted_tokens") == 150,
+              "lookup speculative A/B metrics missing");
     failures += check(done.at("materialization").at("predicted_total_ns") == 250000 &&
                           done.at("materialization").at("targets_evaluated") == 7 &&
                           done.at("materialization").at("stop_reason") == "queue_exhausted" &&

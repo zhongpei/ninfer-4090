@@ -143,6 +143,7 @@ void ProgramImpl::install_sampling(SequenceState& sequence, RequestControl& requ
         .accepted_per_position = std::vector<std::uint64_t>(draft_window, 0),
     };
     request.stair_router = {};
+    request.lookup_round = {};
     const bool penalties = request.sampling_host.presence_penalty != 0.0F ||
                            request.sampling_host.frequency_penalty != 0.0F;
     if (penalties) { CUDA_CHECK(cudaMemsetAsync(counts.data, 0, counts.bytes(), device.stream)); }
@@ -287,7 +288,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             throw std::invalid_argument("ordinary batch contains an invalid or duplicate lane");
         }
         const SequenceState& sequence = active_sequence(lane);
-        const RequestControl& request = requests[lane];
+        RequestControl& request = requests[lane];
         if (request.lifecycle != Lifecycle::Active ||
             budgets[row].generated_tokens_remaining == 0 || !sequence.kv ||
             text_kv_addresses->bound_row(sequence.kv->text) < 0 ||
@@ -601,6 +602,12 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
     }
 
     const std::uint32_t width           = draft_window + 1U;
+    std::array<std::uint32_t, kMaximumConcurrency> normal_extents{};
+    std::array<::ninfer::qwen3_5::LookupDraftProposal, kMaximumConcurrency> lookup_proposals{};
+    const bool lookup_enabled =
+        lookup_ngram != 0 && lookup_options.strategy == LookupDraftStrategy::Vote &&
+        lookup_options.dflash_mode != LookupDFlashMode::Off;
+    bool lookup_batch = lookup_enabled;
     std::uint32_t maximum_frontier      = 0;
     std::uint32_t maximum_target_tokens = 1;
     for (std::size_t row = 0; row < lanes.size(); ++row) {
@@ -611,7 +618,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             throw std::invalid_argument("DFlash batch contains an invalid or duplicate lane");
         }
         const SequenceState& sequence = active_sequence(lane);
-        const RequestControl& request = requests[lane];
+        RequestControl& request = requests[lane];
         if (request.lifecycle != Lifecycle::Active ||
             budgets[row].generated_tokens_remaining == 0 || !sequence.kv ||
             text_kv_addresses->bound_row(sequence.kv->text) < 0 ||
@@ -632,9 +639,36 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                                 : 0U;
         const std::uint32_t policy_extent =
             choose_stair_extent(speculative_routing, request.stair_router, draft_window);
-        const std::uint32_t extent = std::min(
+        normal_extents[row] = std::min(
             {policy_extent, max_by_budget, capacity - sequence.execution_frontier - 1U});
+
+        if (lookup_enabled) {
+            ++request.speculative_stats.lookup_queries;
+            const bool deep =
+                lookup_options.deep_after != 0 &&
+                request.lookup_round.full_accept_run >= lookup_options.deep_after;
+            const std::uint32_t lookup_limit =
+                std::min({deep ? lookup_options.deep_drafts : lookup_options.base_drafts,
+                          draft_window, max_by_budget,
+                          capacity - sequence.execution_frontier - 1U});
+            lookup_proposals[row] = ::ninfer::qwen3_5::lookup_draft_vote(
+                std::span<const TokenId>(sequence.ledger), lookup_ngram, lookup_limit,
+                lookup_options, &lookup_persistent, &lookup_corpus);
+            if (lookup_proposals[row]) {
+                ++request.speculative_stats.lookup_hits;
+            } else {
+                lookup_batch = false;
+            }
+        } else {
+            lookup_batch = false;
+        }
         maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
+    }
+
+    for (std::size_t row = 0; row < lanes.size(); ++row) {
+        const SequenceState& sequence = active_sequence(lanes[row]);
+        const std::uint32_t extent =
+            lookup_batch ? lookup_proposals[row].count : normal_extents[row];
         maximum_target_tokens =
             std::max(maximum_target_tokens, sequence.execution_frontier + extent + 1U);
     }
@@ -647,7 +681,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         DecodeGraphExecutable* executable    = nullptr;
         execution::DFlashEnvelopes envelopes = dflash_envelopes(0, maximum_frontier, draft_window);
         ops::CausalAttentionExecutionEnvelope target_envelope{1, maximum_target_tokens};
-        if (use_cuda_graph) {
+        if (use_cuda_graph && !lookup_batch) {
             DecodeGraphProfile& profile =
                 select_graph_profile(dflash_graphs, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "DFlash batch");
@@ -662,15 +696,10 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
 
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence           = active_sequence(lanes[row]);
-            const RequestControl& request     = requests[lanes[row]];
-            const std::uint32_t frontier      = sequence.execution_frontier;
-            const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
-                                                    ? budgets[row].generated_tokens_remaining - 1U
-                                                    : 0U;
-            const std::uint32_t policy_extent =
-                choose_stair_extent(speculative_routing, request.stair_router, draft_window);
+            const RequestControl& request = requests[lanes[row]];
+            const std::uint32_t frontier = sequence.execution_frontier;
             const std::uint32_t extent =
-                std::min({policy_extent, max_by_budget, capacity - frontier - 1U});
+                lookup_batch ? lookup_proposals[row].count : normal_extents[row];
             dflash_host_ingress->anchors[row] = sequence.ledger.back();
             dflash_host_ingress->execution_frontiers[row] =
                 checked_i32(frontier, "DFlash batch frontier");
@@ -709,8 +738,23 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             state_images->continuation_hidden_store()};
 
         mark_workspace_usage(workspace_plan.dflash_round);
-        execution::dflash_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
-                                       draft_window, envelopes, target_envelope, executable);
+        std::vector<TokenId> lookup_host;
+        if (lookup_batch) {
+            lookup_host.assign(lanes.size() * static_cast<std::size_t>(draft_window), 0);
+            for (std::size_t row = 0; row < lanes.size(); ++row) {
+                const auto& proposal = lookup_proposals[row];
+                std::copy_n(proposal.tokens.begin(), proposal.count,
+                            lookup_host.begin() +
+                                static_cast<std::ptrdiff_t>(row * draft_window));
+            }
+            const bool run_drafter = lookup_options.dflash_mode == LookupDFlashMode::Replace;
+            execution::dflash_lookup_decode_batch(
+                schedule_state, static_cast<std::int32_t>(lanes.size()), draft_window, envelopes,
+                target_envelope, std::span<const TokenId>(lookup_host), run_drafter);
+        } else {
+            execution::dflash_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
+                                           draft_window, envelopes, target_envelope, executable);
+        }
         submit_range.reset();
         timing.begin_wait();
         {
@@ -751,9 +795,27 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                     request.speculative_stats.accepted_per_position[static_cast<std::size_t>(i)] +=
                         1;
                 }
-                if (speculative_routing.mode == SpeculativeRoutingMode::Stair) {
+                if (!lookup_batch && speculative_routing.mode == SpeculativeRoutingMode::Stair) {
                     request.stair_router.observe(
                         extent, static_cast<std::uint32_t>(accepted_i), speculative_routing);
+                }
+                if (lookup_batch) {
+                    ++request.speculative_stats.lookup_rounds;
+                    request.speculative_stats.lookup_drafted_tokens += extent;
+                    request.speculative_stats.lookup_accepted_tokens +=
+                        static_cast<std::uint32_t>(accepted_i);
+                    if (lookup_options.dflash_mode == LookupDFlashMode::HeadSkip) {
+                        ++request.speculative_stats.lookup_head_skip_rounds;
+                    } else {
+                        ++request.speculative_stats.lookup_replace_rounds;
+                    }
+                    if (extent != 0 && accepted_i == static_cast<std::int32_t>(extent)) {
+                        ++request.lookup_round.full_accept_run;
+                    } else {
+                        request.lookup_round.full_accept_run = 0;
+                    }
+                } else {
+                    request.lookup_round = {};
                 }
             }
             sequence.dflash_context_frontier = base_E;

@@ -251,7 +251,20 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--spec-stair-probe-period N` | periodic wide probe; zero disables | `16` |
 | `--spec-stair-margin F` | switch hysteresis | `0.02` |
 | `--lm-head-draft` | optimized proposal head | off |
-| `--lookup-ngram N` | context-lookup drafting alongside `--spec`: the last `N` tokens are matched against the sequence so far and what followed is proposed; exact, since verification rejects a wrong guess | `0` (off) |
+| `--lookup-ngram N` | minimum suffix order for exact copy drafting; 0 disables lookup | `0` (off) |
+| `--lookup-strategy recent\|vote` | nearest historical match or counted multi-source continuation vote | `recent` |
+| `--lookup-dflash off\|replace\|skip` | no DFlash takeover, replace neural chain after running it, or skip neural proposal on an all-lane hit | `off` |
+| `--lookup-max-order N` | highest n-gram order considered by vote mode | `8` |
+| `--lookup-max-matches N` | local/process occurrence cap | `64` |
+| `--lookup-min-support N` | minimum winning continuation observations | `1` |
+| `--lookup-min-confidence F` | minimum winning vote share | `0.60` |
+| `--lookup-base-drafts N` | ordinary lookup depth policy maximum | `7` |
+| `--lookup-deep-after N` | full-accept streak before deep copy; 0 disables | `2` |
+| `--lookup-deep-drafts N` | deep-copy policy maximum, clamped to runtime K/budget/context | `15` |
+| `--lookup-persistent-tokens N` | process-lifetime cross-request suffix-memory budget | `0` |
+| `--lookup-corpus-prefix PATH` | static corpus prefix built by `tools/build_lookup_corpus.py` | unset |
+| `--lookup-corpus-weight F` | corpus vote weight | `0.50` |
+| `--lookup-corpus-samples N` | sampled corpus matches per query | `64` |
 | `--prefill-cublas` | hand wide prefill GEMMs to cuBLAS: a large prefill speedup for a small perplexity cost, and it wants a larger `--prefill-chunk` to pay (see [performance](performance.md)) | off |
 | `--no-prefill-cublas-projections` | with `--prefill-cublas`, keep the attention and GDN input projections off that route | projections on |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
