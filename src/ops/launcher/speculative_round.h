@@ -45,8 +45,9 @@ void speculative_tree_build_plan_launch(
     std::int32_t spine, Tensor& tree_tokens, Tensor& parents, Tensor& depths,
     Tensor& cache_positions, Tensor& rope_positions, cudaStream_t stream);
 void speculative_tree_accept_greedy_launch(
-    const Tensor& target_tokens, const Tensor& tree_tokens, const Tensor& parents,
-    std::int32_t live_rows, Tensor& path_nodes, Tensor& licensed_tokens,
+    const Tensor& target_tokens, const Tensor& target_logits, const Tensor& tree_tokens,
+    const Tensor& parents, std::int32_t live_rows, std::int32_t token_domain,
+    Tensor& path_nodes, Tensor& licensed_tokens,
     Tensor& licensed_counts, Tensor& accepted_drafts, Tensor& path_count,
     Tensor& compact_last_index, cudaStream_t stream);
 void speculative_make_one_hot_sparse_proposal_launch(
