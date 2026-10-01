@@ -41,7 +41,9 @@ ninfer::EngineOptions host_restore_engine_options(const char* artifact) {
     options.speculative.proposal_head            = ninfer::ProposalHead::Optimized;
     options.max_concurrency                      = 1;
     options.max_pending_requests                 = 1;
-    options.context_cache.device_state_slots     = 1;
+    // Total Device StateImage capacity is C + H; H=0 leaves only the active entitlement
+    // and forces retained checkpoints to Host when the next request applies pressure.
+    options.context_cache.device_state_slots     = 0;
     options.context_cache.host_state_slots       = 2;
     options.context_cache.host_kv_capacity_bytes = 256ULL << 20;
     options.context_cache.max_private_continuations         = 2;
@@ -526,9 +528,10 @@ int exercise_host_restore(const char* artifact) {
     ninfer::PromptInput continuation = retained_input();
     ninfer::ChatMessage assistant;
     assistant.role              = ninfer::ChatRole::Assistant;
-    assistant.reasoning_content = retained.reasoning;
+    // Replace the assistant suffix so the original TurnClosure remains the reusable source.
+    assistant.reasoning_content = {};
     assistant.parts.push_back(ninfer::MessagePart{
-        .kind = ninfer::MessagePartKind::Text, .text = retained.content, .media = {}});
+        .kind = ninfer::MessagePartKind::Text, .text = "Replacement answer.", .media = {}});
     continuation.messages.push_back(std::move(assistant));
     ninfer::ChatMessage followup;
     followup.role = ninfer::ChatRole::User;
@@ -536,17 +539,27 @@ int exercise_host_restore(const char* artifact) {
         .kind = ninfer::MessagePartKind::Text, .text = "Continue briefly.", .media = {}});
     continuation.messages.push_back(std::move(followup));
 
+    // An unrelated pressure request must not capture a matching Endpoint for the resume.
+    ninfer::PromptInput pressure_input = retained_input();
+    pressure_input.context_cache.session_key.reset();
+    pressure_input.context_cache.retention = ninfer::CacheRetentionHint::Disposable;
+    pressure_input.messages.front().parts.front().text.clear();
+    for (std::uint32_t index = 0; index < 300; ++index) {
+        pressure_input.messages.front().parts.front().text += "bravo ";
+    }
     const ninfer::RuntimeStats before_pressure = engine.runtime_stats();
     const ninfer::GenerationResult pressure_result =
-        engine.generate(engine.prepare(continuation), options(2, false));
+        engine.generate(engine.prepare(pressure_input), options(2, false));
     const ninfer::RuntimeStats after_pressure = engine.runtime_stats();
     if (pressure_result.generated_token_ids.size() != 2 ||
         after_pressure.state_d2h_count <= before_pressure.state_d2h_count ||
         after_pressure.main_kv_d2h_pages <= before_pressure.main_kv_d2h_pages ||
         after_pressure.backend_kv_d2h_pages <= before_pressure.backend_kv_d2h_pages) {
         std::cerr << "Host pressure did not demote the complete MTP checkpoint: state="
-                  << after_pressure.state_d2h_count << " main=" << after_pressure.main_kv_d2h_pages
-                  << " backend=" << after_pressure.backend_kv_d2h_pages
+                  << (after_pressure.state_d2h_count - before_pressure.state_d2h_count)
+                  << " main=" << (after_pressure.main_kv_d2h_pages - before_pressure.main_kv_d2h_pages)
+                  << " backend="
+                  << (after_pressure.backend_kv_d2h_pages - before_pressure.backend_kv_d2h_pages)
                   << " degraded=" << after_pressure.pressure_private_owners_degraded
                   << " evicted=" << after_pressure.pressure_private_owners_evicted << '\n';
         return 1;
@@ -565,16 +578,17 @@ int exercise_host_restore(const char* artifact) {
                   << static_cast<int>(restored.prefix_reuse_path)
                   << " reused=" << restored.reused_prompt_tokens
                   << " outputs=" << restored.generated_token_ids.size()
-                  << " state=" << after_restore.state_h2d_count
-                  << " main=" << after_restore.main_kv_h2d_pages
-                  << " backend=" << after_restore.backend_kv_h2d_pages
+                  << " state=" << (after_restore.state_h2d_count - after_pressure.state_h2d_count)
+                  << " main=" << (after_restore.main_kv_h2d_pages - after_pressure.main_kv_h2d_pages)
+                  << " backend="
+                  << (after_restore.backend_kv_h2d_pages - after_pressure.backend_kv_h2d_pages)
+                  << " restores=" << (after_restore.state_restores - after_pressure.state_restores)
                   << " degraded=" << after_restore.pressure_private_owners_degraded
                   << " evicted=" << after_restore.pressure_private_owners_evicted << '\n';
         return 1;
     }
 
-    // The uncached pressure request and checkpoint resume use different valid prefill splits, so
-    // the pressure result is a completion and transfer trigger rather than an exact-token oracle.
+    // The unrelated pressure request is a completion and transfer trigger, not a token oracle.
     return 0;
 }
 
@@ -2161,7 +2175,9 @@ int run() {
     const char* selected            = std::getenv("NINFER_PREFIX_REAL_SCENARIO");
     const std::string_view scenario = selected ? selected : "all";
     int result                      = 0;
-    if (scenario == "vision") {
+    if (scenario == "host-restore") {
+        result = exercise_host_restore(artifact);
+    } else if (scenario == "vision") {
         ninfer::Engine engine(engine_options(artifact));
         result = exercise_vision(engine);
     } else if (scenario == "frontend") {
