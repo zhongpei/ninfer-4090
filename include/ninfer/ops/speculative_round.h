@@ -198,13 +198,17 @@ void speculative_tree_build_device(const Tensor& candidates, const Tensor& latti
 void speculative_tree_accept_device(const Tensor& verify_ids, const Tensor& parents,
                                     const Tensor& target_tokens, Tensor& path_nodes,
                                     Tensor& licensed_tokens, Tensor& licensed_counts,
-                                    Tensor& accepted_drafts, cudaStream_t stream);
+                                    Tensor& accepted_drafts, Tensor& last_node,
+                                    cudaStream_t stream);
 
 // Gather a C1 BF16 tree matrix [D,T] into accepted-path order. The first count columns are
 // destination[:,i]=source[:,path_nodes[i]] and the physical suffix is zeroed.
 void speculative_tree_gather_bf16(const Tensor& source, const Tensor& path_nodes,
                                   std::int32_t count, Tensor& destination,
                                   cudaStream_t stream);
+void speculative_tree_gather_bf16_counted(const Tensor& source, const Tensor& path_nodes,
+                                          const Tensor& count, Tensor& destination,
+                                          cudaStream_t stream);
 
 /**
  * Rewrite the live DFlash2 proposal distribution as q=1 on the supplied draft token.
