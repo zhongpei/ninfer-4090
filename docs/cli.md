@@ -217,6 +217,11 @@ concurrent requests, sampling penalties, and prefix reuse. An artifact without t
 weights reports a missing DFlash2 component when selected. Vision, MTP and DFlash follow the same
 rule: their weights are required only when that component is enabled at startup.
 
+Only one speculative backend can be enabled per Engine. DFlash2 may additionally enable the
+opt-in runtime tree verifier described in
+[Runtime DFlash2 tree verification](maintainer/runtime-tree-verification.md). Runtime tree v1 is
+C1/raw-greedy and automatically falls back to the chain path for unsupported rounds.
+
 Only one speculative backend can be enabled per Engine. DFlash/DFlash2 may additionally enable
 the opt-in adaptive verification policy described in
 [Adaptive speculative routing](maintainer/speculative-routing.md). The drafter remains at the
@@ -242,6 +247,9 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--spec-router fixed\|stair` | fixed maximum-K verification or adaptive DFlash/DFlash2 verification width | `fixed` |
+| `--spec-tree off\|lattice` | chain verification or opt-in C1 greedy DFlash2 lattice-tree verification | `off` |
+| `--spec-tree-nodes N` | drafted tree-node budget; runtime v1 requires this to equal `--draft-tokens` | `15` |
+| `--spec-tree-spine N` | greedy lattice levels installed before best-first alternatives | `7` |
 | `--spec-stair-widths A,B,C,D` | four strictly increasing Stair draft extents | `3,7,11,15` |
 | `--spec-stair-costs A,B,C,D` | measured relative verify cost at each Stair extent | `1,1.02,1.05,1.10` |
 | `--spec-stair-draft-cost F` | wide drafter cost in the same relative unit | `0.25` |
