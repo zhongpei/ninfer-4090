@@ -959,8 +959,10 @@ __device__ __forceinline__ void speculative_tree_frontier_push(
 
 __global__ void speculative_tree_build_plan_kernel(
     const std::int32_t* candidate_ids, const float* lattice, const std::int32_t* anchors,
-    const std::int32_t* frontiers, const std::int32_t* rope_starts, int steps, int node_budget,
-    int spine, std::int32_t* tree_tokens, std::int32_t* parents, std::int32_t* depths,
+    const std::int32_t* frontiers, const std::int32_t* rope_starts,
+    const std::int32_t* lookup_tokens, int lookup_count, float lookup_confidence,
+    int steps, int node_budget, int spine, std::int32_t* tree_tokens,
+    std::int32_t* parents, std::int32_t* depths,
     std::int32_t* cache_positions, std::int32_t* rope_positions) {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     constexpr int MaxRows = 16;
@@ -994,6 +996,23 @@ __global__ void speculative_tree_build_plan_kernel(
     node_score[0] = 1.0F;
     int node_count = 1;
 
+    int lookup_parent = 0;
+    const int lookup_take = min(min(lookup_count, node_budget), steps);
+    const float safe_lookup_confidence =
+        fminf(0.999999F, fmaxf(1.0e-6F, lookup_confidence));
+    const float lookup_logp = logf(safe_lookup_confidence);
+    for (int depth = 0; depth < lookup_take && node_count < node_budget + 1; ++depth) {
+        const int node = node_count++;
+        node_token[node] = lookup_tokens[depth];
+        node_parent[node] = lookup_parent;
+        node_depth[node] = node_depth[lookup_parent] + 1;
+        node_step[node] = depth;
+        node_rank[node] = -1;
+        node_logp[node] = (depth + 1) * lookup_logp;
+        node_score[node] = expf(node_logp[node]);
+        lookup_parent = node;
+    }
+
     int parent = 0;
     int predecessor = 0;
     float path_lp = 0.0F;
@@ -1009,14 +1028,28 @@ __global__ void speculative_tree_build_plan_kernel(
         path_lp += speculative_tree_edge_logp(lattice, step, predecessor, selected);
 
         const int here = parent;
-        const int node = node_count++;
-        node_token[node] = candidate_ids[step * Candidates + selected];
-        node_parent[node] = here;
-        node_depth[node] = node_depth[here] + 1;
+        const int selected_token = candidate_ids[step * Candidates + selected];
+        int node = -1;
+        for (int existing = 1; existing < node_count; ++existing) {
+            if (node_parent[existing] == here && node_token[existing] == selected_token) {
+                node = existing;
+                break;
+            }
+        }
+        if (node < 0) {
+            if (node_count >= node_budget + 1) break;
+            node = node_count++;
+            node_token[node] = selected_token;
+            node_parent[node] = here;
+            node_depth[node] = node_depth[here] + 1;
+            node_logp[node] = path_lp;
+            node_score[node] = expf(path_lp);
+        } else {
+            node_logp[node] = fmaxf(node_logp[node], path_lp);
+            node_score[node] = fmaxf(node_score[node], expf(path_lp));
+        }
         node_step[node] = step;
         node_rank[node] = selected;
-        node_logp[node] = path_lp;
-        node_score[node] = expf(path_lp);
         parent = node;
 
         for (int alt = 0; alt < Candidates; ++alt) {
