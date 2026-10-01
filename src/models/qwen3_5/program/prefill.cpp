@@ -21,6 +21,7 @@
 #include <span>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace ninfer::models::qwen3_5::execution {
 namespace {
