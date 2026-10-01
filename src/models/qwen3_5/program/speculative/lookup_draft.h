@@ -17,6 +17,13 @@
 #include <utility>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace ninfer::qwen3_5 {
 
 inline constexpr std::uint32_t kLookupMaximumDrafts = 15;
@@ -126,6 +133,91 @@ template <class T>
     }
     return out;
 }
+
+template <class T>
+class ReadOnlyBinaryArray {
+public:
+    ReadOnlyBinaryArray() = default;
+    explicit ReadOnlyBinaryArray(const std::filesystem::path& path) { open(path); }
+    ~ReadOnlyBinaryArray() { close(); }
+
+    ReadOnlyBinaryArray(const ReadOnlyBinaryArray&) = delete;
+    ReadOnlyBinaryArray& operator=(const ReadOnlyBinaryArray&) = delete;
+    ReadOnlyBinaryArray(ReadOnlyBinaryArray&&) = delete;
+    ReadOnlyBinaryArray& operator=(ReadOnlyBinaryArray&&) = delete;
+
+    void open(const std::filesystem::path& path) {
+        close();
+#if defined(_WIN32)
+        owned_ = read_binary_vector<T>(path);
+#else
+        fd_ = ::open(path.c_str(), O_RDONLY);
+        if (fd_ < 0) {
+            throw std::runtime_error("cannot open lookup corpus file: " + path.string());
+        }
+        struct stat st {};
+        if (::fstat(fd_, &st) != 0 || st.st_size <= 0 ||
+            st.st_size % static_cast<off_t>(sizeof(T)) != 0) {
+            close();
+            throw std::runtime_error("lookup corpus file has invalid size: " + path.string());
+        }
+        bytes_ = static_cast<std::size_t>(st.st_size);
+        mapping_ = ::mmap(nullptr, bytes_, PROT_READ, MAP_PRIVATE, fd_, 0);
+        if (mapping_ == MAP_FAILED) {
+            mapping_ = nullptr;
+            close();
+            throw std::runtime_error("cannot mmap lookup corpus file: " + path.string());
+        }
+        size_ = bytes_ / sizeof(T);
+#endif
+    }
+
+    void close() noexcept {
+#if defined(_WIN32)
+        owned_.clear();
+        owned_.shrink_to_fit();
+#else
+        if (mapping_ != nullptr) {
+            ::munmap(mapping_, bytes_);
+            mapping_ = nullptr;
+        }
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+        bytes_ = 0;
+        size_ = 0;
+#endif
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept {
+#if defined(_WIN32)
+        return owned_.size();
+#else
+        return size_;
+#endif
+    }
+    [[nodiscard]] bool empty() const noexcept { return size() == 0; }
+    [[nodiscard]] const T* data() const noexcept {
+#if defined(_WIN32)
+        return owned_.data();
+#else
+        return static_cast<const T*>(mapping_);
+#endif
+    }
+    [[nodiscard]] const T& operator[](std::size_t index) const noexcept { return data()[index]; }
+    [[nodiscard]] std::span<const T> span() const noexcept { return {data(), size()}; }
+
+private:
+#if defined(_WIN32)
+    std::vector<T> owned_;
+#else
+    int fd_ = -1;
+    void* mapping_ = nullptr;
+    std::size_t bytes_ = 0;
+    std::size_t size_ = 0;
+#endif
+};
 
 } // namespace lookup_detail
 
