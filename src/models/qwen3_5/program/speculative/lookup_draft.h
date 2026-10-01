@@ -175,7 +175,6 @@ public:
     void close() noexcept {
 #if defined(_WIN32)
         owned_.clear();
-        owned_.shrink_to_fit();
 #else
         if (mapping_ != nullptr) {
             ::munmap(mapping_, bytes_);
@@ -206,6 +205,8 @@ public:
 #endif
     }
     [[nodiscard]] const T& operator[](std::size_t index) const noexcept { return data()[index]; }
+    [[nodiscard]] const T* begin() const noexcept { return data(); }
+    [[nodiscard]] const T* end() const noexcept { return data() + size(); }
     [[nodiscard]] std::span<const T> span() const noexcept { return {data(), size()}; }
 
 private:
@@ -307,7 +308,7 @@ public:
                 break;
             }
         }
-        return std::span<const TokenId>(tokens_).subspan(pos, count);
+        return tokens_.span().subspan(pos, count);
     }
 
 private:
