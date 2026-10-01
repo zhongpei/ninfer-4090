@@ -841,6 +841,77 @@ void TextContext::target_verify_batch(const Tensor& ids, const Tensor& cache_pos
                              sink);
 }
 
+void TextContext::target_verify_tree(
+    const Tensor& ids, const Tensor& cache_positions, const Tensor& rope_positions,
+    const Tensor& kv_table_rows, const Tensor& linear_state_source_slots,
+    const Tensor& parents, ops::CausalAttentionExecutionEnvelope envelope,
+    Tensor& hidden, Tensor& logits, Tensor& target_tokens, Tensor& tree_kv_key,
+    Tensor& tree_kv_value, DFlashTreeFeatureSink& sink) {
+    const std::int32_t width = ids.ne[0];
+    if (width < 2 || width > static_cast<std::int32_t>(kDFlashDecodeMaximumWidth)) {
+        throw std::invalid_argument("target verify tree width must be in [2,16]");
+    }
+    require_tensor_shape(ids, DType::I32, {width, 1}, "target verify tree ids");
+    require_tensor_shape(cache_positions, DType::I32, {width, 1},
+                         "target verify tree cache positions");
+    require_tensor_shape(rope_positions, DType::I32, {width, 1},
+                         "target verify tree RoPE positions");
+    require_tensor_shape(kv_table_rows, DType::I32, {1}, "target verify tree KV row");
+    require_tensor_shape(linear_state_source_slots, DType::I32, {1},
+                         "target verify tree Linear Attention slot");
+    require_tensor_shape(parents, DType::I32, {width}, "target verify tree parents");
+    require_tensor_shape(hidden, DType::BF16, {dimension(config_.hidden_size), width, 1},
+                         "target verify tree hidden");
+    require_tensor_shape(logits, DType::BF16, {dimension(config_.vocab_size), width, 1},
+                         "target verify tree logits");
+    require_tensor_shape(target_tokens, DType::I32, {width, 1},
+                         "target verify tree tokens");
+    if (!config_.attention || tree_kv_key.dtype != DType::BF16 ||
+        tree_kv_value.dtype != DType::BF16 ||
+        tree_kv_key.ne[0] != dimension(config_.attention->head_dim) ||
+        tree_kv_key.ne[1] != dimension(config_.attention->num_key_value_heads) ||
+        tree_kv_key.ne[2] < width ||
+        tree_kv_key.ne[3] != static_cast<std::int32_t>(config_.full_attention_layers) ||
+        tree_kv_value.ne[0] != tree_kv_key.ne[0] ||
+        tree_kv_value.ne[1] != tree_kv_key.ne[1] ||
+        tree_kv_value.ne[2] != tree_kv_key.ne[2] ||
+        tree_kv_value.ne[3] != tree_kv_key.ne[3]) {
+        throw std::invalid_argument("target verify tree KV replay buffers have invalid geometry");
+    }
+
+    cudaStream_t stream = ctx_.stream;
+    work_.reset();
+    {
+        ScopedPositions cache_binding(active_cache_positions_, cache_positions);
+        ScopedPositions rope_binding(active_rope_positions_, rope_positions);
+        ScopedEnvelope envelope_binding(active_causal_attention_envelope_, envelope);
+        ScopedValue<const Tensor*> kv_binding(active_kv_table_rows_, &kv_table_rows);
+        ScopedValue<const Tensor*> state_binding(active_linear_state_source_slots_,
+                                                 &linear_state_source_slots);
+        ScopedValue<const Tensor*> parent_binding(active_tree_parents_, &parents);
+        ScopedValue<Tensor*> tree_key_binding(active_tree_kv_key_, &tree_kv_key);
+        ScopedValue<Tensor*> tree_value_binding(active_tree_kv_value_, &tree_kv_value);
+        ScopedValue<std::int32_t> batch_binding(active_sequence_batch_, 1);
+        ScopedValue<std::int32_t> width_binding(active_sequence_width_, width);
+
+        Tensor residual = work_.alloc(DType::BF16, {dimension(config_.hidden_size), width});
+        embed_tokens(ids.view({width}), *embed_, parameters_.text.token_embedding_signs,
+                     residual, stream);
+        sink.begin(residual);
+        run_layers(residual, Phase::Verify, sink);
+        sink.capture_positions(cache_positions, stream);
+
+        Tensor flat_hidden = hidden.view({dimension(config_.hidden_size), width});
+        Tensor flat_logits = logits.view({dimension(config_.vocab_size), width});
+        Tensor flat_tokens = target_tokens.view({width});
+        ops::rmsnorm(residual, *final_norm_, config_.rms_norm_eps, true, flat_hidden, stream);
+        project(flat_hidden, *lm_head_, flat_logits, work_, stream);
+        ops::argmax(flat_logits, flat_tokens,
+                    dimension(parameters_.model.resources().public_token_count), stream);
+    }
+    work_.reset();
+}
+
 void TextContext::mtp_forward_decode_batch(const Tensor& ids, const Tensor& hidden,
                                            const Tensor& cache_positions,
                                            const Tensor& rope_positions,
