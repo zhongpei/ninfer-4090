@@ -286,8 +286,10 @@ TeacherTrace Engine::trace_tokens(std::vector<TokenId> tokens,
     nvtx::ScopedRange score_range(nvtx::Name::Score, nvtx::Category::Scoring,
                                   static_cast<std::uint64_t>(tokens.size()));
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    if (impl_->options.purpose != EnginePurpose::CausalScoring) {
-        throw std::logic_error("trace_tokens requires a CausalScoring Engine");
+    if (impl_->options.purpose != EnginePurpose::CausalScoring ||
+        !impl_->options.enable_teacher_trace) {
+        throw std::logic_error(
+            "trace_tokens requires CausalScoring with enable_teacher_trace");
     }
     if (tokens.size() < 2 || tokens.size() > impl_->options.max_context) {
         throw std::invalid_argument("trace_tokens token count must be in [2,max_context]");
