@@ -149,6 +149,16 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         (void)load_persistent_spec_router_state(speculative_routing.state_path,
                                                 engine_spec_router);
     }
+    if (plan.dflash_teacher.enabled()) {
+        if (!parameters.draft || !parameters.model.config().draft) {
+            throw std::logic_error("native DFlash teacher recording lost draft configuration");
+        }
+        dflash_teacher_writer = std::make_unique<DFlashTeacherWriter>(
+            plan.dflash_teacher.output_directory,
+            dimension(parameters.draft->feature_projection.weight.k),
+            std::span<const std::uint32_t>(
+                parameters.model.config().draft->target_layer_ids));
+    }
     // Hand `work` the extra ranks' storage. From here one arena serves every device: the layer loop
     // switches ranks alongside ScopedDeviceRank and every workspace call site is unchanged.
     for (DeviceArena& rank_storage : workspace_storage_by_rank) {
