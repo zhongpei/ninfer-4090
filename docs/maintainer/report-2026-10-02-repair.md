@@ -129,6 +129,107 @@ the standard Python library. HTTP/CLI subprocess fixtures are explicitly not mod
 inference. CUDA build, native attention execution, the original full regression
 suite, real-model A/A and A/B and 24 GB peak memory remain separate validations.
 
+## Post-merge RTX 4090 qualification (2026-10-02)
+
+PR #14 merged as `784d625e`. Post-merge validation repaired legacy test fixtures
+in `ab05bb0` and isolated each fresh server instance's port in `e377d58`.
+The production C++ implementation stayed at the PR merge version. The qualification
+below used the frozen contents of `e377d58`; no sampling or correctness gate was
+relaxed.
+
+Environment: two RTX 4090 24 GB devices, driver 610.57.04, CUDA compiler/runtime
+12.8, Release `sm_89`, 96 logical CPUs on two sockets, and Python 3.11.15.
+The explicit model was `/opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer`
+(9,520,051,456 bytes). The existing build was rebuilt with
+`cmake --build build -j`, including `--split-compile=8` for the heavy CUDA unit;
+it was not reconfigured.
+
+All four reproduction modes used seven workloads, four AB/BA pairs, and discarded
+only the first pair from performance. Servers used two repeats per workload,
+512 maximum generated tokens, client concurrency 1/2/4/8, engine concurrency 8,
+context/KV capacity 32768, INT8 KV, greedy with zero presence/frequency penalties,
+thinking off, prefix reuse enabled, CUDA Graphs enabled, and two-second cooldowns.
+GPU0 ran CLI/direct and GPU1 ran native/AA/incremental AB; host resources were
+shared and GPU clocks were not locked.
+
+| Check | Execution | Qualification |
+|---|---|---|
+| Parallel incremental build | 184/184 default targets, exit 0 | PASS |
+| Full Python regression | 143/143, 35.13 seconds | PASS |
+| Host split-capacity policy | B1–B8 | PASS |
+| Native attention | default, DFlash2, NVFP4, K8V4 | all PASS |
+| CLI direct-to-baseline | 224/224 calls successful | 11/28 workload comparisons; 0/4 overall candidates |
+| Baseline A/A | 32 processes, 448/448 requests successful | all four concurrency levels PASS |
+| Incremental server A/B | 128 processes, 1792/1792 requests successful | 0/16 comparisons |
+| Server direct-to-baseline | 128 processes, 1792/1792 requests successful | 0/16 comparisons |
+
+The formal matrices completed 4256 successful generation calls, excluding health
+probes and rejected diagnostic attempts. Server run identities and ports were
+unique; telemetry was complete, with no interrupted matrix, launch, port, HTTP or
+OOM failure. A/B wrapper exit 2 denotes failed qualification, not failed execution.
+Baseline A/A median ratios were 0.999/1.002/0.999/1.003 at C1/C2/C4/C8.
+
+CLI qualified workloads were K7: reasoning/structured/lookup-repeat; K11:
+prose/lookup-repeat; K15 and lookup-skip: prose/reasoning/lookup-repeat. All other
+17 workload comparisons had generated-token divergence, first appearing at
+zero-based index 16–195. Every candidate diverged on chat at index 16. Overall
+CLI diagnostic geometric-mean ratios were 3.348/3.412/3.256/3.304 respectively;
+none is an overall qualified speedup.
+
+The following server ratios are **diagnostic only**; every row failed qualification.
+
+| Candidate | Control | C1 | C2 | C4 | C8 |
+|---|---|---:|---:|---:|---:|
+| chain K15 | target-only | 2.511 | 1.751 | 1.170 | 0.903 |
+| tree15 | target-only | 2.246 | 1.744 | 1.072 | 0.885 |
+| tree15 + Stair | target-only | 2.272 | 1.725 | 1.168 | 0.857 |
+| lookup-skip | target-only | 2.478 | 1.779 | 1.181 | 0.894 |
+| chain K15 | target-only (incremental matrix) | 2.539 | 1.771 | 1.226 | 0.927 |
+| tree15 | chain K15 | 0.808 | 0.955 | 0.935 | 0.997 |
+| tree15 + Stair | tree15 | 1.036 | 0.995 | 0.986 | 1.010 |
+| lookup-skip | chain K15 | 0.995 | 1.006 | 0.935 | 0.985 |
+
+Both server matrices had full-response differences in all 64 pairs and candidate
+self-repeat instability in 60 pairs. Direct target-only controls had no self-repeat
+failure. Incremental controls had 44 self-repeat failures; these controls include
+chain/tree and must not be confused with the passing target-only A/A experiment.
+Actual counters confirmed tree/Stair/lookup execution. Direct tree15 tree/fallback
+rounds were 4032/12, 517/4061, 335/4481 and 328/4482 by concurrency; direct
+lookup/head-skip rounds were 261/36/3/6. The counts do not attribute kernel costs.
+
+GPU0 direct and GPU1 AB each reached an observed 14243 MiB (about 13.91 GiB) in
+one-second NVML sampling, without OOM. This is a sampled lower bound, not a strict
+instantaneous peak or a filled-32768-context capacity qualification. All formal
+server startup workspace capacities/peaks were 163127296 bytes; baseline runtime
+reservation was 3857350912 bytes and candidate reservations about 7.45 GiB.
+Against the old `4dc309e` startup anchors, the five matching arms had identical
+memory fields; engine configuration differed only in the logging interval.
+Unchanged planned capacity does not establish zero extra CTAs or execution cost.
+There is no comparable old whole-device peak measurement.
+
+The initial fixed-port direct attempt completed only five processes/70 requests;
+123 launches were rejected during port reuse. It is superseded by the complete
+formal retry. A temporary unique-port driver omitted the readiness-port change;
+it was stopped and its results were not used. The formal fix was protected by a
+CPU fresh-process test with address reuse disabled, RED to GREEN, and the full
+143-test independent regression.
+
+The remaining blockers are speculative output divergence and candidate server
+self-repeat instability. The specific upstream operator has not been attributed;
+native oracle and baseline A/A passes do not establish full-model route equivalence.
+C8 direct diagnostic throughput was about 10–14% below target-only, while C1 was
+faster. These strategy comparisons do not establish PR14's net effect versus old
+code: no old/new binaries were compared under an identical repaired harness.
+
+Unaffected checks reuse the previous 146 applicable CTest passes and seven skips;
+they were not rerun as a full CTest suite in this round. MoE and DFlash1 real-model
+qualification still lacks corresponding artifacts. CI was not queried.
+
+Local evidence is retained under `profiles/bench/pr14-2026-10-02/`: `report.md`,
+`summary.json`, `final-audit.json`, `regression/`, and the CLI/server result directories.
+The complete local archive is `profiles/bench/pr14-2026-10-02.zip`. These generated
+logs and archives are excluded from Git by the repository's existing ignore policy.
+
 ## Development priority
 
 Keep fixed DFlash2 chain as the correctness investigation baseline. Retain lookup
