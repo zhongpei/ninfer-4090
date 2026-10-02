@@ -332,7 +332,7 @@ class HTTPTests(unittest.TestCase):
 
 
 class EndToEndTests(unittest.TestCase):
-    def _invoke(self, *, diverge=False):
+    def _invoke(self, *, diverge=False, port_override=None, occupied=False):
         import subprocess
         import sys
         import os
@@ -340,9 +340,19 @@ class EndToEndTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
         (root / "fixture.ninfer").write_bytes(b"NOT A MODEL: CPU protocol fixture")
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
+        while True:
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+                if port + 7 <= 65535:
+                    break
+        if port_override is not None:
+            port = port_override
+        if occupied:
+            listener = socket.socket()
+            listener.bind(("127.0.0.1", port))
+            listener.listen()
+            self.addCleanup(listener.close)
         # Isolate only the workload selectors. The actual modified CLI driver,
         # HTTP client, process lifecycle, logging and qualification code all run.
         bootstrap = '''
@@ -357,22 +367,40 @@ class A:
 m.select_arms=lambda _: (A("baseline","baseline"), A("candidate","baseline",("--spec","dflash2")))
 m.select_workloads=lambda _: (types.SimpleNamespace(name="prose",prompt="fixture prompt"),)
 sys.modules[m.__name__]=m
-from tools.dflash2_training.server_ab import main
+from tools.dflash2_training import server_ab
+import os,json
+original_exchange=server_ab.http_exchange
+original_ready=server_ab.wait_ready
+def exchange(url,payload=None,timeout=300):
+ with open(os.environ["NINFER_FIXTURE_PORT_TRACE"],"a") as trace:
+  trace.write(json.dumps({"url":url,"post":payload is not None})+"\\n")
+ return original_exchange(url,payload,timeout)
+def ready(port,proc,timeout):
+ with open(os.environ["NINFER_FIXTURE_PORT_TRACE"],"a") as trace:
+  trace.write(json.dumps({"ready_port":port})+"\\n")
+ return original_ready(port,proc,timeout)
+server_ab.http_exchange=exchange
+server_ab.wait_ready=ready
+main=server_ab.main
 sys.argv=["server_ab"]+sys.argv[1:]
 main()
 '''
         executable = root / "fake-ninfer-serve"
-        executable.write_bytes(Path(__file__).with_name("fake_ninfer_server.py").read_bytes())
+        executable.write_bytes(Path(__file__).with_name("fake_ninfer_server.py").read_bytes().replace(
+            b"server = ThreadingHTTPServer", b"ThreadingHTTPServer.allow_reuse_address = False\nserver = ThreadingHTTPServer"))
         executable.chmod(0o755)
         command = [sys.executable, "-c", bootstrap, "--serve", str(executable),
                    "--model", str(root / "fixture.ninfer"), "--out", str(root / "results"),
                    "--port", str(port), "--concurrency", "1,2", "--pairs", "2", "--discard", "1",
                    "--repeats", "2", "--startup-timeout", "5", "--request-timeout", "2"]
         env = os.environ.copy()
+        env["NINFER_FIXTURE_PORT_TRACE"] = str(root / "port-trace.jsonl")
         if diverge:
             env["NINFER_FIXTURE_DIVERGE"] = "1"
         proc = subprocess.run(command, capture_output=True, text=True, timeout=30, env=env)
         result_path = root / "results/server-results.json"
+        if port_override == 65535:
+            return proc, None, root
         self.assertTrue(result_path.exists(), proc.stdout + proc.stderr)
         result = json.loads(result_path.read_text())
         return proc, result, root
@@ -382,6 +410,13 @@ main()
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         runs = result["runs"]
         self.assertEqual(len(runs), 8)
+        ports = [r["port"] for r in runs]
+        self.assertEqual(ports, list(range(ports[0], ports[0] + 8)))
+        self.assertEqual([int(r["command"][r["command"].index("--port") + 1]) for r in runs], ports)
+        trace = [json.loads(line) for line in (root / "port-trace.jsonl").read_text().splitlines()]
+        self.assertEqual([event["ready_port"] for event in trace if "ready_port" in event], ports)
+        from urllib.parse import urlparse
+        self.assertEqual({urlparse(event["url"]).port for event in trace if event.get("post")}, set(ports))
         self.assertEqual([r["arm"] for r in runs[:4]], ["baseline", "candidate", "candidate", "baseline"])
         logfiles = list((root / "results").glob("*/runtime.requests.jsonl"))
         self.assertEqual(len(logfiles), 8)
@@ -390,6 +425,25 @@ main()
         self.assertEqual(len(list((root / "results").glob("*/response-*.body"))), 16)
         for level in result["comparisons"]["candidate"]["levels"]:
             self.assertEqual(level["qualification"], "PASS")
+
+    def test_port_plan_overflow_rejected_before_any_output_or_process(self):
+        proc, result, root = self._invoke(port_override=65535)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("port range", proc.stderr)
+        self.assertIsNone(result)
+        self.assertFalse((root / "results").exists())
+        self.assertFalse((root / "port-trace.jsonl").exists())
+
+    def test_occupied_instance_port_is_failure_not_reused_or_skipped(self):
+        proc, result, root = self._invoke(occupied=True)
+        self.assertEqual(proc.returncode, 2)
+        first = result["runs"][0]
+        self.assertIn("already in use", first["error"])
+        self.assertEqual(first["rows"], [])
+        self.assertEqual(len(result["runs"]), 8)
+        trace = [json.loads(line) for line in (root / "port-trace.jsonl").read_text().splitlines()]
+        self.assertNotIn(first["port"], [event["ready_port"] for event in trace if "ready_port" in event])
+        self.assertEqual(result["comparisons"]["candidate"]["levels"][0]["qualification"], "FAIL")
 
     def test_end_to_end_different_output_fails_without_speedup(self):
         proc, result, _ = self._invoke(diverge=True)

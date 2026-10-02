@@ -217,24 +217,24 @@ def collect_runtime(path: Path, expected_requests: int, thinking: str) -> dict:
 
 
 def run_arm(args, arm, comparison: str, pair: int, order: int, level: int, directory: Path,
-            workloads) -> dict:
+            workloads, port: int) -> dict:
     directory.mkdir(parents=True, exist_ok=False)
     request_log = directory / "runtime.requests.jsonl"
-    command = build_command(args, arm, args.port, request_log)
+    command = build_command(args, arm, port, request_log)
     result = {"comparison": comparison, "pair": pair, "order": order, "arm": arm.name,
-              "concurrency": level, "thinking": args.thinking, "cache_mode": args.cache_mode,
+              "concurrency": level, "port": port, "thinking": args.thinking, "cache_mode": args.cache_mode,
               "cuda_graph": not args.no_cuda_graph, "engine_concurrency": args.engine_concurrency,
               "max_context": args.max_context, "kv_capacity": args.kv_capacity,
               "kv_dtype": args.kv_dtype, "command": command, "rows": [], "tok_s": None}
     proc = None
     try:
-        assert_free_port(args.port)
+        assert_free_port(port)
         with (directory / "server.log").open("wb") as log:
             try:
                 proc = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                         start_new_session=os.name == "posix", env=os.environ.copy())
-                model_id = wait_ready(args.port, proc, args.startup_timeout)
-                result.update(run_level(f"http://127.0.0.1:{args.port}", model_id, workloads,
+                model_id = wait_ready(port, proc, args.startup_timeout)
+                result.update(run_level(f"http://127.0.0.1:{port}", model_id, workloads,
                                         level, args.repeats, args.request_timeout,
                                         thinking=args.thinking, max_tokens=args.max_tokens))
             finally:
@@ -345,7 +345,8 @@ def main() -> None:
     ap.add_argument("--thinking", choices=("off", "model-default"), default="off")
     ap.add_argument("--cache-mode", choices=("disabled", "enabled"), default="enabled")
     ap.add_argument("--no-cuda-graph", action="store_true")
-    ap.add_argument("--port", type=int, default=18080)
+    ap.add_argument("--port", type=int, default=18080,
+                    help="first server instance port; increments per instance and the planned range must be available")
     ap.add_argument("--startup-timeout", type=float, default=180.0)
     ap.add_argument("--request-timeout", type=float, default=300.0)
     ap.add_argument("--cooldown", type=float, default=0.0)
@@ -371,6 +372,9 @@ def main() -> None:
     if (not math.isfinite(args.cooldown) or args.cooldown < 0
             or any(not math.isfinite(x) or x <= 0 for x in (args.startup_timeout, args.request_timeout))):
         ap.error("timeouts must be finite/positive and cooldown finite/nonnegative")
+    instance_count = sum(a.name != "baseline" for a in arms) * len(levels) * args.pairs * 2
+    if args.port + instance_count - 1 > 65535:
+        ap.error("planned server port range exceeds 65535; choose a lower --port")
     args.serve, args.model = args.serve.resolve(), args.model.resolve()
     if not args.serve.is_file() or not os.access(args.serve, os.X_OK) or not args.model.is_file():
         ap.error("--serve must be executable and --model an existing artifact")
@@ -389,6 +393,7 @@ def main() -> None:
     by_name = {a.name: a for a in arms}
     runs = []
     interrupted = False
+    next_port = args.port
     try:
         for cand in arms:
             if cand.name == "baseline":
@@ -401,7 +406,8 @@ def main() -> None:
                     for order, arm in enumerate(members):
                         directory = args.out / f"{cand.name}__c{level}__p{pair:02d}__o{order}__{arm.name}"
                         print(f"[server-ab] {cand.name} C{level} pair={pair} order={order} {arm.name}", flush=True)
-                        result = run_arm(args, arm, cand.name, pair, order, level, directory, workloads)
+                        result = run_arm(args, arm, cand.name, pair, order, level, directory, workloads, next_port)
+                        next_port += 1
                         runs.append(result)
                         journal.write(json.dumps(result, ensure_ascii=False, allow_nan=False) + "\n")
                         journal.flush()

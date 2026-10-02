@@ -89,7 +89,10 @@ caches to obtain PASS. Nor does a passed response gate score answer quality.
 
 Run these commands in a checkout of this PR. The shell wrapper does not build,
 modify the deployment checkout, stop an existing service or query CI. It refuses
-an occupied benchmark port. Choose one idle GPU and avoid concurrent host-heavy
+an occupied benchmark port. Each fresh server uses the next port starting at
+`NINFER_AB_PORT` (default 18080); the full range must fit below 65536. Use
+different available ranges for simultaneous or immediately consecutive experiments
+to avoid listeners and TCP TIME_WAIT from another experiment. Choose one idle GPU and avoid concurrent host-heavy
 benchmarks; the wrapper records the environment but does not lock GPU clocks.
 
 ```bash
@@ -99,12 +102,12 @@ export NINFER_DFLASH2_MODEL=/opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninf
 
 # Rebuild the selected checkout's binaries before using these entry points.
 # One baseline-only server A/A experiment, then chain-focused direct CLI evidence.
-bash scripts/sweeps/speculative-report-recheck.sh aa
+NINFER_AB_PORT=18080 bash scripts/sweeps/speculative-report-recheck.sh aa
 bash scripts/sweeps/speculative-report-recheck.sh cli
 
 # Incremental server comparisons, and complete combinations against target-only.
-bash scripts/sweeps/speculative-report-recheck.sh ab
-bash scripts/sweeps/speculative-report-recheck.sh direct
+NINFER_AB_PORT=19080 bash scripts/sweeps/speculative-report-recheck.sh ab
+NINFER_AB_PORT=20080 bash scripts/sweeps/speculative-report-recheck.sh direct
 ```
 
 The build directory must contain binaries rebuilt from the PR, not the frozen
