@@ -14,3 +14,11 @@ target_include_directories(ninfer_context_cost_measure_test PRIVATE
   ${PROJECT_SOURCE_DIR}/bench/context_cost)
 
 add_test(NAME ninfer_context_cost_measure_test COMMAND ninfer_context_cost_measure_test)
+
+# CPU-only response/integrity regressions and an owned loopback HTTP process fixture; no GPU.
+add_test(NAME ninfer_server_ab_response_test
+  COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+          -s tests/tools -p test_server_ab_response.py -v)
+set_tests_properties(ninfer_server_ab_response_test PROPERTIES
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  TIMEOUT 60)
