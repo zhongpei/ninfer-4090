@@ -126,6 +126,9 @@ completeness and runtime-evidence gates pass, all retained paired measurements e
 optimization executed in measured pairs, and at least three performance pairs remain.
 `consistent_gain/regression` additionally requires every retained paired ratio to have the same
 sign and median gain/loss to reach 2%; this is a practical heuristic, **not a confidence interval**.
+Baseline-self is a null control and never receives a qualified speedup, even when timing noise
+suggests a gain. Matching prompt/completion usage is additionally required for qualified speedup;
+same rendered output with different token accounting remains only a diagnostic ratio.
 No aggregate performance claim overrides a failing workload or unstable baseline. A passing
 performance gate alone is still not an answer-quality score.
 

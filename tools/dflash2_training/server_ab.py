@@ -243,9 +243,11 @@ def evaluate(trials: list[dict], experiments, workloads, levels: list[int], pair
                                             for t in group if t["side"] == "candidate" and t["pair"] >= discard)
             gate_ok = exact and stable and runtime_complete and not any(t.get("error") for t in group)
             measurable = len(ratios) == pairs - discard
-            eligible = gate_ok and measurable and optimization_observed
+            usage_equal = complete and all(g["usage_equal"] for g in gates)
+            eligible = (gate_ok and measurable and optimization_observed and usage_equal
+                        and base.name != candidate.name)
             median = statistics.median(ratios) if ratios else None
-            status = "unqualified"
+            status = "baseline_control" if gate_ok and base.name == candidate.name else "unqualified"
             if eligible:
                 status = "insufficient_pairs" if len(ratios) < 3 else "unresolved"
                 if len(ratios) >= 3 and all(r > 1 for r in ratios) and median >= 1.02:
@@ -254,7 +256,7 @@ def evaluate(trials: list[dict], experiments, workloads, levels: list[int], pair
                     status = "consistent_regression"
             result_levels.append({"concurrency": level, "complete": complete,
                                   "exact": exact, "stable": stable, "gate_passed": gate_ok,
-                                  "runtime_complete": runtime_complete,
+                                  "runtime_complete": runtime_complete, "usage_equal": usage_equal,
                                   "optimization_observed": optimization_observed,
                                   "stability": stability, "response_checks": gates,
                                   "diagnostic_pair_speedups": ratios,

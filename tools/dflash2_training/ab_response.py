@@ -130,8 +130,11 @@ def trial_integrity(rows: list[dict], expected: set[tuple[str, int]]) -> dict:
                 raw = row.get("response")
                 if not isinstance(raw, dict):
                     raise ValueError("missing_raw_response")
-                if canonical_json(response_signature(raw)) != canonical_json(row["signature"]):
+                recorded = response_record(raw, "model-default")
+                if canonical_json(recorded["signature"]) != canonical_json(row["signature"]):
                     raise ValueError("raw_response_signature_mismatch")
+                if any(recorded[key] != row.get(key) for key in ("prompt_tokens", "completion_tokens")):
+                    raise ValueError("raw_response_usage_mismatch")
                 digest = hashlib.sha256(canonical_json(row["signature"]).encode("utf-8")).hexdigest()
                 if digest != row["sha256"]:
                     raise ValueError("signature_hash_mismatch")
@@ -172,15 +175,22 @@ def compare_responses(base: list[dict], candidate: list[dict],
     bmap = {(r.get("workload"), r.get("rep")): r for r in base}
     cmap = {(r.get("workload"), r.get("rep")): r for r in candidate}
     mismatches = []
+    usage_mismatches = []
     for key in sorted(expected):
         b, c = bmap.get(key, {}), cmap.get(key, {})
         if not b.get("ok") or not c.get("ok"):
             continue  # integrity reports both-sided failures, including zero successful requests
+        if any(b.get(field) != c.get(field) for field in ("prompt_tokens", "completion_tokens")):
+            usage_mismatches.append({"workload": key[0], "rep": key[1],
+                                     "base_usage": [b.get("prompt_tokens"), b.get("completion_tokens")],
+                                     "candidate_usage": [c.get("prompt_tokens"), c.get("completion_tokens")]})
         diff = first_difference(b.get("signature"), c.get("signature"))
         if diff is not None:
             mismatches.append({"workload": key[0], "rep": key[1], "difference": diff})
     return {"passed": bcheck["passed"] and ccheck["passed"] and not mismatches,
-            "base_integrity": bcheck, "candidate_integrity": ccheck, "mismatches": mismatches}
+            "base_integrity": bcheck, "candidate_integrity": ccheck, "mismatches": mismatches,
+            "usage_equal": bcheck["passed"] and ccheck["passed"] and not usage_mismatches,
+            "usage_mismatches": usage_mismatches}
 
 
 COUNTER_PATHS = {

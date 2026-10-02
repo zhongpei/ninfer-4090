@@ -229,6 +229,25 @@ class GateTests(unittest.TestCase):
         result = evaluate(trials(candidate=candidate), candidate=candidate)
         self.assertTrue(result["complete"])
         self.assertTrue(result["stable"])
+        self.assertIsNone(result["qualified_speedup"])
+        self.assertEqual(result["performance_status"], "baseline_control")
+
+    def test_usage_mismatch_blocks_speedup_but_not_semantic_output(self):
+        data = trials()
+        for trial in data:
+            if trial["side"] == "candidate":
+                for sample in trial["rows"]:
+                    sample["response"]["usage"]["completion_tokens"] = 11
+                    sample["completion_tokens"] = 11
+        result = evaluate(data)
+        self.assertTrue(result["exact"])
+        self.assertFalse(result["usage_equal"])
+        self.assertIsNone(result["qualified_speedup"])
+
+    def test_usage_metadata_cannot_disagree_with_raw_response(self):
+        a = row()
+        a["completion_tokens"] = 999
+        self.assertFalse(R.trial_integrity([a], {("long-context", 0)})["passed"])
 
 
 class EvidenceTests(unittest.TestCase):
