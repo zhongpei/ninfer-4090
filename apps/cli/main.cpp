@@ -1,4 +1,5 @@
 #include "options.h"
+#include "ab_metrics.h"
 #include "product/logging/logging.h"
 #include "product/logging/pretty_format.h"
 #include "product/logging/startup_log.h"
@@ -261,6 +262,7 @@ void print_generation_summary(const ninfer::GenerationResult& result,
                                         speculative.lookup_drafted_tokens));
         }
     }
+    ninfer::cli::emit_ab_metrics(result, sampling, memory);
 }
 
 } // namespace

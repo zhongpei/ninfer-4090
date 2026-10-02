@@ -226,28 +226,17 @@ std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t 
         envelope.min_visible_keys > envelope.max_visible_keys) {
         throw std::invalid_argument("causal_softmax_attention split capacity: invalid profile");
     }
+    // Launch capacity bounds device-side active splits, so it also determines
+    // floating-point partitioning. A B-dependent occupancy cap changed the same
+    // query's reduction as unrelated requests entered or left a compact batch.
+    // Keep the single-row bound in both workspace planning and every launch.
+    // This intentionally trades extra batched scratch/CTAs for a stable partition;
+    // it does not claim invariance across token widths or other target operators.
+    (void)batch_size;
     (void)paged_kv_storage_layout(cache_storage, kCausalHeadDim);
     if (q_heads == CausalD256H24Kv4::QHeads) {
         const int capacity =
             causal_small_t_launch_capacity<CausalD256H24Kv4>(envelope, tokens, cache_storage);
-        if (batch_size > 1) {
-            // Keep complete grids within one or two 170-SM waves. Rounding from 160 CTAs
-            // leaves room for the indivisible 4*B group, including B=3/5/6/7.
-            const bool narrow = tokens <= 5;
-            int target_ctas   = 160;
-            if (cache_storage == KvCacheStorage::BFloat16)
-                target_ctas =
-                    narrow || batch_size >= 5 || envelope.max_visible_keys > 4096 ? 320 : 160;
-            else if (kv_storage_is_int8_family(cache_storage))
-                target_ctas = narrow || envelope.max_visible_keys > 4096 ? 320 : 160;
-            else if (cache_storage == KvCacheStorage::Nvfp4Group16)
-                target_ctas = narrow ? 320 : 160;
-            const int grid_limit = div_up(target_ctas, 4 * batch_size);
-            // A split stages at most 64 physical-page IDs. Leave two 64-key pages for
-            // key-tile rounding and page alignment at the 262144-key resource limit.
-            const int page_limit = div_up(static_cast<int>(envelope.max_visible_keys), 3968);
-            return std::min(capacity, std::max({4, grid_limit, page_limit}));
-        }
         return capacity;
     }
     if (q_heads == CausalD256H16Kv2::QHeads) {

@@ -1,4 +1,7 @@
+#include "ops/softmax_attention/dense/causal_cache/launch.h"
+
 #include <exception>
+#include <initializer_list>
 #include <iostream>
 #include <string_view>
 
@@ -28,9 +31,53 @@ int run_guarded(const char* what, int (*suite)()) {
     }
 }
 
+// Host-only policy regression: no device allocations or kernels. This is not a
+// substitute for a GPU row-reorder / full-model exactness test.
+int run_split_capacity_batch_invariance_tests() {
+    using ninfer::KvCacheStorage;
+    using ninfer::ops::CausalAttentionExecutionEnvelope;
+    using ninfer::ops::detail::causal_attention_split_capacity;
+    constexpr KvCacheStorage formats[] = {
+        KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64,
+        KvCacheStorage::Fp8E4M3Row256, KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
+    };
+    constexpr CausalAttentionExecutionEnvelope envelopes[] = {
+        {1, 128}, {129, 160}, {1, 512}, {1, 4096}, {4097, 5000},
+        {5001, 8198}, {1, 8198}, {8199, 16390}, {16391, 32768},
+        {1, 32768}, {1, 262144}, {1, 786432},
+    };
+    int failures = 0;
+    for (const int heads : {24, 16}) {
+        for (const auto format : formats) {
+            for (const auto envelope : envelopes) {
+                for (int width = 1; width <= (heads == 24 ? 8 : 6); ++width) {
+                    const int single = causal_attention_split_capacity(
+                        heads, width, format, envelope, 1);
+                    for (int batch = 2; batch <= 8; ++batch) {
+                        const int batched = causal_attention_split_capacity(
+                            heads, width, format, envelope, batch);
+                        if (single != batched) {
+                            ++failures;
+                            std::cerr << "split partition depends on batch: heads=" << heads
+                                      << " width=" << width << " batch=" << batch
+                                      << " keys=" << envelope.max_visible_keys
+                                      << " single=" << single << " batched=" << batched << '\n';
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "split-capacity batch invariance: " << (failures ? "FAIL\n" : "PASS\n");
+    return failures ? 1 : 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+    const int split_policy = run_guarded("split capacity", run_split_capacity_batch_invariance_tests);
+    if (split_policy != 0) return split_policy;
+    if (argc == 2 && std::string_view(argv[1]) == "--split-capacity-only") return 0;
     if (argc == 2 && std::string_view(argv[1]) == "--dflash2-only")
         return run_guarded("dflash2", run_softmax_attention_dflash2_tests);
     if (argc == 2 && std::string_view(argv[1]) == "--nvfp4-only") {
@@ -41,7 +88,7 @@ int main(int argc, char** argv) {
     }
     if (argc != 1) {
         std::cerr
-            << "usage: ninfer_softmax_attention_test [--dflash2-only|--nvfp4-only|--k8v4-only]\n";
+            << "usage: ninfer_softmax_attention_test [--split-capacity-only|--dflash2-only|--nvfp4-only|--k8v4-only]\n";
         return 2;
     }
     const int causal = run_guarded("causal cache", run_softmax_attention_causal_cache_tests);
