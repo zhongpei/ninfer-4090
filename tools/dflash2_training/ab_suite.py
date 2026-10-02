@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
-"""Alternating multi-scenario A/B harness for NInfer speculative decoding.
+"""Alternating CLI A/B with complete run identities and strict machine evidence.
 
-Design references:
-- TandemLLM block_ab: alternate states, discard the first pair, judge per-workload and pooled,
-  and treat output-token differences as correctness failures.
-- Spec-Bench: same hardware/environment, report speedup and mean accepted tokens.
-- DFlash public evals: cover reasoning/math, code, chat/prose and prompt-copy workloads, and
-  distinguish latency-oriented single-request tests from throughput-oriented serving tests.
-
-This harness is intentionally CLI-first so it can exercise the exact NInfer artifact/runtime stack
-without adding a Python inference dependency. A separate server matrix may consume the JSONL output.
+Built-in prompts are synthetic regression workloads, not task-quality benchmarks.
+The target implementation is never changed to make this qualification pass.
 """
 from __future__ import annotations
 
@@ -22,10 +15,12 @@ import os
 import re
 import statistics
 import subprocess
-import sys
 import time
 from pathlib import Path
 
+from tools.dflash2_training.cli_validation import (
+    file_identity, metrics_from_log, positive, qualify_workload, rounded_metric,
+)
 
 METRICS = {
     "decode_tok_s": r"decode speed\s+([\d.]+) tok/s",
@@ -44,8 +39,8 @@ METRICS = {
     "lookup_rounds": r"lookup rounds\s+(\d+)",
     "lookup_drafted": r"lookup drafted tokens\s+(\d+)",
     "lookup_accepted": r"lookup accepted tokens\s+(\d+)",
+    "head_skip_rounds": r"lookup head-skip rounds\s+(\d+)",
 }
-
 
 @dataclasses.dataclass(frozen=True)
 class Workload:
@@ -55,7 +50,6 @@ class Workload:
     max_context: int = 8192
     weight: float = 1.0
     tags: tuple[str, ...] = ()
-
 
 @dataclasses.dataclass(frozen=True)
 class Arm:
@@ -86,6 +80,7 @@ def long_context() -> str:
     )
 
 
+# Preserve the report's exact prompt bytes and capacities for reproducibility.
 WORKLOADS = (
     Workload(
         "prose",
@@ -120,259 +115,179 @@ WORKLOADS = (
         "metrics must be an object with exactly four numeric fields.",
         tags=("structured", "json"),
     ),
-    Workload(
-        "lookup-repeat",
-        repeated_context(),
-        max_new=768,
-        max_context=16384,
-        weight=1.5,
-        tags=("lookup", "repetition", "long-context"),
-    ),
-    Workload(
-        "long-context",
-        long_context(),
-        max_new=768,
-        max_context=32768,
-        weight=1.5,
-        tags=("long-context",),
-    ),
+    Workload("lookup-repeat", repeated_context(), max_new=768, max_context=16384,
+             weight=1.5, tags=("lookup", "repetition", "long-context")),
+    Workload("long-context", long_context(), max_new=768, max_context=32768,
+             weight=1.5, tags=("long-context",)),
 )
-
 
 ARMS = (
     Arm("baseline", (), "baseline"),
     Arm("dflash2-k7", ("--spec", "dflash2", "--draft-tokens", "7"), "baseline"),
     Arm("dflash2-k11", ("--spec", "dflash2", "--draft-tokens", "11"), "baseline"),
     Arm("dflash2-k15", ("--spec", "dflash2", "--draft-tokens", "15"), "baseline"),
-    Arm(
-        "tree7",
-        ("--spec", "dflash2", "--draft-tokens", "7",
-         "--spec-tree", "lattice", "--spec-tree-nodes", "7", "--spec-tree-spine", "5"),
-        "dflash2-k7",
-    ),
-    Arm(
-        "tree11",
-        ("--spec", "dflash2", "--draft-tokens", "11",
-         "--spec-tree", "lattice", "--spec-tree-nodes", "11", "--spec-tree-spine", "7"),
-        "dflash2-k11",
-    ),
-    Arm(
-        "tree15",
-        ("--spec", "dflash2", "--draft-tokens", "15",
-         "--spec-tree", "lattice", "--spec-tree-nodes", "15", "--spec-tree-spine", "7"),
-        "dflash2-k15",
-    ),
-    Arm(
-        "tree15-stair",
-        ("--spec", "dflash2", "--draft-tokens", "15",
-         "--spec-tree", "lattice", "--spec-tree-nodes", "15", "--spec-tree-spine", "7",
-         "--spec-router", "stair", "--spec-stair-widths", "3,7,11,15"),
-        "tree15",
-    ),
-    Arm(
-        "lookup-replace",
-        ("--spec", "dflash2", "--draft-tokens", "15",
-         "--lookup-ngram", "5", "--lookup-strategy", "vote", "--lookup-dflash", "replace",
-         "--lookup-min-support", "1", "--lookup-min-confidence", "0.55",
-         "--lookup-base-drafts", "7", "--lookup-deep-after", "2", "--lookup-deep-drafts", "15"),
-        "dflash2-k15",
-    ),
-    Arm(
-        "lookup-skip",
-        ("--spec", "dflash2", "--draft-tokens", "15",
-         "--lookup-ngram", "5", "--lookup-strategy", "vote", "--lookup-dflash", "skip",
-         "--lookup-min-support", "1", "--lookup-min-confidence", "0.55",
-         "--lookup-base-drafts", "7", "--lookup-deep-after", "2", "--lookup-deep-drafts", "15"),
-        "dflash2-k15",
-    ),
+    Arm("tree7", ("--spec", "dflash2", "--draft-tokens", "7", "--spec-tree", "lattice",
+                  "--spec-tree-nodes", "7", "--spec-tree-spine", "5"), "dflash2-k7"),
+    Arm("tree11", ("--spec", "dflash2", "--draft-tokens", "11", "--spec-tree", "lattice",
+                   "--spec-tree-nodes", "11", "--spec-tree-spine", "7"), "dflash2-k11"),
+    Arm("tree15", ("--spec", "dflash2", "--draft-tokens", "15", "--spec-tree", "lattice",
+                   "--spec-tree-nodes", "15", "--spec-tree-spine", "7"), "dflash2-k15"),
+    Arm("tree15-stair", ("--spec", "dflash2", "--draft-tokens", "15", "--spec-tree", "lattice",
+                         "--spec-tree-nodes", "15", "--spec-tree-spine", "7", "--spec-router",
+                         "stair", "--spec-stair-widths", "3,7,11,15"), "tree15"),
+    Arm("lookup-replace", ("--spec", "dflash2", "--draft-tokens", "15", "--lookup-ngram", "5",
+                           "--lookup-strategy", "vote", "--lookup-dflash", "replace",
+                           "--lookup-min-support", "1", "--lookup-min-confidence", "0.55",
+                           "--lookup-base-drafts", "7", "--lookup-deep-after", "2",
+                           "--lookup-deep-drafts", "15"), "dflash2-k15"),
+    Arm("lookup-skip", ("--spec", "dflash2", "--draft-tokens", "15", "--lookup-ngram", "5",
+                        "--lookup-strategy", "vote", "--lookup-dflash", "skip",
+                        "--lookup-min-support", "1", "--lookup-min-confidence", "0.55",
+                        "--lookup-base-drafts", "7", "--lookup-deep-after", "2",
+                        "--lookup-deep-drafts", "15"), "dflash2-k15"),
 )
 
 
 def parse_metric(stderr: str, key: str) -> float | None:
-    m = re.search(METRICS[key], stderr)
-    if not m:
-        return None
-    return float(m.group(1))
+    metrics, _, _ = metrics_from_log(stderr, METRICS)
+    return metrics.get(key)
 
 
-def run_once(args, arm: Arm, workload: Workload, pair: int, order: int) -> dict:
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stem = out_dir / f"{workload.name}__{arm.name}__p{pair:02d}o{order}"
-    stdout_path = stem.with_suffix(".out.txt")
-    stderr_path = stem.with_suffix(".err.log")
-
-    cmd = [
-        str(args.exe), str(args.model),
-        "--prompt", workload.prompt,
-        "--max-new", str(workload.max_new),
-        "--max-context", str(workload.max_context),
-        "--kv-dtype", args.kv_dtype,
-        "--greedy", "--no-thinking", "--raw-output",
-        "--presence-penalty", "0", "--frequency-penalty", "0",
-        *arm.args,
-    ]
+def run_once(args, arm: Arm, workload: Workload, pair: int, order: int,
+             comparison: str | None = None) -> dict:
+    comparison = comparison or arm.name
+    run_id = f"{comparison}__{workload.name}__p{pair:02d}__o{order}__{arm.name}"
+    if any(not re.fullmatch(r"[A-Za-z0-9_-]+", part) for part in (comparison, workload.name, arm.name)):
+        raise ValueError("unsafe run identity")
+    directory = Path(args.out) / "runs" / run_id
+    directory.mkdir(parents=True, exist_ok=False)
+    stdout_path, stderr_path = directory / "stdout.txt", directory / "stderr.log"
+    cmd = [str(args.exe), str(args.model), "--prompt", workload.prompt,
+           "--max-new", str(workload.max_new), "--max-context", str(workload.max_context),
+           "--kv-dtype", args.kv_dtype, "--greedy", "--no-thinking", "--raw-output",
+           "--presence-penalty", "0", "--frequency-penalty", "0", "--seed", "0", *arm.args]
+    if getattr(args, "no_cuda_graph", False):
+        cmd.append("--no-cuda-graph")
     env = os.environ.copy()
-    env["NINFER_AB_PAIR"] = str(pair)
-    env["NINFER_AB_WORKLOAD"] = workload.name
-    env["NINFER_AB_ARM"] = arm.name
-
+    env.update(NINFER_AB_METRICS="1", NINFER_AB_PAIR=str(pair),
+               NINFER_AB_WORKLOAD=workload.name, NINFER_AB_ARM=arm.name)
     started = time.perf_counter()
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    error = None
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                              timeout=getattr(args, "timeout", 600.0))
+        stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        stdout, stderr, returncode = exc.stdout or b"", exc.stderr or b"", -1
+        error = "timeout"
+    except OSError as exc:
+        stdout, stderr, returncode, error = b"", str(exc).encode(), -1, str(exc)
     wall_s = time.perf_counter() - started
-    stdout_path.write_bytes(proc.stdout)
-    stderr_path.write_bytes(proc.stderr)
-
-    stderr = proc.stderr.decode("utf-8", errors="replace")
-    row = {
-        "pair": pair,
-        "order": order,
-        "arm": arm.name,
-        "compare_to": arm.compare_to,
-        "workload": workload.name,
-        "tags": list(workload.tags),
-        "weight": workload.weight,
-        "returncode": proc.returncode,
-        "wall_s": wall_s,
-        "stdout_sha256": hashlib.sha256(proc.stdout).hexdigest(),
-        "stdout_bytes": len(proc.stdout),
-        "stderr_path": str(stderr_path),
-        "stdout_path": str(stdout_path),
-        "command": cmd,
-    }
-    for key in METRICS:
-        row[key] = parse_metric(stderr, key)
+    stdout_path.write_bytes(stdout)
+    stderr_path.write_bytes(stderr)
+    metrics, source, errors = metrics_from_log(stderr.decode("utf-8", errors="replace"), METRICS)
+    # Metric records are untrusted input: they cannot override run identity, process status or SHA.
+    row = {key: metrics.get(key) for key in METRICS}
+    for key in ("token_ids", "finish_reason", "decoded", "decode_seconds", "prefill_seconds",
+                "workspace_peak_bytes", "runtime_reservation_bytes"):
+        row[key] = metrics.get(key)
+    row.update(run_id=run_id, comparison=comparison, pair=pair, order=order,
+               arm=arm.name, compare_to=arm.compare_to, workload=workload.name,
+               tags=list(workload.tags), weight=workload.weight, returncode=returncode,
+               wall_s=wall_s, error=error, stdout_sha256=hashlib.sha256(stdout).hexdigest(),
+               stdout_bytes=len(stdout), stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+               stdout_path=str(stdout_path), stderr_path=str(stderr_path), command=cmd,
+               metrics_source=source, metric_errors=errors,
+               prompt_sha256=hashlib.sha256(workload.prompt.encode()).hexdigest())
+    (directory / "run.json").write_text(json.dumps(row, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return row
 
 
 def ordered_pair(base: Arm, cand: Arm, pair: int) -> tuple[Arm, Arm]:
-    # Balanced AB/BA order suppresses temperature/clock drift better than always A then B.
     return (base, cand) if pair % 2 == 0 else (cand, base)
 
 
 def median(values):
-    vals = [float(x) for x in values if x is not None and math.isfinite(float(x))]
-    return statistics.median(vals) if vals else None
+    values = [float(v) for v in values if type(v) in (float, int) and math.isfinite(v)]
+    return statistics.median(values) if values else None
 
 
-def paired_values(rows: list[dict], workload: str, base: str, cand: str, discard: int):
-    by_pair: dict[int, dict[str, dict]] = {}
+def paired_values(rows, workload, base, cand, discard):
+    by_pair = {}
     for row in rows:
-        if row["workload"] != workload or row["pair"] < discard:
+        if row["workload"] != workload or row["pair"] < discard or row.get("comparison", cand) != cand:
             continue
-        if row["arm"] not in (base, cand):
-            continue
-        by_pair.setdefault(row["pair"], {})[row["arm"]] = row
-    return [
-        (pair, pair_rows[base], pair_rows[cand])
-        for pair, pair_rows in sorted(by_pair.items())
-        if base in pair_rows and cand in pair_rows
-    ]
+        if row["arm"] in (base, cand):
+            by_pair.setdefault(row["pair"], {})[row["arm"]] = row
+    return [(i, r[base], r[cand]) for i, r in sorted(by_pair.items()) if base in r and cand in r]
 
 
-def output_gate(pairs: list[tuple[int, dict, dict]]) -> dict:
-    mismatches = []
-    for pair, base, cand in pairs:
-        if base["returncode"] != 0 or cand["returncode"] != 0:
-            mismatches.append({"pair": pair, "reason": "nonzero-exit",
-                               "base_rc": base["returncode"], "cand_rc": cand["returncode"]})
-        elif base["stdout_sha256"] != cand["stdout_sha256"]:
-            mismatches.append({"pair": pair, "reason": "output-sha",
-                               "base": base["stdout_sha256"], "cand": cand["stdout_sha256"]})
-    return {"passed": bool(pairs) and not mismatches, "mismatches": mismatches}
+def output_gate(pairs):
+    # Compatibility helper; the main path additionally enforces identities, tokens and A/A.
+    bad = [{"pair": i, "reason": "exit-or-output"} for i, a, b in pairs
+           if a["returncode"] != 0 or b["returncode"] != 0 or a["stdout_sha256"] != b["stdout_sha256"]]
+    return {"passed": bool(pairs) and not bad, "mismatches": bad}
 
 
-def perf_summary(pairs: list[tuple[int, dict, dict]]) -> dict:
-    ratios = []
-    deltas = []
-    accepted = []
-    tpr = []
-    for _, base, cand in pairs:
-        b = base.get("decode_tok_s")
-        c = cand.get("decode_tok_s")
-        if b and c and b > 0:
-            ratios.append(c / b)
-            deltas.append(c - b)
-        if cand.get("acceptance_pct") is not None:
-            accepted.append(cand["acceptance_pct"])
-        if cand.get("tok_per_round") is not None:
-            tpr.append(cand["tok_per_round"])
-    med_ratio = median(ratios)
-    return {
-        "pairs": len(pairs),
-        "median_speedup": med_ratio,
-        "median_delta_tok_s": median(deltas),
-        "median_acceptance_pct": median(accepted),
-        "median_tok_per_round": median(tpr),
-        "pair_speedups": ratios,
-        # Tandem-style conservative resolution: all retained pairs must have the same sign and
-        # the median gain must clear a small practical threshold.
-        "resolved_better": bool(ratios) and all(x > 1.0 for x in ratios)
-                           and med_ratio is not None and med_ratio >= 1.02,
-        "resolved_worse": bool(ratios) and all(x < 1.0 for x in ratios)
-                          and med_ratio is not None and med_ratio <= 0.98,
-    }
+def perf_summary(pairs):
+    usable = [(a, b) for _, a, b in pairs if positive(a.get("decode_tok_s")) and positive(b.get("decode_tok_s"))]
+    ratios = [b["decode_tok_s"] / a["decode_tok_s"] for a, b in usable]
+    complete = bool(pairs) and len(usable) == len(pairs)
+    return {"pairs": len(pairs), "measured_pairs": len(usable), "complete": complete,
+            "median_speedup": median(ratios), "pair_speedups": ratios,
+            "median_delta_tok_s": median([b["decode_tok_s"] - a["decode_tok_s"] for a, b in usable]),
+            "median_acceptance_pct": median([b.get("acceptance_pct") for _, b in usable]),
+            "median_tok_per_round": median([b.get("tok_per_round") for _, b in usable]),
+            "resolved_better": complete and len(ratios) >= 3 and min(ratios) > 1 and median(ratios) >= 1.02,
+            "resolved_worse": complete and len(ratios) >= 3 and max(ratios) < 1 and median(ratios) <= 0.98}
 
 
-def pooled(results: dict, workloads: tuple[Workload, ...]) -> dict:
-    total_weight = 0.0
-    log_speed = 0.0
-    used = []
+def pooled(results, workloads):
+    used, missing, weighted = [], [], []
     for w in workloads:
-        item = results.get(w.name)
-        if not item:
-            continue
-        speed = item["performance"].get("median_speedup")
-        if speed is None or speed <= 0:
-            continue
-        total_weight += w.weight
-        log_speed += w.weight * math.log(speed)
-        used.append(w.name)
-    return {
-        "weighted_geomean_speedup": math.exp(log_speed / total_weight) if total_weight else None,
-        "weight": total_weight,
-        "workloads": used,
-    }
+        item = results.get(w.name, {})
+        p = item.get("performance", {})
+        speed = p.get("median_speedup")
+        if not positive(speed) or not p.get("complete"):
+            missing.append(w.name)
+        else:
+            used.append(w.name)
+            weighted.append((w.weight, math.log(speed)))
+    complete = bool(used) and not missing
+    diagnostic = math.exp(sum(w * s for w, s in weighted) / sum(w for w, _ in weighted)) if complete else None
+    qualified = complete and all(results[w.name].get("qualified_performance", False) for w in workloads)
+    return {"weighted_geomean_speedup": diagnostic if qualified else None,
+            "diagnostic_geomean_speedup": diagnostic, "complete_coverage": complete,
+            "qualified": qualified, "workloads": used, "missing_workloads": missing,
+            "weight": sum(w for w, _ in weighted)}
 
 
-def judge(rows: list[dict], workloads: tuple[Workload, ...], arms: tuple[Arm, ...],
-          discard: int, expected_pairs: int | None = None) -> dict:
-    by_name = {a.name: a for a in arms}
+def judge(rows, workloads, arms, discard, expected_pairs=None):
     comparisons = {}
     for cand in arms:
         if cand.name == "baseline":
             continue
-        base = by_name[cand.compare_to]
         per = {}
         for w in workloads:
-            comparison_rows = [r for r in rows if r["workload"] == w.name
-                               and r["arm"] in (base.name, cand.name)
-                               and r.get("comparison", cand.name) == cand.name]
-            all_pairs = paired_values(comparison_rows, w.name, base.name, cand.name, 0)
-            output = output_gate(all_pairs)
-            pair_ids = {r["pair"] for r in comparison_rows}
-            expected = set(range(expected_pairs)) if expected_pairs is not None else pair_ids
-            if (not expected or pair_ids != expected or len(all_pairs) != len(expected)
-                    or len(comparison_rows) != 2 * len(expected)):
-                output["passed"] = False
-                output["mismatches"].append({"reason": "incomplete-pairs"})
-            per[w.name] = {
-                "output": output,
-                "performance": perf_summary([p for p in all_pairs if p[0] >= discard]),
-            }
-        comparisons[cand.name] = {
-            "base": base.name,
-            "workloads": per,
-            "pooled": pooled(per, workloads),
-            "correct": bool(per) and all(x["output"]["passed"] for x in per.values()),
-            "resolved_worse_workloads": [
-                w for w, x in per.items() if x["performance"]["resolved_worse"]
-            ],
-        }
+            selected = [r for r in rows if r["workload"] == w.name
+                        and r.get("comparison", cand.name) == cand.name
+                        and r["arm"] in (cand.compare_to, cand.name)]
+            count = expected_pairs if expected_pairs is not None else max((r["pair"] for r in selected), default=-1) + 1
+            output = qualify_workload(selected, cand.compare_to, cand.name, count)
+            pairs = paired_values(selected, w.name, cand.compare_to, cand.name, discard)
+            performance = perf_summary(pairs)
+            complete = performance["complete"] and performance["pairs"] == count - discard
+            qualified = output["passed"] and count >= 2 and complete
+            if not qualified:
+                performance.update(resolved_better=False, resolved_worse=False)
+            per[w.name] = {"output": output, "performance": performance, "qualified_performance": qualified}
+        comparisons[cand.name] = {"base": cand.compare_to, "workloads": per,
+            "pooled": pooled(per, workloads), "correct": bool(per) and all(x["output"]["passed"] for x in per.values()),
+            "resolved_worse_workloads": [w for w, x in per.items() if x["performance"]["resolved_worse"]]}
     return comparisons
 
 
-def select_workloads(names: str) -> tuple[Workload, ...]:
+def select_workloads(names):
     if not names or names == "all":
         return WORKLOADS
     wanted = {x.strip() for x in names.split(",") if x.strip()}
@@ -383,7 +298,7 @@ def select_workloads(names: str) -> tuple[Workload, ...]:
     return out
 
 
-def select_arms(names: str) -> tuple[Arm, ...]:
+def select_arms(names):
     if not names or names == "all":
         return ARMS
     wanted = {x.strip() for x in names.split(",") if x.strip()}
@@ -391,136 +306,107 @@ def select_arms(names: str) -> tuple[Arm, ...]:
     missing = wanted - set(by_name)
     if missing:
         raise SystemExit("unknown arms: " + ",".join(sorted(missing)))
-    # Pull comparator arms in automatically so every selected experiment is a real A/B.
     expanded = set(wanted)
-    changed = True
-    while changed:
-        changed = False
-        for name in list(expanded):
-            base = by_name[name].compare_to
-            if base not in expanded:
-                expanded.add(base)
-                changed = True
+    while True:
+        new = expanded | {by_name[name].compare_to for name in expanded}
+        if new == expanded:
+            break
+        expanded = new
     return tuple(a for a in ARMS if a.name in expanded)
 
 
-def main() -> None:
+def report_markdown(result):
+    lines = ["# CLI qualification", "", "Ratios from failed gates are diagnostic only; no partial-coverage pooled score.", "",
+             "| candidate | base | exact gate | qualified pooled | diagnostic pooled | missing workloads |",
+             "|---|---|---|---:|---:|---|"]
+    def fmt(x):
+        return "—" if x is None else f"{x:.3f}x"
+    for name, c in result["comparisons"].items():
+        p = c["pooled"]
+        lines.append(f"| {name} | {c['base']} | {'PASS' if c['correct'] else 'FAIL'} | {fmt(p['weighted_geomean_speedup'])} | {fmt(p['diagnostic_geomean_speedup'])} | {', '.join(p['missing_workloads']) or '-'} |")
+    for name, c in result["comparisons"].items():
+        lines += ["", f"## {name} vs {c['base']}", "", "| workload | exact gate | diagnostic ratio | performance eligible | verdict |",
+                  "|---|---|---:|---|---|"]
+        for w, x in c["workloads"].items():
+            p = x["performance"]
+            verdict = "better" if p["resolved_better"] else "worse" if p["resolved_worse"] else "unresolved"
+            lines.append(f"| {w} | {'PASS' if x['output']['passed'] else 'FAIL'} | {fmt(p['median_speedup'])} | {x['qualified_performance']} | {verdict} |")
+    return "\n".join(lines) + "\n"
+
+
+def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--exe", type=Path, default=Path("build-ninja/apps/ninfer"))
     ap.add_argument("--model", type=Path, required=True)
-    ap.add_argument("--out", default="profiles/ab-suite")
+    ap.add_argument("--out", type=Path, default=Path("profiles/ab-suite"))
     ap.add_argument("--pairs", type=int, default=4)
     ap.add_argument("--discard", type=int, default=1)
     ap.add_argument("--cooldown", type=float, default=5.0)
+    ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("--kv-dtype", default="int8")
     ap.add_argument("--workloads", default="all")
     ap.add_argument("--arms", default="all")
+    ap.add_argument("--aa", action="store_true")
+    ap.add_argument("--compare-baseline", action="store_true", help="qualify complete combinations against target-only")
+    ap.add_argument("--no-cuda-graph", action="store_true")
     ap.add_argument("--json", default="")
     ap.add_argument("--summary", default="")
     args = ap.parse_args()
-
     if args.discard < 0 or args.pairs <= args.discard:
-        raise SystemExit("--pairs must exceed --discard")
-    workloads = select_workloads(args.workloads)
-    arms = select_arms(args.arms)
+        ap.error("--pairs must exceed --discard >= 0")
+    if not math.isfinite(args.cooldown) or args.cooldown < 0 or not positive(args.timeout):
+        ap.error("invalid cooldown or timeout")
+    workloads, arms = select_workloads(args.workloads), select_arms(args.arms)
+    if args.aa:
+        arms = (ARMS[0], Arm("baseline-aa", (), "baseline"))
+    elif args.compare_baseline:
+        arms = tuple(dataclasses.replace(a, compare_to="baseline") for a in arms)
     if not workloads or not any(a.name != "baseline" for a in arms):
-        raise SystemExit("A/B requires workloads and at least one candidate")
-    by_name = {a.name: a for a in arms}
-
+        ap.error("A/B requires workloads and a candidate")
+    args.exe, args.model = args.exe.resolve(), args.model.resolve()
+    if not args.exe.is_file() or not os.access(args.exe, os.X_OK) or not args.model.is_file():
+        ap.error("--exe must be executable and --model an existing artifact")
+    args.out.mkdir(parents=True, exist_ok=True)
+    # Lock this evidence set before any process runs; never reuse another run's files.
+    journal = (args.out / "runs.jsonl").open("x", encoding="utf-8")
     rows = []
-    # Each candidate is paired with its own comparator. We deliberately do not run one global
-    # baseline and reuse it across the whole matrix because thermal/clock state would then differ.
-    for workload in workloads:
-        for cand in arms:
-            if cand.name == "baseline":
-                continue
-            if cand.compare_to not in by_name:
-                continue
-            base = by_name[cand.compare_to]
-            for pair in range(args.pairs):
-                first, second = ordered_pair(base, cand, pair)
-                for order, arm in enumerate((first, second)):
-                    print(f"[ab] {workload.name} pair={pair+1}/{args.pairs} "
-                          f"order={order+1} {arm.name}", flush=True)
-                    row = run_once(args, arm, workload, pair, order)
-                    row["comparison"] = cand.name
-                    rows.append(row)
-                    print(
-                        f"     rc={row['returncode']} tok/s={row.get('decode_tok_s')} "
-                        f"accept={row.get('acceptance_pct')} sha={row['stdout_sha256'][:12]}",
-                        flush=True,
-                    )
-                    if args.cooldown > 0:
-                        time.sleep(args.cooldown)
-
-    result = {
-        "version": 1,
-        "model": str(args.model),
-        "exe": str(args.exe),
-        "kv_dtype": args.kv_dtype,
-        "pairs": args.pairs,
-        "discard": args.discard,
-        "workloads": [dataclasses.asdict(w) for w in workloads],
-        "arms": [dataclasses.asdict(a) for a in arms],
-        "runs": rows,
-    }
-    result["comparisons"] = judge(rows, workloads, arms, args.discard, args.pairs)
-
-    json_path = Path(args.json or (Path(args.out) / "ab-results.json"))
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-
-    lines = [
-        "# NInfer speculative A/B matrix",
-        "",
-        f"- model: `{args.model}`",
-        f"- KV: `{args.kv_dtype}`",
-        f"- pairs: {args.pairs}, discarded first: {args.discard}",
-        "",
-        "| candidate | baseline | correct | pooled speedup | resolved worse workloads |",
-        "|---|---|---:|---:|---|",
-    ]
-    for name, cmp in result["comparisons"].items():
-        speed = cmp["pooled"]["weighted_geomean_speedup"]
-        speed_text = "" if speed is None else f"{speed:.3f}x"
-        worse = ", ".join(cmp["resolved_worse_workloads"]) or "-"
-        lines.append(
-            f"| {name} | {cmp['base']} | {'PASS' if cmp['correct'] else 'FAIL'} | "
-            f"{speed_text} | {worse} |"
-        )
-    lines += ["", "## Per workload", ""]
-    for name, cmp in result["comparisons"].items():
-        lines += [f"### {name} vs {cmp['base']}", "",
-                  "| workload | exact | speedup | accept % | tok/round | verdict |",
-                  "|---|---:|---:|---:|---:|---|"]
-        for w, item in cmp["workloads"].items():
-            p = item["performance"]
-            speed = p["median_speedup"]
-            verdict = ("better" if p["resolved_better"] else
-                       "worse" if p["resolved_worse"] else "unresolved")
-            speed_text = "" if speed is None else f"{speed:.3f}x"
-            accept_text = (
-                "" if p["median_acceptance_pct"] is None
-                else f"{p['median_acceptance_pct']:.2f}"
-            )
-            tpr_text = (
-                "" if p["median_tok_per_round"] is None
-                else f"{p['median_tok_per_round']:.3f}"
-            )
-            lines.append(
-                f"| {w} | {'PASS' if item['output']['passed'] else 'FAIL'} | "
-                f"{speed_text} | {accept_text} | {tpr_text} | {verdict} |"
-            )
-        lines.append("")
-    summary_path = Path(args.summary or (Path(args.out) / "ab-summary.md"))
-    summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"wrote {json_path}")
-    print(f"wrote {summary_path}")
-
-    # Correctness is a hard gate. Performance regressions are findings, not harness failures.
-    if any(not cmp["correct"] for cmp in result["comparisons"].values()):
+    by_name = {a.name: a for a in arms}
+    settings = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+    result = {"version": 2, "settings": settings, "exe_identity": file_identity(args.exe),
+              "model_identity": file_identity(args.model), "runs": rows,
+              "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES"),
+              "workloads": [dataclasses.asdict(w) for w in workloads],
+              "arms": [dataclasses.asdict(a) for a in arms]}
+    interrupted = False
+    try:
+        for w in workloads:
+            for cand in arms:
+                if cand.name == "baseline":
+                    continue
+                for pair in range(args.pairs):
+                    for order, arm in enumerate(ordered_pair(by_name[cand.compare_to], cand, pair)):
+                        print(f"[ab] {cand.name} {w.name} pair={pair} order={order} {arm.name}", flush=True)
+                        row = run_once(args, arm, w, pair, order, comparison=cand.name)
+                        rows.append(row)
+                        journal.write(json.dumps(row, allow_nan=False) + "\n")
+                        journal.flush()
+                        if args.cooldown:
+                            time.sleep(args.cooldown)
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        journal.close()
+        result["interrupted"] = interrupted
+        result["comparisons"] = judge(rows, workloads, arms, args.discard, args.pairs)
+        for target, text in ((Path(args.json or args.out / "ab-results.json"), json.dumps(result, indent=2, allow_nan=False) + "\n"),
+                             (Path(args.summary or args.out / "ab-summary.md"), report_markdown(result))):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+    print(f"wrote {args.out / 'ab-results.json'}", flush=True)
+    if interrupted:
+        raise SystemExit(130)
+    if not result["comparisons"] or any(not c["correct"] for c in result["comparisons"].values()):
         raise SystemExit(2)
-
 
 if __name__ == "__main__":
     main()
