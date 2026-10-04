@@ -106,11 +106,18 @@ __device__ __forceinline__ void t2_v2_b_fragment(const uint4& xa, const uint4& x
     b1                      = __byte_perm(source.z, source.w, sel);
 }
 
-template <class Schedule>
+struct T2SmallTv2Bf16Publish {
+    __device__ __forceinline__ void operator()(__nv_bfloat16* out, int column, int row,
+                                              int rows, float value) const {
+        out[static_cast<std::int64_t>(column) * rows + row] = __float2bfloat16_rn(value);
+    }
+};
+
+template <class Schedule, class Publish = T2SmallTv2Bf16Publish>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void t2_small_t_v2_kernel(
     const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ scales, __nv_bfloat16* __restrict__ out, std::int32_t rows,
-    std::int32_t k, std::int32_t cols) {
+    std::int32_t k, std::int32_t cols, Publish publish = {}) {
     constexpr int kTpw    = Schedule::kTilesPerWarp;
     constexpr int kNt     = Schedule::kColumnTiles;
     constexpr int kKW     = Schedule::kKWarps;
@@ -187,7 +194,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void t2_s
         uint4 xb[kNt];
 #pragma unroll
         for (int nt = 0; nt < kNt; ++nt) {
-            const int col = nt * 8 + gid;
+            const int col = static_cast<int>(blockIdx.y) * Schedule::kColumns + nt * 8 + gid;
             xa[nt]        = make_uint4(0u, 0u, 0u, 0u);
             xb[nt]        = make_uint4(0u, 0u, 0u, 0u);
             if (col < cols) {
@@ -314,17 +321,14 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void t2_s
                     sum.z += value.z;
                     sum.w += value.w;
                 }
-                const int col = nt * 8 + 2 * lid;
+                const int col = static_cast<int>(blockIdx.y) * Schedule::kColumns + nt * 8 + 2 * lid;
                 if (col < cols) {
-                    out[static_cast<std::int64_t>(col) * rows + row] = __float2bfloat16_rn(sum.x);
-                    out[static_cast<std::int64_t>(col) * rows + row + 8] =
-                        __float2bfloat16_rn(sum.z);
+                    publish(out, col, row, rows, sum.x);
+                    publish(out, col, row + 8, rows, sum.z);
                 }
                 if (col + 1 < cols) {
-                    out[static_cast<std::int64_t>(col + 1) * rows + row] =
-                        __float2bfloat16_rn(sum.y);
-                    out[static_cast<std::int64_t>(col + 1) * rows + row + 8] =
-                        __float2bfloat16_rn(sum.w);
+                    publish(out, col + 1, row, rows, sum.y);
+                    publish(out, col + 1, row + 8, rows, sum.w);
                 }
             }
         }

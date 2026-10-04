@@ -69,6 +69,7 @@ public:
           max_outstanding_(static_cast<std::size_t>(options.max_concurrency) +
                            options.max_pending_requests),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
+          decode_round_observer_(options.decode_round_observer),
           resources_(max_concurrency_, options.context_cache.max_private_continuations.value(),
                      options.context_cache.max_shared_prefixes.value(),
                      options.context_cache.enabled,
@@ -1181,6 +1182,18 @@ private:
             throw;
         }
         generated_staged = false;
+        if (committed_storage->calibrated_routing) {
+            const auto& route = *committed_storage->calibrated_routing;
+            switch (route.draft_tokens) {
+            case 0: ++cumulative_stats_.calibrated_target_only_rounds; break;
+            case 7: ++cumulative_stats_.calibrated_k7_rounds; break;
+            case 11: ++cumulative_stats_.calibrated_k11_rounds; break;
+            case 15: ++cumulative_stats_.calibrated_k15_rounds; break;
+            default: throw std::logic_error("Program returned an invalid calibrated action");
+            }
+            cumulative_stats_.calibrated_route_switches += route.switched;
+            cumulative_stats_.calibrated_fixed_fallback_rounds += route.fixed_fallback;
+        }
         auto& committed  = *committed_storage;
         if (committed.row_count != row_count) {
             throw std::logic_error("Runtime commit result is not row aligned");
@@ -1823,14 +1836,34 @@ private:
 
     void run_decode_round(const RoundMembership& membership,
                           const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start) {
+        const bool observed = static_cast<bool>(decode_round_observer_.callback);
+        const auto started = observed ? Clock::now() : Clock::time_point{};
+        const auto committed_before = observed ? cumulative_stats_.committed_decode_tokens : 0;
         nvtx::ScopedRange decode_range(nvtx::Name::Decode, nvtx::Category::Decode,
                                        static_cast<std::uint64_t>(membership.size));
         ProgramCallScope program_call(*this);
         auto pending = instance_.program->decode(
             membership.sequence_span(), membership.budget_span(), &program_call.failed_timing());
+        const auto execution = pending.decode_execution();
         program_call.finish(pending.execution_timing());
         commit_pending(std::move(pending), membership.lane_span(), true, cancelled_at_unit_start);
         publish_runtime_stats();
+        if (observed) {
+            const DecodeRoundEvent event{
+                .active_batch = static_cast<std::uint32_t>(membership.size),
+                .max_execution_frontier = execution.max_execution_frontier,
+                .verify_width = execution.verify_width,
+                .draft_tokens = execution.draft_tokens,
+                .backend = execution.backend,
+                .proposal_width = execution.proposal_width,
+                .neural_drafter_executed = execution.neural_drafter_executed,
+                .committed_tokens = cumulative_stats_.committed_decode_tokens - committed_before,
+                .elapsed_ns = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started).count()),
+            };
+            // Diagnostics publish only after successful settlement and never control generation.
+            try { decode_round_observer_.callback(event); } catch (...) {}
+        }
     }
 
     void run_control_batch(const ControlMembership& membership) {
@@ -2065,6 +2098,7 @@ private:
     const std::uint32_t max_concurrency_;
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;
+    const DecodeRoundObserver decode_round_observer_;
     ResourceManagement resources_;
 
     mutable std::mutex execution_mutex_;

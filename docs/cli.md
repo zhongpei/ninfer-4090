@@ -222,10 +222,13 @@ opt-in runtime tree verifier described in
 [Runtime DFlash2 tree verification](maintainer/runtime-tree-verification.md). Runtime tree v1 is
 C1/raw-greedy and automatically falls back to the chain path for unsupported rounds.
 
-Only one speculative backend can be enabled per Engine. DFlash/DFlash2 may additionally enable
-the opt-in adaptive verification policy described in
-[Adaptive speculative routing](maintainer/speculative-routing.md). The drafter remains at the
-startup maximum K; the router changes only how many proposed rows the target verifies each round.
+DFlash/DFlash2 may additionally enable the opt-in policies described in
+[Speculative routing](maintainer/speculative-routing.md). Stair changes the
+licensed extent while retaining startup physical widths. Calibrated DFlash2
+chain keeps K15 resident and selects actual target-only/K7/K11/K15 execution
+from an identity-bound measured profile. It supports greedy zero-penalty
+sampling; other sampling uses fixed K15 for the whole compact batch. Calibrated
+routing cannot be combined with Tree, lookup or Stair options.
 
 The published [performance results](performance.md)
 use MTP with three draft tokens and DFlash with seven draft tokens (block length eight), both with
@@ -246,7 +249,8 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--kv-dtype bf16\|int8\|fp8\|rk8v4\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant; all six are accepted on this fork's sm_86/sm_89 targets | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
-| `--spec-router fixed\|stair` | fixed maximum-K verification or adaptive DFlash/DFlash2 verification width | `fixed` |
+| `--spec-router fixed\|stair\|calibrated` | fixed execution, Stair licensed extent, or calibrated DFlash2 physical action | `fixed` |
+| `--spec-router-profile PATH` | required calibrated profile; startup rejects missing or mismatched configuration | unset |
 | `--spec-router-scope request\|engine` | learn Stair statistics per request or reuse them for the Engine lifetime | `request` |
 | `--spec-router-state PATH` | restore/save engine-scoped chain/tree Stair counters across clean restarts | unset |
 | `--dflash-teacher-out DIR` | record exact loaded-.ninfer DFlash target taps and target-head top-16 during root prefill | unset |

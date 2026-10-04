@@ -1,3 +1,4 @@
+#include "calibrated_product_options_cases.h"
 #include "options.h"
 
 #include <functional>
@@ -31,7 +32,7 @@ int check(bool condition, const char* message) {
 } // namespace
 
 int main() {
-    int failures = 0;
+    int failures = calibrated_product_options_cases(parse, {"ninfer-cli", "model.ninfer", "--prompt", "hello"}, ninfer::cli::usage_text("ninfer-cli"));
     const ninfer::cli::Options configured =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--thinking-budget", "37"});
     failures += check(configured.thinking_budget == 37,

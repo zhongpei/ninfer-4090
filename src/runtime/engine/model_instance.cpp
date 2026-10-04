@@ -1,4 +1,5 @@
 #include "runtime/engine/model_instance.h"
+#include "runtime/engine/speculative_routing_profile.h"
 #include "artifact/reader.h"
 #include "artifact/formats.h"
 #include "core/startup.h"
@@ -16,6 +17,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 void validate_options(const EngineOptions& options) {
+    validate_speculative_routing_options(options.speculative);
     if (options.artifact_path.empty()) {
         throw std::invalid_argument("Engine artifact_path must not be empty");
     }
@@ -57,6 +59,42 @@ void validate_options(const EngineOptions& options) {
     if (options.media_preprocess_threads > 64) {
         throw std::invalid_argument("Engine media_preprocess_threads must be in [0,64]");
     }
+}
+
+SpeculativeRoutingProfileIdentity routing_identity(const EngineOptions& options,
+    const artifact::ArtifactId& artifact_id, const std::string& signature,
+    const std::string& hardware_class, std::uint32_t resolved_kv_capacity) {
+    SpeculativeRoutingProfileIdentity result;
+    constexpr char hex[] = "0123456789abcdef";
+    for (const auto byte : artifact_id) {
+        const auto value = std::to_integer<unsigned>(byte);
+        result.artifact_id.push_back(hex[value >> 4]);
+        result.artifact_id.push_back(hex[value & 15]);
+    }
+    result.prefill_signature = signature;
+    result.hardware_class = hardware_class;
+    result.backend = options.speculative.backend;
+    result.kv_storage = options.kv_cache;
+    result.startup_draft_tokens = options.speculative.draft_tokens;
+    result.proposal_head = options.speculative.proposal_head;
+    result.use_cuda_graph = options.use_cuda_graph;
+    result.max_concurrency = options.max_concurrency;
+    result.max_context = options.max_context;
+    result.prefill_chunk = options.prefill_chunk;
+    result.resolved_kv_capacity = resolved_kv_capacity;
+    const auto& cache = options.context_cache;
+    result.context_cache = {cache.enabled, cache.device_state_slots.value(), cache.host_state_slots,
+        cache.host_kv_capacity_bytes, cache.max_private_continuations.value(),
+        cache.max_shared_prefixes.value(), cache.max_long_anchors_per_continuation.value(),
+        cache.max_cache_markers_per_request.value()};
+#define COPY(name) result.execution_options.name = options.name
+    COPY(lm_head_q4); COPY(lm_head_q6); COPY(embedding_q4); COPY(embedding_q6);
+    COPY(gdn_state_fp16); COPY(mlp_a8_decode); COPY(prefill_a8); COPY(prefill_cublas);
+    COPY(prefill_cublas_projections); COPY(mtp_experts_q4); COPY(enable_vision);
+    COPY(vision_residency); COPY(vision_max_merged_tokens); COPY(rope_scaling_factor);
+    COPY(rope_scaling_original_context);
+#undef COPY
+    return result;
 }
 
 std::size_t current_free_device_bytes() {
@@ -188,6 +226,16 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
         sequence.kv_capacity() != resolution.resolved_tokens) {
         throw std::logic_error("resolved KV capacity does not match the finalized Program plan");
     }
+    std::optional<SpeculativeRoutingProfileIdentity> speculative_identity;
+    if (options.speculative.backend == SpeculativeBackend::DFlash2 &&
+        options.speculative.draft_tokens == 15) {
+        speculative_identity = routing_identity(options, instance->model->info().artifact_id,
+            signature, context_cost.summary.hardware_class, resolution.resolved_tokens);
+    }
+    if (options.speculative.routing.mode == SpeculativeRoutingMode::Calibrated) {
+        sequence.set_calibrated_routing(load_calibrated_routing_profile(
+            options.speculative.routing.profile_path, *speculative_identity));
+    }
     instance->kv_capacity_resolution = resolution;
     planning.complete();
     StartupPhaseScope program(options.startup_observer, StartupPhase::ProgramInitialize);
@@ -198,6 +246,7 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
     instance->kv_capacity_resolution.available_after_startup_bytes = current_free_device_bytes();
     const auto& stats = instance->model->storage_stats();
     LoadSummary summary;
+    summary.speculative_routing_identity = std::move(speculative_identity);
     summary.architecture = models::architecture_name(instance->model->config().text.architecture);
     summary.model_name   = instance->model->info().name;
     summary.prefill_signature = signature;

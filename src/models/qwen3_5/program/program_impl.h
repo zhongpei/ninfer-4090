@@ -284,6 +284,7 @@ struct PendingCandidate {
     std::uint32_t base_S        = 0;
     std::uint32_t prompt_tokens = 0;
     std::uint32_t produced      = 0;
+    std::uint32_t verify_width = 1;
     bool tree_verify            = false;
 };
 
@@ -584,6 +585,8 @@ public:
     const std::uint32_t lookup_ngram;
     const LookupDraftOptions lookup_options;
     const SpeculativeRoutingOptions speculative_routing;
+    const std::optional<runtime::CalibratedRoutingTable> calibrated_routing;
+    std::optional<std::uint32_t> last_settled_calibrated_draft_tokens;
     const SpeculativeTreeOptions speculative_tree;
     PersistentSpecRouterState engine_spec_router;
     std::unique_ptr<DFlashTeacherWriter> dflash_teacher_writer;
@@ -617,6 +620,10 @@ public:
     const bool causal_scoring;
     const std::size_t kv_payload_bytes;
     const std::size_t graph_allowance_bytes;
+    std::uint64_t graph_definition_count = 0;
+    std::uint64_t graph_executable_count = 0;
+    std::size_t graph_prepare_peak_device_delta_bytes = 0;
+    std::size_t graph_prepare_device_delta_bytes = 0;
     const WorkspacePlan workspace_plan;
 
     // Overlay Vision residency only: the persistent arena is VMM-backed so free KV granules can be
@@ -643,6 +650,12 @@ public:
     std::unique_ptr<StateImageStore> state_store;
     std::optional<GdnReplayRecords> replay_records;
     std::optional<ops::GdnReplayFoldPlan> replay_fold;
+    // Four mutually exclusive dense layouts bind the same maximum-width allocation. A pending
+    // compact round retains its width through replay/commit before the next action can write.
+    std::array<std::optional<GdnReplayRecords>, 4> calibrated_replay_records;
+    std::array<std::optional<ops::GdnReplayFoldPlan>, 4> calibrated_replay_folds;
+    [[nodiscard]] const GdnReplayRecords* replay_records_for_width(std::uint32_t width) const;
+    [[nodiscard]] const ops::GdnReplayFoldPlan& replay_fold_for_width(std::uint32_t width) const;
     std::optional<DFlashPersistentState> dflash;
     qwen3_5::RoundState io;
     Tensor prefill_hidden;
@@ -665,6 +678,7 @@ public:
     DecodeGraphFamily ordinary_graphs;
     DecodeGraphFamily mtp_graphs;
     DecodeGraphFamily dflash_graphs;
+    std::array<DecodeGraphFamily, 4> calibrated_dflash_graphs;
 
     std::optional<PinnedHostBuffer> round_host;
     std::optional<PinnedHostBuffer> score_logprobs_host;

@@ -6,6 +6,9 @@
 #include <string_view>
 
 int run_softmax_attention_causal_cache_tests();
+int run_softmax_attention_width_consistency_tests(const char* family = nullptr);
+int run_softmax_attention_represented_input_tests(const char* directory);
+int run_softmax_attention_representative_range_tests();
 int run_softmax_attention_dflash2_tests();
 int run_softmax_attention_nvfp4_tests();
 int run_softmax_attention_k8v4_tests();
@@ -19,7 +22,8 @@ namespace {
 // corruption in a CUDA kernel and is not. That misdiagnosis cost real time on the DFlash2 sweep:
 // the actual fault was a std::vector index out of range in the host-side reference, and it took
 // compute-sanitizer reporting zero device errors to rule the GPU out.
-int run_guarded(const char* what, int (*suite)()) {
+template <typename Suite>
+int run_guarded(const char* what, Suite suite) {
     try {
         return suite();
     } catch (const std::exception& error) {
@@ -78,6 +82,16 @@ int main(int argc, char** argv) {
     const int split_policy = run_guarded("split capacity", run_split_capacity_batch_invariance_tests);
     if (split_policy != 0) return split_policy;
     if (argc == 2 && std::string_view(argv[1]) == "--split-capacity-only") return 0;
+    if ((argc == 2 || argc == 3) && std::string_view(argv[1]) == "--width-consistency-only")
+        return run_guarded("width consistency", [&] {
+            return run_softmax_attention_width_consistency_tests(argc == 3 ? argv[2] : nullptr);
+        });
+    if (argc == 2 && std::string_view(argv[1]) == "--representative-range")
+        return run_guarded("representative range", run_softmax_attention_representative_range_tests);
+    if (argc == 3 && std::string_view(argv[1]) == "--represented-input")
+        return run_guarded("represented input", [&] {
+            return run_softmax_attention_represented_input_tests(argv[2]);
+        });
     if (argc == 2 && std::string_view(argv[1]) == "--dflash2-only")
         return run_guarded("dflash2", run_softmax_attention_dflash2_tests);
     if (argc == 2 && std::string_view(argv[1]) == "--nvfp4-only") {
@@ -88,7 +102,7 @@ int main(int argc, char** argv) {
     }
     if (argc != 1) {
         std::cerr
-            << "usage: ninfer_softmax_attention_test [--split-capacity-only|--dflash2-only|--nvfp4-only|--k8v4-only]\n";
+            << "usage: ninfer_softmax_attention_test [--split-capacity-only|--width-consistency-only [all|int8|rk8v4|packed|rk2v4-e8]|--represented-input DIR|--representative-range|--dflash2-only|--nvfp4-only|--k8v4-only]\n";
         return 2;
     }
     const int causal = run_guarded("causal cache", run_softmax_attention_causal_cache_tests);

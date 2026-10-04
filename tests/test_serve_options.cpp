@@ -1,3 +1,4 @@
+#include "calibrated_product_options_cases.h"
 #include "serve/generation_service.h"
 #include "serve/serve_options.h"
 #include "serve/translate.h"
@@ -27,8 +28,15 @@ ServeOptions parse(std::vector<std::string> arguments) {
 } // namespace
 
 int main() {
-    int failures = 0;
+    int failures = calibrated_product_options_cases(parse, {"ninfer-serve", "model.ninfer"}, serve_usage_text("ninfer-serve"));
 
+    const auto calibrated = parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",
+                                   "--draft-tokens", "15", "--spec-router", "calibrated",
+                                   "--spec-router-profile", "route.json"});
+    const auto calibrated_engine = make_engine_options(calibrated);
+    failures += check(calibrated_engine.speculative.routing.mode == ninfer::SpeculativeRoutingMode::Calibrated &&
+                          calibrated_engine.speculative.routing.profile_path == "route.json",
+                      "calibrated mode/profile did not reach Engine options");
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
     failures += check(defaults.speculative.routing.scope == ninfer::SpeculativeRouterScope::Request,
                       "serve router state is shared across requests by default");

@@ -789,6 +789,11 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
         throw std::logic_error("speculative pending batch has no ReplaySSM records");
     }
 
+    const std::uint32_t width = requests[lanes.front()].pending.verify_width;
+    if (width == 0 || width > draft_window + 1U) {
+        throw std::logic_error("speculative pending verification width is invalid");
+    }
+    const auto& pending_fold = replay_fold_for_width(width);
     std::array<ops::GdnReplayFoldRow, kMaximumConcurrency> fold_rows{};
     std::array<std::int32_t, kMaximumConcurrency> hidden_selectors{};
     bool needs_hidden_correction = false;
@@ -800,6 +805,9 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
             throw std::logic_error("speculative pending batch no longer matches Program state");
         }
         const PendingCandidate& pending = requests[lane].pending;
+        if (pending.verify_width != width) {
+            throw std::logic_error("pending compact batch has inconsistent verification widths");
+        }
         const SequenceState& sequence   = active_sequence(lane);
         if (pending.tree_verify) {
             if (lanes.size() != 1 || row != 0 || speculative_backend != SpeculativeBackend::DFlash2 ||
@@ -846,11 +854,11 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
         timing.resume_submit();
         if (tree_pending) {
             const auto& row = fold_rows[0];
-            replay_fold->execute_tree(row.source_state_slot, row.destination_state_slot,
+            pending_fold.execute_tree(row.source_state_slot, row.destination_state_slot,
                                       io.dflash_decode->tree_path_nodes,
                                       row.commit_columns, device.stream);
         } else {
-            replay_fold->execute(
+            pending_fold.execute(
                 std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
                 device.stream);
         }
@@ -862,8 +870,9 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                     continue;
                 }
                 const auto count = static_cast<std::int32_t>(accepted_tokens[row]);
+                const auto frame = io.dflash_decode->target_view(width - 1U);
                 Tensor ids =
-                    io.dflash_decode->licensed_tokens.slice(1, static_cast<std::int32_t>(row), 1)
+                    frame.licensed_tokens.slice(1, static_cast<std::int32_t>(row), 1)
                         .slice(0, 0, count)
                         .view({count});
                 Tensor counts =
@@ -886,7 +895,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                 selected     = frame.target_continuation_hidden.slice(1, 0, batch);
                 destinations = frame.state_destination_slots.slice(0, 0, batch);
             } else if (is_masked_draft_backend(speculative_backend) && io.dflash_decode) {
-                qwen3_5::DFlashDecodeState& frame = *io.dflash_decode;
+                auto frame = io.dflash_decode->target_view(width - 1U);
                 selector_tensor                   = frame.proposal_extents.slice(0, 0, batch);
                 hidden                            = frame.target_hidden.slice(2, 0, batch);
                 selected     = frame.target_continuation_hidden.slice(1, 0, batch);
@@ -938,7 +947,6 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     }
 
     const double tail_seconds = std::chrono::duration<double>(Clock::now() - tail_started).count();
-    const std::uint32_t width = draft_window + 1U;
     try {
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence = active_sequence(lanes[row]);

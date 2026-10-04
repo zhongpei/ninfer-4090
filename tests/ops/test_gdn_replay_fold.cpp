@@ -11,10 +11,13 @@
 #include <cstring>
 #include "ops/input_projection_test_common.h"
 #include "ops/op_tester.h"
+#include "ops/gdn_ref.h"
 
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
+#include <string_view>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -752,15 +755,187 @@ int run_record_fold_rounds() {
     return failures;
 }
 
+// T1 producers bind either the first column of a resident width-16 row, or dense width-1
+// rows. Independent FP64 first/last-layer oracles distinguish row/layer strides and commit 0/1.
+int run_t1_producer_fold_oracle(int physical_width = 16, int batch = 1) {
+    constexpr int Layers = 48, Heads = 48, Channels = 10240;
+    const std::size_t state_count = std::size_t(kStateDim) * kStateDim * Heads;
+    LayoutBuilder record_builder;
+    const auto record_layout = plan_gdn_replay_records(
+        record_builder, {Layers, batch, physical_width, Channels, kQkHeads, Heads, kStateDim, kStateDim});
+    const auto record_bytes = record_builder.finish(256);
+    DeviceBuffer record_storage(record_bytes + 2 * kGuardBytes);
+    record_storage.fill(0xa5);
+    auto* record_base = offset_pointer(record_storage.p, kGuardBytes);
+    cuda_check(cudaMemset(record_base, 0, record_bytes), "initialize T1 records");
+    GdnReplayRecords records({record_base, record_bytes}, record_layout);
+    LayoutBuilder state_builder;
+    const auto state_layout = plan_linear_attention_state_pool(
+        state_builder, {.layers = Layers, .conv_channels = Channels, .conv_width = 3,
+                        .value_heads = Heads, .value_head_dim = kStateDim,
+                        .key_head_dim = kStateDim, .slot_count = 2 * batch, .conv_dtype = DType::BF16});
+    const auto state_bytes = state_builder.finish(256);
+    DeviceBuffer state_storage(state_bytes + 2 * kGuardBytes);
+    state_storage.fill(0xa5);
+    auto* state_base = offset_pointer(state_storage.p, kGuardBytes);
+    cuda_check(cudaMemset(state_base, 0, state_bytes), "initialize T1 states");
+    LinearAttentionStatePool state_pool({state_base, state_bytes}, state_layout);
+    const float scale = 1.0F / std::sqrt(float(kStateDim));
+    std::vector<gdn_ref::Result> oracle;
+    std::vector<std::vector<float>> source;
+    std::vector<std::vector<std::uint16_t>> history, conv_record;
+    std::vector<std::int32_t> initial_slots(batch);
+    for (int b = 0; b < batch; ++b) { initial_slots[b] = b; }
+    DeviceBuffer initial_slot = to_device(initial_slots);
+    Tensor initial(initial_slot.p, DType::I32, {batch});
+    int failures = 0;
+    for (int layer : {0, Layers - 1}) {
+        std::vector<float> q_host, k_host, v_host, g_host, beta_host;
+        const auto record = records.layer(layer, batch);
+        for (int b = 0; b < batch; ++b) {
+            gdn_ref::Inputs input;
+            input.head_dim = kStateDim;
+            input.qk_heads = kQkHeads;
+            input.value_heads = Heads;
+            input.tokens = 1;
+            const auto represented = [&](int count, unsigned seed) {
+                std::vector<float> values(count);
+                for (int i = 0; i < count; ++i) {
+                    values[i] = bf16_to_f32(bf16_pattern(seed + i + b * 103U, 0.08F));
+                }
+                return values;
+            };
+            input.q = represented(kStateDim * kQkHeads, 2301U + layer);
+            input.k = represented(kStateDim * kQkHeads, 2401U + layer);
+            input.v = represented(kStateDim * Heads, 2501U + layer);
+            input.g.assign(Heads, -0.15F - 0.01F * b);
+            input.beta.assign(Heads, 0.43F + 0.01F * b);
+            input.state = initial_recurrent_values(state_count, 2601U, layer, b);
+            source.push_back(input.state);
+            oracle.push_back(gdn_ref::evaluate(input, scale, true));
+            std::vector<std::uint16_t> old(3 * Channels), column(Channels);
+            for (int i = 0; i < 3 * Channels; ++i) { old[i] = bf16_pattern(2701U + layer + i + b * 107U); }
+            for (int i = 0; i < Channels; ++i) { column[i] = bf16_pattern(2801U + layer + i + b * 109U); }
+            history.push_back(old);
+            conv_record.push_back(column);
+            const auto state = state_pool.recurrent_slot(layer, b);
+            const auto conv = state_pool.conv_slot(layer, b);
+            cuda_check(cudaMemcpy(state.data, input.state.data(), state.bytes(), cudaMemcpyHostToDevice),
+                       "T1 source state");
+            cuda_check(cudaMemcpy(conv.data, old.data(), conv.bytes(), cudaMemcpyHostToDevice),
+                       "T1 source history");
+            cuda_check(cudaMemcpy(offset_pointer(record.conv.data, std::size_t(b) * physical_width * Channels * 2),
+                                  column.data(), column.size() * sizeof(std::uint16_t), cudaMemcpyHostToDevice),
+                       "T1 raw conv record");
+            q_host.insert(q_host.end(), input.q.begin(), input.q.end());
+            k_host.insert(k_host.end(), input.k.begin(), input.k.end());
+            v_host.insert(v_host.end(), input.v.begin(), input.v.end());
+            g_host.insert(g_host.end(), input.g.begin(), input.g.end());
+            beta_host.insert(beta_host.end(), input.beta.begin(), input.beta.end());
+        }
+        auto dq = to_device_bf16(q_host), dk = to_device_bf16(k_host), dv = to_device_bf16(v_host);
+        auto dg = to_device(g_host), db = to_device(beta_host);
+        DeviceBuffer output(std::size_t(kStateDim) * Heads * batch * sizeof(std::uint16_t));
+        Tensor q(dq.p, DType::BF16, {kStateDim, kQkHeads, 1, batch});
+        Tensor k(dk.p, DType::BF16, {kStateDim, kQkHeads, 1, batch});
+        Tensor v(dv.p, DType::BF16, {kStateDim, Heads, 1, batch});
+        Tensor g(dg.p, DType::FP32, {Heads, 1, batch}), beta(db.p, DType::FP32, {Heads, 1, batch});
+        Tensor key(record.key.data, DType::BF16, {kStateDim, kQkHeads, 1, batch});
+        Tensor value(record.value.data, DType::BF16, {kStateDim, Heads, 1, batch});
+        Tensor gate(record.gate.data, DType::FP32, {2, Heads, 1, batch});
+        Tensor out(output.p, DType::BF16, {kStateDim, Heads, 1, batch});
+        const auto state = state_pool.layer_view(layer).recurrent;
+        ops::gated_delta_net_replay_record(q, k, v, g, beta, scale, state,
+                                          {}, initial, key, value, gate, out, nullptr);
+        cuda_synchronize();
+        const auto actual = from_device_bf16(output.p, std::size_t(kStateDim) * Heads * batch);
+        for (int b = 0; b < batch; ++b) {
+            const auto begin = actual.begin() + b * kStateDim * Heads;
+            failures += verify_reduction("T1 producer FP64 output",
+                                         std::vector<double>(begin, begin + kStateDim * Heads),
+                                         oracle[oracle.size() - batch + b].out,
+                                         {4.1e-3, 5.0e-6, kBf16GrossRelativeFloor});
+        }
+    }
+    const auto records_before = from_device<std::uint8_t>(record_base, record_bytes);
+    const ops::GdnReplayFoldPlan fold(records, state_pool.all_layers_view());
+    for (int commit : {0, 1}) {
+        std::vector<ops::GdnReplayFoldRow> rows;
+        for (int b = 0; b < batch; ++b) { rows.push_back({b, batch + b, commit}); }
+        fold.execute(rows, nullptr);
+        cuda_synchronize();
+        int index = 0;
+        for (int layer : {0, Layers - 1}) {
+            for (int b = 0; b < batch; ++b, ++index) {
+                const auto src = state_pool.recurrent_slot(layer, b);
+                const auto dst = state_pool.recurrent_slot(layer, batch + b);
+                const auto actual = from_device<float>(dst.data, source[index].size());
+                const std::vector<double> expected = commit == 0
+                    ? std::vector<double>(source[index].size(), 0.0) : oracle[index].final_state;
+                failures += verify_reduction("T1 fold FP64 state",
+                                             std::vector<double>(actual.begin(), actual.end()), expected,
+                                             {1.0e-5, 1.0e-7, 1.0e-5});
+                const auto unchanged = from_device<float>(src.data, source[index].size());
+                if (std::memcmp(unchanged.data(), source[index].data(), src.bytes()) != 0) { ++failures; }
+                std::vector<std::uint16_t> expected_history(3 * Channels);
+                if (commit == 1) {
+                    std::copy(history[index].begin() + Channels, history[index].end(), expected_history.begin());
+                    std::copy(conv_record[index].begin(), conv_record[index].end(), expected_history.begin() + 2 * Channels);
+                }
+                const auto dst_conv = state_pool.conv_slot(layer, batch + b);
+                if (from_device<std::uint16_t>(dst_conv.data, expected_history.size()) != expected_history) { ++failures; }
+                const auto src_conv = state_pool.conv_slot(layer, b);
+                if (from_device<std::uint16_t>(src_conv.data, history[index].size()) != history[index]) { ++failures; }
+            }
+        }
+    }
+    if (from_device<std::uint8_t>(record_base, record_bytes) != records_before) { ++failures; }
+    for (int layer : {1, Layers - 2}) {
+        for (int b = 0; b < batch; ++b) {
+            const auto state = state_pool.recurrent_slot(layer, batch + b);
+            const auto values = from_device<float>(state.data, state.numel());
+            if (!std::all_of(values.begin(), values.end(), [](float value) { return value == 0.0F; })) { ++failures; }
+        }
+    }
+    for (const auto* storage : {&record_storage, &state_storage}) {
+        for (std::size_t offset : {std::size_t(0), storage->bytes - kGuardBytes}) {
+            const auto guard = from_device<std::uint8_t>(offset_pointer(storage->p, offset), kGuardBytes);
+            if (!std::all_of(guard.begin(), guard.end(), [](auto byte) { return byte == 0xa5; })) { ++failures; }
+        }
+    }
+    return failures;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
 
     int failures = 0;
+    try {
+        if (argc == 2 && std::string_view(argv[1]) == "--dense-t1-oracle-only") {
+            failures += run_t1_producer_fold_oracle(1, 1);
+            failures += run_t1_producer_fold_oracle(1, 8);
+            std::cout << (failures == 0 ? "OK" : "FAIL") << " dense T1 producer/fold oracle\n";
+            return failures == 0 ? 0 : 1;
+        }
+        failures += run_t1_producer_fold_oracle();
+        if (!(argc == 2 && std::string_view(argv[1]) == "--t1-oracle-only")) {
+            failures += run_t1_producer_fold_oracle(1, 1);
+            failures += run_t1_producer_fold_oracle(1, 8);
+        }
+    }
+    catch (const std::exception& error) {
+        std::cerr << "FAIL T1 producer/fold oracle: " << error.what() << '\n';
+        return 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--t1-oracle-only") {
+        std::cout << (failures == 0 ? "OK" : "FAIL") << " T1 producer/fold oracle\n";
+        return failures == 0 ? 0 : 1;
+    }
     failures += run_case({48, 48, 10240}, 2, 1, {2}, 1801U, true);
     failures += run_case({48, 48, 10240}, 3, 4, {0, 1, 2, 3}, 1811U);
     failures += run_case({48, 48, 10240}, 6, 8, {0, 1, 2, 3, 6, 4, 1, 5}, 1821U);

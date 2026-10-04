@@ -53,11 +53,30 @@ struct GeneratedRound {
     std::span<const TokenId> tokens;
 };
 
+// Program-owned physical execution metadata, independent of licensed or accepted output counts.
+struct DecodeRoundExecution {
+    std::uint32_t max_execution_frontier = 0;
+    std::uint32_t verify_width = 1;
+    std::uint32_t draft_tokens = 0;
+    SpeculativeBackend backend = SpeculativeBackend::None;
+    std::uint32_t proposal_width = 0;
+    bool neural_drafter_executed = false;
+    bool calibrated = false;
+    bool calibrated_fixed_fallback = false;
+};
+
+struct CalibratedRoutingCommit {
+    std::uint32_t draft_tokens = 0;
+    bool switched = false;
+    bool fixed_fallback = false;
+};
+
 struct BatchedGeneratedRound {
     std::span<const TokenId> tokens;
     std::span<const std::int32_t> row_counts;
     std::uint32_t row_stride = 1;
     ExecutionTiming timing;
+    DecodeRoundExecution decode_execution;
 };
 
 struct PrefillStepResult {

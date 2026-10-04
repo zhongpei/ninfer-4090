@@ -1,19 +1,23 @@
 #include "ops/gdn_input_proj/gdn_projected_conv.h"
 
 #include "core/device.h"
+#include "core/weight.h"
+#include "ops/linear/t2/t2_small_t_v2.cuh"
 #include "ops/gdn_input_proj/gdn_conv.cuh"
 
 #include <cuda_bf16.h>
 
 #include <cstdint>
 #include <stdexcept>
+#include <type_traits>
 
 namespace ninfer::ops::detail {
 namespace {
 
-template <int Channels, int QueryRows, int KeyRows, int ValueRows, int StaticWidth, class Publish>
+template <int Channels, int QueryRows, int KeyRows, int ValueRows, int StaticWidth,
+          class Projected, class Publish>
 __global__ void gdn_projected_conv_kernel(
-    const __nv_bfloat16* __restrict__ projected, const __nv_bfloat16* __restrict__ conv_weight,
+    const Projected* __restrict__ projected, const __nv_bfloat16* __restrict__ conv_weight,
     const __nv_bfloat16* __restrict__ state_read, const std::int32_t* __restrict__ valid_columns,
     const std::int32_t* __restrict__ initial_state_slots, __nv_bfloat16* __restrict__ query,
     __nv_bfloat16* __restrict__ key, __nv_bfloat16* __restrict__ value, std::int32_t width,
@@ -50,7 +54,13 @@ __global__ void gdn_projected_conv_kernel(
             continue;
         }
 
-        const float p              = __bfloat162float(projected[column * Channels + row]);
+        const float p = [&] {
+            if constexpr (std::is_same_v<Projected, float>) {
+                return projected[column * Channels + row];
+            } else {
+                return __bfloat162float(projected[column * Channels + row]);
+            }
+        }();
         float conv                 = fmaf(w0, s0, 0.0F);
         conv                       = fmaf(w1, s1, conv);
         conv                       = fmaf(w2, s2, conv);
@@ -66,11 +76,16 @@ __global__ void gdn_projected_conv_kernel(
         publish.publish(token, batch, row, s1, s2, p);
         s0 = s1;
         s1 = s2;
-        s2 = p;
+        // Earlier columns cross the same observable BF16 history boundary as restored calls.
+        if constexpr (std::is_same_v<Projected, float>) {
+            s2 = __bfloat162float(__float2bfloat16_rn(p));
+        } else {
+            s2 = p;
+        }
     }
 }
 
-template <int Channels, int QueryRows, int KeyRows, int ValueRows, class Publish>
+template <int Channels, int QueryRows, int KeyRows, int ValueRows, class Projected, class Publish>
 void launch(const Tensor& projected, const Tensor& conv_weight, const Tensor& state_read,
             const Tensor& valid_columns, const Tensor& initial_state_slots, Tensor& query,
             Tensor& key, Tensor& value, Publish publish, cudaStream_t stream) {
@@ -80,9 +95,9 @@ void launch(const Tensor& projected, const Tensor& conv_weight, const Tensor& st
     if constexpr (Channels == 10240) {
         if (width == 4 && batch == 1) {
             constexpr int kT4Threads = 64;
-            gdn_projected_conv_kernel<Channels, QueryRows, KeyRows, ValueRows, 4>
+            gdn_projected_conv_kernel<Channels, QueryRows, KeyRows, ValueRows, 4, Projected>
                 <<<(Channels + kT4Threads - 1) / kT4Threads, kT4Threads, 0, stream>>>(
-                    static_cast<const __nv_bfloat16*>(projected.data),
+                    static_cast<const Projected*>(projected.data),
                     static_cast<const __nv_bfloat16*>(conv_weight.data),
                     static_cast<const __nv_bfloat16*>(state_read.data),
                     valid_columns.data == nullptr
@@ -97,9 +112,9 @@ void launch(const Tensor& projected, const Tensor& conv_weight, const Tensor& st
     }
     const dim3 grid((Channels + kDefaultThreads - 1) / kDefaultThreads,
                     static_cast<unsigned>(batch));
-    gdn_projected_conv_kernel<Channels, QueryRows, KeyRows, ValueRows, 0>
+    gdn_projected_conv_kernel<Channels, QueryRows, KeyRows, ValueRows, 0, Projected>
         <<<grid, kDefaultThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(projected.data),
+            static_cast<const Projected*>(projected.data),
             static_cast<const __nv_bfloat16*>(conv_weight.data),
             static_cast<const __nv_bfloat16*>(state_read.data),
             valid_columns.data == nullptr ? nullptr
@@ -190,33 +205,99 @@ void launch_tree(const Tensor& projected, const Tensor& conv_weight, const Tenso
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <class Publish>
+template <class Projected, class Publish>
 void dispatch(const Tensor& projected, const Tensor& conv_weight, const Tensor& state_read,
               const Tensor& valid_columns, const Tensor& initial_state_slots, Tensor& query,
               Tensor& key, Tensor& value, Publish publish, cudaStream_t stream) {
     if (projected.ne[0] == 10240 && query.ne[0] == 2048 && key.ne[0] == 2048 &&
         value.ne[0] == 6144) {
-        launch<10240, 2048, 2048, 6144>(projected, conv_weight, state_read, valid_columns,
-                                        initial_state_slots, query, key, value, publish, stream);
+        launch<10240, 2048, 2048, 6144, Projected>(projected, conv_weight, state_read, valid_columns,
+                                                      initial_state_slots, query, key, value, publish,
+                                                      stream);
         return;
     }
     if (projected.ne[0] == 8192 && query.ne[0] == 2048 && key.ne[0] == 2048 &&
         value.ne[0] == 4096) {
-        launch<8192, 2048, 2048, 4096>(projected, conv_weight, state_read, valid_columns,
-                                       initial_state_slots, query, key, value, publish, stream);
+        launch<8192, 2048, 2048, 4096, Projected>(projected, conv_weight, state_read, valid_columns,
+                                                     initial_state_slots, query, key, value, publish,
+                                                     stream);
         return;
     }
     throw std::invalid_argument("GDN projected-conv received an unregistered geometry");
 }
 
+template <class Publish>
+void dispatch_dtype(const Tensor& projected, const Tensor& conv_weight, const Tensor& state_read,
+                    const Tensor& valid_columns, const Tensor& initial_state_slots, Tensor& query,
+                    Tensor& key, Tensor& value, Publish publish, cudaStream_t stream) {
+    if (projected.dtype == DType::FP32) {
+        dispatch<float>(projected, conv_weight, state_read, valid_columns, initial_state_slots,
+                        query, key, value, publish, stream);
+    } else {
+        dispatch<__nv_bfloat16>(projected, conv_weight, state_read, valid_columns,
+                               initial_state_slots, query, key, value, publish, stream);
+    }
+}
+
+template <bool ValueParent>
+struct T2GdnCurrentPublish {
+    float* projected;
+    __nv_bfloat16* record;
+    __nv_bfloat16* z;
+
+    __device__ __forceinline__ void operator()(__nv_bfloat16*, int column, int row, int,
+                                              float value) const {
+        if constexpr (ValueParent) {
+            if (row >= 6144) {
+                z[static_cast<std::int64_t>(column) * 6144 + row - 6144] =
+                    __float2bfloat16_rn(value);
+                return;
+            }
+            row += 4096;
+        }
+        const auto index = static_cast<std::int64_t>(column) * 10240 + row;
+        projected[index] = value;
+        if (record != nullptr) { record[index] = __float2bfloat16_rn(value); }
+    }
+};
+
+template <bool ValueParent, int ColumnTiles>
+void launch_t2_current(const Tensor& x, const Weight& weight, Tensor& projected, Tensor& z,
+                       __nv_bfloat16* record, cudaStream_t stream) {
+    using Schedule = T2SmallTv2Schedule<4, 2, ColumnTiles, 2, 4>;
+    const dim3 grid(static_cast<unsigned>(weight.n / Schedule::kRows),
+                    static_cast<unsigned>((x.ne[1] + Schedule::kColumns - 1) / Schedule::kColumns));
+    const T2GdnCurrentPublish<ValueParent> publish{static_cast<float*>(projected.data), record,
+                                                  static_cast<__nv_bfloat16*>(z.data)};
+    t2_small_t_v2_kernel<Schedule><<<grid, Schedule::kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), nullptr, weight.n, weight.k, x.ne[1],
+        publish);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace
+
+void gdn_t2_current_projection_launch(const Tensor& x, const Weight& qk_weight,
+                                      const Weight& value_z_weight, Tensor& projected, Tensor& z,
+                                      Tensor* record, cudaStream_t stream) {
+    auto* record_data = record == nullptr ? nullptr : static_cast<__nv_bfloat16*>(record->data);
+    if (x.ne[1] <= 8) {
+        launch_t2_current<false, 1>(x, qk_weight, projected, z, record_data, stream);
+        launch_t2_current<true, 1>(x, value_z_weight, projected, z, record_data, stream);
+    } else {
+        launch_t2_current<false, 2>(x, qk_weight, projected, z, record_data, stream);
+        launch_t2_current<true, 2>(x, value_z_weight, projected, z, record_data, stream);
+    }
+}
 
 void gdn_projected_conv_snapshot_launch(const Tensor& projected, const Tensor& conv_weight,
                                         Tensor& conv_states, const Tensor& valid_columns,
                                         const Tensor& initial_state_slots,
                                         const Tensor& snapshot_base_slots, Tensor& query,
                                         Tensor& key, Tensor& value, cudaStream_t stream) {
-    dispatch(projected, conv_weight, conv_states, valid_columns, initial_state_slots, query, key,
+    dispatch_dtype(projected, conv_weight, conv_states, valid_columns, initial_state_slots, query, key,
              value,
              SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
                                     static_cast<const std::int32_t*>(snapshot_base_slots.data),
@@ -228,7 +309,7 @@ void gdn_projected_conv_record_launch(const Tensor& conv_record, const Tensor& c
                                       const Tensor& conv_states, const Tensor& valid_columns,
                                       const Tensor& initial_state_slots, Tensor& query, Tensor& key,
                                       Tensor& value, cudaStream_t stream) {
-    dispatch(conv_record, conv_weight, conv_states, valid_columns, initial_state_slots, query, key,
+    dispatch_dtype(conv_record, conv_weight, conv_states, valid_columns, initial_state_slots, query, key,
              value, NoHistoryPublish{}, stream);
 }
 

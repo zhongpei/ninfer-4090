@@ -99,7 +99,8 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),
       lookup_ngram(plan.lookup_ngram), lookup_options(plan.lookup_options),
-      speculative_routing(plan.speculative_routing), speculative_tree(plan.speculative_tree),
+      speculative_routing(plan.speculative_routing), calibrated_routing(plan.calibrated_routing),
+      speculative_tree(plan.speculative_tree),
       speculative_backend(plan.speculative_backend),
       kv_storage(plan.kv_storage), proposal_head(plan.proposal_head),
       lookup_persistent(plan.lookup_options.persistent_tokens, plan.lookup_options.max_order,
@@ -141,6 +142,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       context_transfer_timers_{CudaEventTimer(device_in, device_in.transfer_stream),
                                CudaEventTimer(device_in, device_in.transfer_stream),
                                CudaEventTimer(device_in, device_in.transfer_stream)} {
+    if (speculative_routing.mode == SpeculativeRoutingMode::Calibrated && !calibrated_routing) {
+        throw std::invalid_argument("calibrated Program requires a loaded immutable routing table");
+    }
     if (&parameters != plan.parameters || parameters.model.options() != plan.features) {
         throw std::invalid_argument("Program parameters do not match the frozen sequence plan");
     }
@@ -263,6 +267,23 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     if (plan.persistent.replay_records) {
         replay_records.emplace(backing, *plan.persistent.replay_records);
         replay_fold.emplace(*replay_records, state_images->linear().all_layers_view());
+        if (speculative_routing.mode == SpeculativeRoutingMode::Calibrated) {
+            const auto& maximum = *plan.persistent.replay_records;
+            const auto maximum_end = maximum.gate.region.offset + maximum.gate.region.bytes;
+            for (std::size_t index = 0; index < runtime::kCalibratedDraftActions.size(); ++index) {
+                auto spec = maximum.spec;
+                spec.width = static_cast<std::int32_t>(runtime::kCalibratedDraftActions[index] + 1U);
+                LayoutBuilder layout;
+                (void)layout.add(maximum.conv.region.offset, 1, "replay records prefix");
+                const auto record_layout = plan_gdn_replay_records(layout, spec);
+                if (layout.finish() > maximum_end) {
+                    throw std::logic_error("calibrated replay layout exceeds maximum backing");
+                }
+                calibrated_replay_records[index].emplace(backing, record_layout);
+                calibrated_replay_folds[index].emplace(*calibrated_replay_records[index],
+                                                      state_images->linear().all_layers_view());
+            }
+        }
     }
     if (replay_records.has_value() != (speculative_backend != SpeculativeBackend::None) ||
         replay_fold.has_value() != replay_records.has_value()) {
@@ -471,6 +492,31 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     work.reset();
     work.reset_peak();
     workspace_logical_peak_bytes = 0;
+}
+
+const GdnReplayRecords* ProgramImpl::replay_records_for_width(std::uint32_t width) const {
+    if (speculative_routing.mode != SpeculativeRoutingMode::Calibrated) {
+        return replay_records ? &*replay_records : nullptr;
+    }
+    for (std::size_t index = 0; index < runtime::kCalibratedDraftActions.size(); ++index) {
+        if (width == runtime::kCalibratedDraftActions[index] + 1U && calibrated_replay_records[index]) {
+            return &*calibrated_replay_records[index];
+        }
+    }
+    throw std::logic_error("calibrated decode has no records for physical verification width");
+}
+
+const ops::GdnReplayFoldPlan& ProgramImpl::replay_fold_for_width(std::uint32_t width) const {
+    if (speculative_routing.mode != SpeculativeRoutingMode::Calibrated) {
+        if (replay_fold) { return *replay_fold; }
+        throw std::logic_error("speculative pending batch has no replay fold plan");
+    }
+    for (std::size_t index = 0; index < runtime::kCalibratedDraftActions.size(); ++index) {
+        if (width == runtime::kCalibratedDraftActions[index] + 1U && calibrated_replay_folds[index]) {
+            return *calibrated_replay_folds[index];
+        }
+    }
+    throw std::logic_error("calibrated pending width has no replay fold plan");
 }
 
 ProgramImpl::~ProgramImpl() noexcept {
@@ -727,6 +773,10 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
     }
     out.workspace_logical_peak_bytes = workspace_logical_peak_bytes;
     out.cuda_graph_allowance_bytes   = graph_allowance_bytes;
+    out.cuda_graph_definition_count = graph_definition_count;
+    out.cuda_graph_executable_count = graph_executable_count;
+    out.cuda_graph_prepare_peak_device_delta_bytes = graph_prepare_peak_device_delta_bytes;
+    out.cuda_graph_prepare_device_delta_bytes = graph_prepare_device_delta_bytes;
     out.kv_payload_bytes             = kv_payload_bytes;
     if (host_state_images) {
         out.host_state_capacity_slots = host_state_images->capacity();

@@ -10,8 +10,9 @@ namespace {
 
 using Output = Q8SplitOutput2<8192, 4096>;
 
+template <class Publish>
 struct Q8GdnDecodeConvEpilogue {
-    GdnConvEpilogue<SnapshotHistoryPublish> conv;
+    GdnConvEpilogue<Publish> conv;
     __nv_bfloat16* z;
 
     template <class IgnoredOutput>
@@ -26,10 +27,11 @@ struct Q8GdnDecodeConvEpilogue {
     }
 };
 
-GdnConvEpilogue<SnapshotHistoryPublish>
-make_conv_epilogue(const Tensor& conv_weight, Tensor& conv_states, const Tensor& valid_columns,
-                   const Tensor& initial_slot, const Tensor& snapshot_base_slot, Tensor& query,
-                   Tensor& key, Tensor& value) {
+template <class Publish>
+GdnConvEpilogue<Publish>
+make_conv_epilogue(const Tensor& conv_weight, const Tensor& conv_states, const Tensor& valid_columns,
+                   const Tensor& initial_slot, Tensor& query, Tensor& key, Tensor& value,
+                   Publish publish) {
     return {
         static_cast<const __nv_bfloat16*>(conv_weight.data),
         static_cast<const __nv_bfloat16*>(conv_states.data),
@@ -46,8 +48,7 @@ make_conv_epilogue(const Tensor& conv_weight, Tensor& conv_states, const Tensor&
         0,
         1,
         0,
-        SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
-                               static_cast<const std::int32_t*>(snapshot_base_slot.data), 8192},
+        publish,
     };
 }
 
@@ -75,12 +76,33 @@ void q8_gdn_input_decode_conv_snapshot_launch(
     constexpr int kRowsPerCta = 8;
     const Output ignored_output{static_cast<__nv_bfloat16*>(query.data),
                                 static_cast<__nv_bfloat16*>(z.data)};
-    const Q8GdnDecodeConvEpilogue epilogue{
-        make_conv_epilogue(conv_weight, conv_states, valid_columns, initial_slot,
-                           snapshot_base_slot, query, key, value),
+    const Q8GdnDecodeConvEpilogue<SnapshotHistoryPublish> epilogue{
+        make_conv_epilogue(conv_weight, conv_states, valid_columns, initial_slot, query, key, value,
+                           SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
+                                                  static_cast<const std::int32_t*>(snapshot_base_slot.data),
+                                                  8192}),
         static_cast<__nv_bfloat16*>(z.data),
     };
-    q8_k2048_decode_kernel<kRows, kRowsPerCta, Output, Q8GdnDecodeConvEpilogue>
+    q8_k2048_decode_kernel<kRows, kRowsPerCta, Output, Q8GdnDecodeConvEpilogue<SnapshotHistoryPublish>>
+        <<<kRows / kRowsPerCta, kRowsPerCta * 32, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void q8_gdn_input_decode_conv_record_launch(
+    const Tensor& x, const Weight& weight, const Tensor& conv_weight, const Tensor& conv_states,
+    const Tensor& valid_columns, const Tensor& initial_slot, Tensor& conv_record,
+    Tensor& query, Tensor& key, Tensor& value, Tensor& z, cudaStream_t stream) {
+    constexpr int kRows = 12288, kRowsPerCta = 8;
+    const Output ignored_output{static_cast<__nv_bfloat16*>(query.data),
+                                static_cast<__nv_bfloat16*>(z.data)};
+    const Q8GdnDecodeConvEpilogue<RecordColumnPublish> epilogue{
+        make_conv_epilogue(conv_weight, conv_states, valid_columns, initial_slot, query, key, value,
+                           RecordColumnPublish{static_cast<__nv_bfloat16*>(conv_record.data), 8192, 1}),
+        static_cast<__nv_bfloat16*>(z.data)};
+    q8_k2048_decode_kernel<kRows, kRowsPerCta, Output, Q8GdnDecodeConvEpilogue<RecordColumnPublish>>
         <<<kRows / kRowsPerCta, kRowsPerCta * 32, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),

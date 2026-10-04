@@ -251,7 +251,8 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                                                                   : 0,
                                          .full_attention_layers =
                                              static_cast<std::int32_t>(config.full_attention_layers),
-                                         .causal_scoring = plan.causal_scoring});
+                                         .causal_scoring = plan.causal_scoring,
+                                         .calibrated_routing = plan.speculative_routing.mode == SpeculativeRoutingMode::Calibrated});
     out.prefill_hidden =
         add_tensor(builder, DType::BF16, {dimension(config.hidden_size), effective_prefill_chunk},
                    "step prefill hidden");
@@ -996,13 +997,21 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
                         const std::uint64_t final_visible = std::min<std::uint64_t>(
                             impl->capacity,
                             static_cast<std::uint64_t>(profile.max) + impl->draft_window + 1ULL);
-                        return (final_visible <= 4096 ? 64ULL : 96ULL) * kMiB;
+                        // Calibrated installs four finite action families. Reserve a separate
+                        // bound per topology rather than multiplying the historical fixed bound.
+                        const bool calibrated = impl->speculative_routing.mode ==
+                                                SpeculativeRoutingMode::Calibrated;
+                        return (final_visible <= 4096 ? (calibrated ? 16ULL : 64ULL)
+                                                     : (calibrated ? 24ULL : 96ULL)) * kMiB;
                     },
                     "DFlash graph allowance");
             };
             for (std::uint32_t batch_size = 1; batch_size <= impl->max_concurrency; ++batch_size) {
                 impl->graph_allowance_bytes =
-                    checked_add(impl->graph_allowance_bytes, class_allowance(batch_size),
+                    checked_add(impl->graph_allowance_bytes,
+                                checked_mul(class_allowance(batch_size),
+                                    impl->speculative_routing.mode == SpeculativeRoutingMode::Calibrated ? 4U : 1U,
+                                    "DFlash routing graph allowance"),
                                 "DFlash exact-b graph allowance");
             }
         }

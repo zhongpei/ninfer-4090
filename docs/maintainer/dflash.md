@@ -286,7 +286,21 @@ on all accept: bonus ~ p_P
 
 DFlash q is one-hot; DFlash2 q is the retained conditional distribution. This preserves the
 processed target distribution for the verify path. Different draft formats, shortlist heads or
-block widths can change acceptance and throughput; their logits need not match one another.
+block widths can change acceptance and throughput; their proposal logits need not match one another.
+
+### Greedy target consistency
+
+For the RTX 4090 DFlash2 qualification, the same artifact, sampling configuration and committed
+token prefix must select the same greedy target token regardless of proposal width, verification
+segmentation or prefix-cache reuse. Proposal distributions may differ; they must not change the
+target's output authority. This requirement does not impose bitwise equality on every private
+floating-point intermediate or equal seeded trajectories for stochastic speculative sampling.
+
+Qualification compares generated token IDs against target-only execution and compares fresh,
+retained and restored prefix execution with cache and CUDA Graphs enabled. State/frontier checks
+and independent Op oracles remain necessary, but do not substitute for that complete-route gate.
+The 2026-10-02 qualification failed this gate; successful generation alone does not qualify a
+route for performance selection. See [the A/B qualification reference](speculative-ab-testing.md).
 
 ### Live widths
 

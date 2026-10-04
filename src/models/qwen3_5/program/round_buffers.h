@@ -28,6 +28,7 @@ struct RoundStateSpec {
     std::int32_t attention_kv_heads = 0;
     std::int32_t full_attention_layers = 0;
     bool causal_scoring          = false;
+    bool calibrated_routing      = false;
 };
 
 // Stable pinned/device transfer format for ordinary decode. The full fixed-size object is copied
@@ -162,6 +163,9 @@ struct DFlashDecodeStateLayout {
     TensorRegion append_positions;
     TensorRegion append_counts;
     TensorRegion draft_tokens;
+    std::optional<TensorRegion> target_draft_tokens;
+    std::optional<TensorRegion> target_candidate_ids;
+    std::optional<TensorRegion> target_proposal_q;
     TensorRegion verify_ids;
     TensorRegion target_argmax;
     TensorRegion target_logits;
@@ -305,11 +309,16 @@ struct DFlashDecodeState {
     Tensor append_positions;
     Tensor append_counts;
     Tensor draft_tokens;
+    Tensor target_draft_tokens;
+    Tensor target_candidate_ids;
+    Tensor target_proposal_q;
     Tensor verify_ids;
     Tensor target_argmax;
     Tensor target_logits;
     Tensor target_hidden;
     Tensor target_continuation_hidden;
+
+    [[nodiscard]] DFlashDecodeState target_view(std::uint32_t verify_drafts) const;
 
     DFlashDecodeState() = default;
     DFlashDecodeState(DeviceSpan backing, const DFlashDecodeStateLayout& layout,

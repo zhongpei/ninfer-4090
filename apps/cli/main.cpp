@@ -154,7 +154,8 @@ private:
 
 void print_generation_summary(const ninfer::GenerationResult& result,
                               const ninfer::ResolvedSamplingParameters& sampling,
-                              const ninfer::MemorySummary& memory) {
+                              const ninfer::MemorySummary& memory,
+                              const ninfer::RuntimeStats& runtime, bool calibrated_enabled) {
     print_stage("prepare", "render/preprocess", result.timings.prepare_seconds);
     print_stage("generate", "vision", result.timings.vision_seconds);
     print_stage("generate", "text prefill", result.timings.prefill_seconds);
@@ -262,7 +263,8 @@ void print_generation_summary(const ninfer::GenerationResult& result,
                                         speculative.lookup_drafted_tokens));
         }
     }
-    ninfer::cli::emit_ab_metrics(result, sampling, memory);
+    ninfer::cli::emit_calibrated_snapshot_metrics(runtime, calibrated_enabled, print_metric);
+    ninfer::cli::emit_ab_metrics(result, sampling, memory, runtime);
 }
 
 } // namespace
@@ -367,7 +369,8 @@ int main(int argc, char** argv) {
             }
             std::cerr << '\n';
         }
-        print_generation_summary(result, sampling, engine.memory_summary());
+        print_generation_summary(result, sampling, engine.memory_summary(), engine.runtime_stats(),
+                                 cli.speculative.routing.mode == ninfer::SpeculativeRoutingMode::Calibrated);
         return 0;
     } catch (const std::exception& error) {
         logger->error("{}", ninfer::product::format_pretty_text(error.what()));

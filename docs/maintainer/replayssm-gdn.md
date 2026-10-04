@@ -19,6 +19,16 @@ Record/Fold 的实现与合同见 [`gdn_replay.h`](../../include/ninfer/ops/gdn_
 [`replay.cpp`](../../src/ops/linear_attention/gated_delta_net/replay.cpp)。模型配置决定 layer/head
 数量，Program 按启用的 MTP、DFlash 或 DFlash2 窗口预留 record capacity。
 
+Calibrated DFlash2 的 target-only 动作只录制一列旧 anchor，产生一个 target output；
+神经 drafter 不执行。Record 的执行域包含 T1，常驻 record capacity 仍保留启动 K15 的
+16 列。完整提交 fold 一步；停止或取消使最终提交量为零时 fold 零步，保留原 source state。
+下一轮选择较窄 target width 不改变尚未提交 record 的实际宽度或 DFlash feature catch-up 容量。
+
+普通 prefill 使用同一套 FP32 normalization 和状态转换，在单个 persistent CUDA kernel 内
+处理完整调用，不按长度切换 chunked MMA 与 recurrent tail。FP32 state 的调用分段不改变
+共同前缀输出和最终 state bits；普通调用的 workspace 为零。FP16 state 在调用结束时做公开
+cast，额外分段会增加 FP16 rounding，因此不具有相同的逐位分段保证。
+
 ---
 
 ## 1. 问题：speculative verify 需要可选择的状态前缀

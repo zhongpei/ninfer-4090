@@ -38,6 +38,13 @@ std::size_t SequencePlan::workspace_capacity_bytes() const noexcept {
     return impl_ != nullptr ? impl_->workspace.capacity : 0;
 }
 
+void SequencePlan::set_calibrated_routing(runtime::CalibratedRoutingTable table) {
+    if (!impl_ || impl_->speculative_routing.mode != SpeculativeRoutingMode::Calibrated) {
+        throw std::logic_error("calibrated routing requires a calibrated sequence plan");
+    }
+    impl_->calibrated_routing = std::move(table);
+}
+
 SequencePlanner::SequencePlanner(std::unique_ptr<detail::SequencePlannerImpl> impl) noexcept
     : impl_(std::move(impl)) {}
 

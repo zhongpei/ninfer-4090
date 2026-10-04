@@ -232,6 +232,14 @@ void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layou
         decode.append_counts = add_tensor(builder, DType::I32, {batch}, "DFlash append counts");
         decode.draft_tokens =
             add_tensor(builder, DType::I32, {columns - 1, batch}, "DFlash proposal draft tokens");
+        if (layout.spec.calibrated_routing) {
+            decode.target_draft_tokens = add_tensor(builder, DType::I32,
+                {columns - 1, batch}, "calibrated target draft prefix");
+            decode.target_candidate_ids = add_tensor(builder, DType::I32,
+                {16, columns - 1, batch}, "calibrated target sparse candidates");
+            decode.target_proposal_q = add_tensor(builder, DType::FP32,
+                {16, columns - 1, batch}, "calibrated target sparse proposal probabilities");
+        }
         decode.verify_ids =
             add_tensor(builder, DType::I32, {columns, batch}, "DFlash target verify ids");
         decode.target_argmax =
@@ -401,11 +409,42 @@ DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeState
     append_positions           = layout.append_positions.bind(backing);
     append_counts              = layout.append_counts.bind(backing);
     draft_tokens               = layout.draft_tokens.bind(backing);
+    if (layout.target_draft_tokens) { target_draft_tokens = layout.target_draft_tokens->bind(backing); }
+    if (layout.target_candidate_ids) { target_candidate_ids = layout.target_candidate_ids->bind(backing); }
+    if (layout.target_proposal_q) { target_proposal_q = layout.target_proposal_q->bind(backing); }
     verify_ids                 = layout.verify_ids.bind(backing);
     target_argmax              = layout.target_argmax.bind(backing);
     target_logits              = layout.target_logits.bind(backing);
     target_hidden              = layout.target_hidden.bind(backing);
     target_continuation_hidden = layout.target_continuation_hidden.bind(backing);
+}
+
+DFlashDecodeState DFlashDecodeState::target_view(std::uint32_t verify_drafts) const {
+    if (verify_drafts > static_cast<std::uint32_t>(draft_tokens.ne[0])) {
+        throw std::invalid_argument("target width exceeds resident DFlash proposal capacity");
+    }
+    DFlashDecodeState result = *this;
+    const auto width = static_cast<std::int32_t>(verify_drafts + 1U);
+    const auto batch = anchors.ne[0];
+    // Rebind contiguous prefixes of the planned maximum buffers. Retaining the maximum batch
+    // stride in a sliced narrow tensor would make B>1 read or commit another row's columns.
+    result.verify_ids = Tensor(verify_ids.data, verify_ids.dtype, {width, batch});
+    result.verify_positions = Tensor(verify_positions.data, verify_positions.dtype, {width, batch});
+    result.target_rope_positions = Tensor(target_rope_positions.data, target_rope_positions.dtype, {width, batch});
+    result.target_argmax = Tensor(target_argmax.data, target_argmax.dtype, {width, batch});
+    result.target_logits = Tensor(target_logits.data, target_logits.dtype, {target_logits.ne[0], width, batch});
+    result.target_hidden = Tensor(target_hidden.data, target_hidden.dtype, {target_hidden.ne[0], width, batch});
+    result.licensed_tokens = Tensor(licensed_tokens.data, licensed_tokens.dtype, {width, batch});
+    if (verify_drafts != 0 && verify_drafts != static_cast<std::uint32_t>(draft_tokens.ne[0])) {
+        if (!target_draft_tokens.data || !target_candidate_ids.data || !target_proposal_q.data) {
+            throw std::logic_error("narrow calibrated target has no planned prefix buffers");
+        }
+        const auto drafts = static_cast<std::int32_t>(verify_drafts);
+        result.draft_tokens = Tensor(target_draft_tokens.data, target_draft_tokens.dtype, {drafts, batch});
+        result.candidate_ids = Tensor(target_candidate_ids.data, target_candidate_ids.dtype, {16, drafts, batch});
+        result.proposal_q = Tensor(target_proposal_q.data, target_proposal_q.dtype, {16, drafts, batch});
+    }
+    return result;
 }
 
 RoundState::RoundState(DeviceSpan backing, const RoundStateLayout& layout) {

@@ -15,7 +15,7 @@ The default benchmark is greedy because output SHA equality is then a strong exa
 
 ## Current RTX 4090 qualification
 
-The 2026-10-02 qualification used CUDA 12.8 on RTX 4090 with
+The historical 2026-10-02 qualification used CUDA 12.8 on RTX 4090 with
 `Ternary-Bonsai-2-27B-ninfer-v3.ninfer`, INT8 KV, and the `prose,lookup-repeat`
 workloads. Run the same small correctness matrix with an explicit artifact path:
 
@@ -30,9 +30,8 @@ python3.11 -m tools.dflash2_training.ab_suite \
 All 16 CLI executions completed successfully and both tree arms executed real
 tree rounds. Chain and lookup comparisons passed exact output equality on both
 workloads. Fixed-tree and Tree-Stair comparisons passed on `lookup-repeat` but
-failed on `prose`; the harness correctly exited with status 2. The exact-output
-release gate remains unqualified for this artifact, and this run establishes no
-performance improvement.
+failed on `prose`; the harness correctly exited with status 2. That run did not qualify the exact-output release gate for this artifact and
+establishes no performance improvement.
 
 At the first fixed-tree divergence, ordinary execution produced BF16 logits
 `18.0/18.0` for token IDs `25/318`, while tree execution produced
@@ -44,6 +43,45 @@ they do not establish bitwise stability of the complete target forward across
 execution routes. The specific source of the target-logit differences remains
 unresolved; neither these observations nor successful generation waive the
 exact-output gate.
+
+The 2026-10-03 chain repair qualification uses the explicit artifact
+`/opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer`, RTX 4090, CUDA 12.8,
+INT8 KV, greedy sampling, zero penalties, cache on and CUDA Graphs on. The
+original chat CLI K15 comparison now matches all 512 generated token IDs at
+context 8192. The original chat public Engine fixture also matches target-only
+across fresh, retained and restored prefixes, including
+`Root → PrivateTurnClosure`, with explicitly resolved zero penalties. Final 2026-10-04 switching acceptance
+also passes terminal/cancellation, page/ring continuation, context boundaries,
+actual-batch membership changes, cache restoration and zero-commit release.
+
+Two fresh-process AB/BA server pairs pass complete response equality on all
+seven workloads and both repeats for K7/K11/K15 at C1/C2/C4/C8. HTTP
+responses do not expose token IDs; exact token comparison is supplied by the
+CLI/Engine fixtures and remains an explicit check in the native actual-batch
+measurement matrix. The first
+query-width-dependent differences were in attention partition/reduction and
+GDN normalization/control projection; prefix segmentation also exposed a T2A8
+FFN accumulation-order difference. Independent represented-input mathematical
+oracles and targeted width regressions now pass without relaxing their criteria.
+
+These results close the original chain and server reuse failures within this
+scope. Tree, Stair, lookup, nonzero penalties and stochastic cross-route output
+are not qualified by this campaign. Existing HTTP throughput results lack
+per-round actual batch/frontier observation and do not qualify a calibrated
+policy. Fixed-route measurement and automatic switching remain separate gates.
+Local evidence is in `profiles/bench/consistency-2026-10-03/`, with final server
+responses under `server-final/` and numerical/CLI fixtures under `chain/`.
+
+The final repaired binary passes all 84 native fixed-route comparisons
+(336 measurements), with exact token IDs and complete repeated responses.
+Seventy-one comparisons qualify paired performance; see
+[measured throughput and limitations](../performance.md#rtx-4090-sm_89-chain-qualification).
+Resident-K15 calibration covers actual batch/frontier cells separately. Final
+automatic comparisons use true target-only, standalone fixed K7 and calibrated
+Auto in fresh unprimed processes, with identical context/KV budgets and natural
+repeat reuse. K7 is selected as the uniform fixed reference because it qualifies
+27 of the 28 workload/concurrency combinations, rather than selecting a
+different comparator after seeing each automatic result.
 
 ## Workloads
 

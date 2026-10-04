@@ -105,7 +105,7 @@ void validate_replay_record(const Tensor& q, const Tensor& k, const Tensor& v, c
     const std::int32_t width       = q.ne[2];
     const std::int32_t rows        = q.ne[3];
     const bool registered_heads    = qk_heads == 16 && (value_heads == 48 || value_heads == 32);
-    if (!registered_heads || width < 2 || width > 16 || rows <= 0 || rows > kMaximumRows) {
+    if (!registered_heads || width < 1 || width > 16 || rows <= 0 || rows > kMaximumRows) {
         throw std::invalid_argument(std::string(kOp) + ": unsupported geometry");
     }
     if (states.ne[3] <= 0) {
@@ -163,7 +163,7 @@ void validate_fold_records(const GdnReplayRecords& records) {
     constexpr const char* kOp       = "gdn_replay_fold";
     const GdnReplayRecordSpec& spec = records.spec;
     if (!is_registered_fold_geometry(spec) || spec.record_capacity <= 0 ||
-        spec.record_capacity > kMaximumRows || spec.width < 2 || spec.width > 16 ||
+        spec.record_capacity > kMaximumRows || spec.width < 1 || spec.width > 16 ||
         spec.key_dim != kStateDim || spec.value_dim != kStateDim) {
         throw std::invalid_argument(std::string(kOp) + ": unsupported record geometry");
     }

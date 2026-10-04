@@ -52,13 +52,14 @@ inline void speculative_page_boundary(Engine& engine) {
     const auto fresh  = engine.generate(engine.prepare_tokens(followup), request(false));
     check(reused.reused_prompt_tokens == 64,
           "page-boundary terminal did not retain its exact committed frontier");
-    // The resource oracle is the exact retained frontier and successful subsequent execution.
-    // Reuse and full prefill have different floating-point paths, so long generated text is not
-    // an exact state oracle. Numerical and replay-state correctness have their own Op tests.
+    // Greedy continuation must preserve the committed prefix through both cache restoration
+    // and full prefill, including the state used after the page-boundary stop.
     check(reused.generated_token_ids.size() == 16 && fresh.generated_token_ids.size() == 16 &&
               reused.finish_reason == FinishReason::OutputLimit &&
               fresh.finish_reason == FinishReason::OutputLimit,
           "generation after page-boundary settlement did not complete");
+    check(reused.generated_token_ids == fresh.generated_token_ids,
+          "page-boundary cached continuation differs from full prefill");
 }
 
 } // namespace ninfer::test

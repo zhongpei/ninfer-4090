@@ -235,7 +235,7 @@ The real test uses an artifact containing DFlash2 and checks output budgets, spe
 penalty-enabled sampling, compact batches with unequal budgets, same-route same-seed replay,
 retained/fresh prefix behavior and absence of a full backend KV pool. A shared DFlash/DFlash2 fixture starts decode at token 63, verifies across the page
 boundary, stops after one target column at token 64, and checks the exact retained frontier and
-subsequent generation with and without reuse.
+exact greedy continuation tokens with and without reuse.
 The KV Store test checks exact mapping and reservation accounting for the same transition.
 K>=7 also exercises a stop inside a licensed block; K=15 additionally checks oversized prefill,
 local ring wrap, and the logical context-capacity tail. Optional Vision runs image/video capture
@@ -253,7 +253,11 @@ NINFER_TEST_ARTIFACT=out/qwen3_8_27b_nvfp4.ninfer \
 
 Arguments are K, Graph enabled, optimized head enabled, maximum B, target KV (`bf16` or `int8`),
 Vision enabled, extra Device StateImage slots, and an optional scenario. The scenario defaults to
-`chain`; `tree-3`, `tree-7`, `tree-11`, `tree-15`, and `tree-stair` enable engine-scoped tree
+`chain`. The `consistency` scenario uses context 8192, prefill chunk 1024 and a 512-token
+greedy chat budget. It compares target-only execution with fresh, retained Root,
+PrivateTurnClosure and final fresh chain output. Its maximum B argument is capacity; the
+sequential requests exercise actual C1. The scenario is also registered as a separate
+artifact-backed CTest. `tree-3`, `tree-7`, `tree-11`, `tree-15`, and `tree-stair` enable engine-scoped tree
 qualification while retaining the independent startup K. Tree scenarios check actual tree activity,
 output budgets, partial stop commits, retained continuations, sampling replay and penalty/batch
 fallback. For example:
@@ -264,6 +268,42 @@ NINFER_TEST_ARTIFACT=$PWD/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
   build/tests/ninfer_qwen3_5_dflash2_real_test 15 1 1 1 int8 0 3 tree-7
 ```
 
+To run the original RTX 4090 consistency case:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+NINFER_TEST_ARTIFACT=/opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  build/tests/ninfer_qwen3_5_dflash2_real_test 15 1 1 1 int8 0 3 consistency
+```
+
 Defaults are `15 1 1 8 bf16 0 3 chain`. Run GPU
 integration tests serially. The individual Op suites remain the numerical/state-transition oracle;
-the fixed Engine fixture does not define bit parity across arbitrary floating-point routes.
+the fixed Engine fixture does not define bit parity across arbitrary floating-point intermediates.
+RTX 4090 DFlash2 release qualification additionally requires generated-token equality against
+target-only execution and fresh/reused-prefix equality under greedy sampling with zero penalties.
+State/frontier checks alone do not satisfy this [complete-route gate](../docs/maintainer/dflash.md#greedy-target-consistency).
+
+The calibrated real fixture checks physical target-only/K7/K11/K15 actions,
+compact-batch membership changes, frontier crossings at 1024/8192, actual
+PrivateEndpoint and PrivateTurnClosure restoration, output budgets, rejection,
+bonus, stops, cancellation and later continuation. Its `--a16-consistency`
+selector repeats the original 512-token comparison with `prefill_a8=false`.
+All greedy consistency requests explicitly resolve both penalties to zero.
+
+```bash
+cmake --build build -j --target ninfer_qwen3_5_calibrated_routing_real_test
+CUDA_VISIBLE_DEVICES=0 \
+NINFER_TEST_ARTIFACT=/opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  ctest --test-dir build -R '^ninfer_qwen3_5_calibrated_' --output-on-failure
+```
+
+Public cancellation applies at stable execution-unit boundaries. The terminal
+fixture checks a real Cancelled result, an exact committed output prefix and
+reused/fresh continuation. The separate `--program-zero-commit` selector uses
+the actual v3 Model loader and internal Program transaction contract: it executes
+action zero and K7, then cancels with zero accepted tokens, checks released
+physical ownership, an owned survivor and fresh re-admission. Independent Fold0
+Op tests verify source-state no-write; public cancellation is not required to
+produce a zero-commit decode event. Actual B4/B8 output qualification additionally
+uses the public-Engine native measurement route; startup graph preparation alone
+does not establish that coverage.

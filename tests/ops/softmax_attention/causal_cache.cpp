@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <fstream>
 #include <limits>
 #include <span>
 #include <string>
@@ -2619,9 +2620,15 @@ void validate_batch_case(const BatchAttentionCase& test_case) {
     }
 }
 
-int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchAttentionCase& test_case) {
+int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchAttentionCase& test_case,
+                   bool compare_single_queries = false, const char* represented_input = nullptr,
+                   float activation_range = 0.25f) {
     validate_batch_case(test_case);
     const std::int32_t batch = static_cast<std::int32_t>(test_case.contexts.size());
+    std::cout << "ATTENTION_CASE " << geometry.name << " " << cache_name(plan)
+              << " B=" << batch << " W=" << test_case.width << " contexts=";
+    for (int context : test_case.contexts) std::cout << context << ',';
+    std::cout << '\n';
 
     std::int32_t maximum_visible = 1;
     for (std::int32_t row = 0; row < batch; ++row) {
@@ -2636,12 +2643,35 @@ int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchA
     const std::size_t kv_column_elements = static_cast<std::size_t>(kHeadDim) * geometry.kv_heads;
     const std::size_t columns            = static_cast<std::size_t>(test_case.width) * batch;
     std::vector<float> q =
-        make_bf16_values(q_column_elements * columns, test_case.seed, -0.25f, 0.25f);
+        make_bf16_values(q_column_elements * columns, test_case.seed, -activation_range, activation_range);
     std::vector<float> k =
-        make_bf16_values(kv_column_elements * columns, test_case.seed + 1u, -0.25f, 0.25f);
+        make_bf16_values(kv_column_elements * columns, test_case.seed + 1u, -activation_range, activation_range);
     std::vector<float> v =
         make_bf16_values(kv_column_elements * columns, test_case.seed + 2u, -1.0f, 1.0f);
     inject_codec_edges(geometry, static_cast<std::int32_t>(columns), k, v);
+    if (activation_range > 0.25f) {
+        // The saved 27B post-RoPE operands have RMS about 1.2 and Q/K peaks 11.5625/12.375.
+        // Preserve those BF16-representable peaks in a deterministic, model-free input domain.
+        for (std::size_t column = 0; column < columns; ++column) {
+            q[column * q_column_elements] = (column & 1) ? -11.5625f : 11.5625f;
+            k[column * kv_column_elements] = (column & 1) ? -12.375f : 12.375f;
+        }
+    }
+    if (represented_input != nullptr) {
+        const auto load = [&](const char* suffix, std::vector<float>& values) {
+            std::ifstream file(std::string(represented_input) + "/c0-attn-" + suffix + ".bin",
+                               std::ios::binary | std::ios::ate);
+            if (!file || file.tellg() != static_cast<std::streamoff>(values.size() * 2))
+                throw std::invalid_argument("represented attention input size mismatch");
+            std::vector<std::uint16_t> bits(values.size());
+            file.seekg(0);
+            file.read(reinterpret_cast<char*>(bits.data()), bits.size() * 2);
+            if (!file) throw std::invalid_argument("represented attention input read failed");
+            for (std::size_t i = 0; i < bits.size(); ++i) values[i] = bf16_to_f32(bits[i]);
+        };
+        load("qn", q); load("kn", k); load("v", v);
+    }
+
 
     std::vector<std::int32_t> positions(columns, 0);
     for (std::int32_t row = 0; row < batch; ++row) {
@@ -2741,6 +2771,38 @@ int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchA
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
     int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
                                     attention_criterion(plan));
+    if (compare_single_queries) {
+        // The same represented query/cache prefix must not depend on future columns, compact
+        // batch membership, or the resource envelope. Keep the independent FP64 oracle above.
+        BatchDeviceCache single_cache(initial, test_case.mapping);
+        GuardedDeviceBuffer single_output(q_column_elements * sizeof(std::uint16_t));
+        Tensor single_out(single_output.data(), DType::BF16, {kHeadDim, geometry.q_heads, 1, 1});
+        const auto single_bytes = ops::causal_softmax_attention_workspace_capacity_bytes(
+            op_geometry(geometry), cache_plan_storage(plan), envelope, 1, 1, 1);
+        GuardedDeviceBuffer single_scratch(std::max<std::size_t>(single_bytes, 256));
+        WorkspaceArena single_workspace(DeviceSpan{single_scratch.data(), single_scratch.bytes()});
+        for (int row = 0; row < batch; ++row) {
+            for (int column = 0; column < test_case.valid_columns[row]; ++column) {
+                const auto query = tq.slice(3, row, 1).slice(2, column, 1);
+                const auto key = tk.slice(3, row, 1).slice(2, column, 1);
+                const auto value = tv.slice(3, row, 1).slice(2, column, 1);
+                const auto position = tp.slice(1, row, 1).slice(0, column, 1);
+                const auto table = ttable_rows.slice(0, row, 1);
+                ops::causal_softmax_attention(query, key, value, position, Tensor{}, table,
+                    op_geometry(geometry), kAttentionScale, single_cache.view(), envelope,
+                    single_workspace, single_out, nullptr);
+                cuda_synchronize();
+                const auto bits = copy_from_guarded<std::uint16_t>(single_output, q_column_elements);
+                const auto offset = (row * test_case.width + column) * q_column_elements;
+                if (!std::equal(bits.begin(), bits.end(), output_bits.begin() + offset)) {
+                    std::cerr << label << ": query differs from width-one at row=" << row
+                              << " column=" << column << " position=" << positions[row * test_case.width + column] << '\n';
+                    ++failures;
+                    break;
+                }
+            }
+        }
+    }
     failures += verify_invalid_columns_zero(label, output_bits, geometry, test_case.width,
                                             test_case.valid_columns);
     failures += cache.verify(label, expected);
@@ -3432,6 +3494,395 @@ int run_batch_profile_validation_cases() {
     return failures;
 }
 
+// Constant logical G64 groups are exact H64 basis vectors. They give an independent
+// codec/state oracle as well as an independent decoded-KV attention oracle, including
+// the packed-key profiles that the legacy HostCache fixture does not represent.
+int run_packed_key_case(const Geometry& geometry, KvCacheStorage storage,
+                        const BatchAttentionCase& c) {
+    validate_batch_case(c);
+    const char* family = storage == KvCacheStorage::RK2V4E8 ? "rk2v4-e8"
+                         : storage == KvCacheStorage::RK4V4E8 ? "rk4v4-e8" : "rk4v4";
+    const int batch = static_cast<int>(c.contexts.size());
+    int visible = 1;
+    for (int row = 0; row < batch; ++row)
+        visible = std::max(visible, c.contexts[row] + c.valid_columns[row]);
+    const int capacity = align_up_page(visible + 3);
+    const int logical_pages = capacity / kPagedKVPageSize;
+    const int table_count = static_cast<int>(cache_table_row_count(c.table_rows));
+    const int physical_pages = 2 * table_count * logical_pages + 1;
+    const auto profile = ops::d256_kv_cache_profile(storage);
+    const int k_extent = profile.key_leading_extent;
+    const std::size_t k_count = physical_plane_elements(k_extent, geometry, physical_pages);
+    const std::size_t v_count = physical_plane_elements(128, geometry, physical_pages);
+    const std::size_t scale_count = physical_plane_elements(4, geometry, physical_pages);
+    const std::string label = std::string("packed stored-KV ") + family + " " + geometry.name +
+        " B=" + std::to_string(batch) + " W=" + std::to_string(c.width);
+    std::cout << "ATTENTION_CASE " << label << " contexts=";
+    for (int context : c.contexts) std::cout << context << ',';
+    std::cout << '\n';
+
+    std::vector<std::int32_t> tables(table_count * logical_pages);
+    for (int row = 0; row < table_count; ++row)
+        for (int page = 0; page < logical_pages; ++page)
+            tables[row * logical_pages + page] = 1 + 2 * (row * logical_pages + page);
+    std::vector<std::uint8_t> expected_k(k_count, 0), expected_v(v_count, 0);
+    std::vector<std::uint16_t> expected_ks(scale_count, 0), expected_vs(scale_count, 0);
+    const auto negative = [](int row, int head, int group, int position) {
+        return ((position * (group + 1) + head + row) & 2) != 0;
+    };
+    const auto key_value = [&](int row, int head, int group, int position) {
+        if (position % 11 == 0) return 0.0f;
+        return negative(row, head, group, position) ? -0.875f : 0.875f;
+    };
+    const auto value_value = [&](int row, int head, int group, int position) {
+        if (position % 13 == 0) return 0.0f;
+        const float magnitude = 0.125f * static_cast<float>(1 << group);
+        return negative(row, head, 3 - group, position) ? -magnitude : magnitude;
+    };
+    const auto physical_index = [&](int extent, int row, int head, int position, int d) {
+        const int page = tables[c.table_rows[row] * logical_pages + position / kPagedKVPageSize];
+        return paged_index(extent, geometry, page, head, position, d);
+    };
+    for (int row = 0; row < batch; ++row) {
+        for (int position = 0; position < c.contexts[row] + c.valid_columns[row]; ++position) {
+            for (int head = 0; head < geometry.kv_heads; ++head) {
+                for (int group = 0; group < 4; ++group) {
+                    const float x = key_value(row, head, group, position);
+                    const float y = value_value(row, head, group, position);
+                    const auto scale = physical_index(4, row, head, position, group);
+                    expected_ks[scale] = f32_to_f16_bits(x == 0 ? 0.0f : 1.0f);
+                    expected_vs[scale] = f32_to_f16_bits(std::abs(y) * 8.0f / 7.0f);
+                    if (x != 0.0f) {
+                        if (storage == KvCacheStorage::RK2V4E8) {
+                            // +/-7 e0 selects the first Type-A root (+/-e0 + e1).
+                            // Radius RNE(8+3 log2(7/sqrt(8)))=12. Residual magnitudes
+                            // tie at e0/e1; first-coordinate tie breaking selects +/-e0.
+                            expected_k[physical_index(k_extent, row, head, position, group * 16)] =
+                                x > 0 ? 3 : 1;
+                            expected_k[physical_index(k_extent, row, head, position, group * 16 + 1)] =
+                                x > 0 ? 0xc0 : 0xc1;
+                        } else {
+                            // D8 parity repair chooses the positive first-coordinate neighbour:
+                            // +7 -> +8 -> saturated +7, -7 -> -6. Plain i4 stores +/-7.
+                            const int code = x > 0 ? 7 : storage == KvCacheStorage::RK4V4E8 ? -6 : -7;
+                            expected_k[physical_index(k_extent, row, head, position, group * 32)] =
+                                static_cast<std::uint8_t>(code & 15);
+                        }
+                    }
+                    const int code = y == 0 ? 0 : y > 0 ? 7 : -7;
+                    expected_v[physical_index(128, row, head, position, group * 32)] =
+                        static_cast<std::uint8_t>(code & 15);
+                }
+            }
+        }
+    }
+    GuardedDeviceBuffer dkcache(k_count), dvcache(v_count), dks(scale_count * 2), dvs(scale_count * 2);
+    GuardedDeviceBuffer dtable(tables.size() * 4);
+    const std::vector<std::uint8_t> zeros(std::max(k_count, v_count), 0);
+    const std::vector<std::uint16_t> scale_zeros(scale_count, 0);
+    dkcache.copy_from_host(zeros.data(), k_count); dvcache.copy_from_host(zeros.data(), v_count);
+    dks.copy_from_host(scale_zeros.data(), scale_count * 2);
+    dvs.copy_from_host(scale_zeros.data(), scale_count * 2);
+    dtable.copy_from_host(tables.data(), tables.size() * 4);
+    PagedKVBatchLayerView cache{
+        .k_pages = Tensor(dkcache.data(), DType::U8, {k_extent, 64, geometry.kv_heads, physical_pages}),
+        .v_pages = Tensor(dvcache.data(), DType::U8, {128, 64, geometry.kv_heads, physical_pages}),
+        .k_scale_pages = Tensor(dks.data(), DType::FP16, {4, 64, geometry.kv_heads, physical_pages}),
+        .v_scale_pages = Tensor(dvs.data(), DType::FP16, {4, 64, geometry.kv_heads, physical_pages}),
+        .block_tables = Tensor(dtable.data(), DType::I32, {logical_pages, table_count}),
+        .head_dim = 256, .num_kv_heads = geometry.kv_heads, .storage = storage,
+    };
+    // Prepare histories through the public producer, then check its codes/scales against
+    // the independent basis-vector codec above. The producer is not the attention oracle.
+    for (int row = 0; row < batch; ++row) {
+        const int count = c.contexts[row] + c.valid_columns[row];
+        if (count == 0) continue;
+        auto k = make_bf16_values(static_cast<std::size_t>(count) * geometry.kv_heads * 256, c.seed + row, -2.0f, 2.0f);
+        auto v = make_bf16_values(k.size(), c.seed + row + 10, -1.0f, 1.0f);
+        std::vector<std::int32_t> positions(count);
+        for (int position = 0; position < count; ++position) {
+            positions[position] = position;
+            for (int head = 0; head < geometry.kv_heads; ++head)
+                for (int d = 0; d < 256; ++d) {
+                    const auto index = kv_input_index(geometry, head, d, position);
+                    if (position >= c.contexts[row]) {
+                        k[index] = key_value(row, head, d / 64, position);
+                        v[index] = value_value(row, head, d / 64, position);
+                    }
+                }
+        }
+        auto dk = to_device_bf16(k), dv = to_device_bf16(v);
+        DeviceBuffer dp(positions.size() * 4);
+        cuda_check(cudaMemcpy(dp.p, positions.data(), positions.size() * 4, cudaMemcpyHostToDevice), "packed fixture input upload");
+        PagedKVLayerView single{cache.k_pages, cache.v_pages, cache.k_scale_pages, cache.v_scale_pages,
+            Tensor(static_cast<std::int32_t*>(dtable.data()) + c.table_rows[row] * logical_pages,
+                   DType::I32, {logical_pages}), 256, geometry.kv_heads, storage};
+        ops::kv_cache_append(Tensor(dk.p, DType::BF16, {256, geometry.kv_heads, count}),
+            Tensor(dv.p, DType::BF16, {256, geometry.kv_heads, count}),
+            Tensor(dp.p, DType::I32, {count}), single, nullptr);
+        cuda_synchronize();
+    }
+    // Historical rows are represented input operands, not an append oracle. Retain arbitrary
+    // codes from the public producer and independently decode them below; only new basis rows
+    // use the exact encoder oracle. Subsequent calls must preserve every history byte.
+    const auto initial_k = copy_from_guarded<std::uint8_t>(dkcache, k_count);
+    const auto initial_v = copy_from_guarded<std::uint8_t>(dvcache, v_count);
+    const auto initial_ks = copy_from_guarded<std::uint16_t>(dks, scale_count);
+    const auto initial_vs = copy_from_guarded<std::uint16_t>(dvs, scale_count);
+    for (int row = 0; row < batch; ++row)
+        for (int position = 0; position < c.contexts[row]; ++position)
+            for (int head = 0; head < geometry.kv_heads; ++head) {
+                for (int d = 0; d < k_extent; ++d) {
+                    const auto index = physical_index(k_extent, row, head, position, d);
+                    expected_k[index] = initial_k[index];
+                }
+                for (int d = 0; d < 128; ++d) {
+                    const auto index = physical_index(128, row, head, position, d);
+                    expected_v[index] = initial_v[index];
+                }
+                for (int group = 0; group < 4; ++group) {
+                    const auto index = physical_index(4, row, head, position, group);
+                    expected_ks[index] = initial_ks[index]; expected_vs[index] = initial_vs[index];
+                }
+            }
+    const auto verify_cache = [&](const char* phase) {
+        int failures = verify_exact((label + phase + " K").c_str(), copy_from_guarded<std::uint8_t>(dkcache, k_count), expected_k);
+        failures += verify_exact((label + phase + " V").c_str(), copy_from_guarded<std::uint8_t>(dvcache, v_count), expected_v);
+        failures += verify_exact((label + phase + " Ks").c_str(), copy_from_guarded<std::uint16_t>(dks, scale_count), expected_ks);
+        failures += verify_exact((label + phase + " Vs").c_str(), copy_from_guarded<std::uint16_t>(dvs, scale_count), expected_vs);
+        return failures;
+    };
+    int failures = verify_cache(" initial codec");
+    if (failures != 0) return failures;
+    // Initial codec qualification is independent of attention. Its producer must not
+    // pre-publish the rows whose writes the attention call below is meant to prove.
+    // These finite code/scale sentinels differ from every exact basis-row prediction,
+    // including zero groups, so omitting any append plane cannot pass the state oracle.
+    const auto invalidate_new_row = [&](int row, int position) {
+        for (int head = 0; head < geometry.kv_heads; ++head) {
+            cuda_check(cudaMemset(static_cast<std::uint8_t*>(dkcache.data()) +
+                physical_index(k_extent, row, head, position, 0), 0x5a, k_extent),
+                "packed fixture invalidate new K");
+            cuda_check(cudaMemset(static_cast<std::uint8_t*>(dvcache.data()) +
+                physical_index(128, row, head, position, 0), 0x5a, 128),
+                "packed fixture invalidate new V");
+            const auto scale_offset = physical_index(4, row, head, position, 0) * sizeof(std::uint16_t);
+            cuda_check(cudaMemset(static_cast<std::uint8_t*>(dks.data()) + scale_offset,
+                0x38, 4 * sizeof(std::uint16_t)), "packed fixture invalidate new K scale");
+            cuda_check(cudaMemset(static_cast<std::uint8_t*>(dvs.data()) + scale_offset,
+                0x38, 4 * sizeof(std::uint16_t)), "packed fixture invalidate new V scale");
+        }
+    };
+    for (int row = 0; row < batch; ++row)
+        for (int column = 0; column < c.valid_columns[row]; ++column)
+            invalidate_new_row(row, c.contexts[row] + column);
+    const std::size_t q_elements = static_cast<std::size_t>(batch) * c.width * geometry.q_heads * 256;
+    const std::size_t kv_elements = static_cast<std::size_t>(batch) * c.width * geometry.kv_heads * 256;
+    auto q = make_bf16_values(q_elements, c.seed, -2.0f, 2.0f);
+    std::vector<float> k(kv_elements), v(kv_elements);
+    std::vector<std::int32_t> positions(batch * c.width);
+    for (int row = 0; row < batch; ++row)
+        for (int column = 0; column < c.width; ++column) {
+            const int position = c.contexts[row] + std::min(column, std::max(0, c.valid_columns[row] - 1));
+            positions[row * c.width + column] = c.valid_columns[row] == 0 ? 0 : position;
+            for (int head = 0; head < geometry.kv_heads; ++head)
+                for (int d = 0; d < 256; ++d) {
+                    const auto index = kv_input_index(geometry, head, d, row * c.width + column);
+                    k[index] = key_value(row, head, d / 64, position);
+                    v[index] = value_value(row, head, d / 64, position);
+                }
+        }
+    auto dq = to_device_bf16(q), dk = to_device_bf16(k), dv = to_device_bf16(v);
+    DeviceBuffer dp(positions.size() * 4), dvalid(batch * 4), drows(batch * 4);
+    cuda_check(cudaMemcpy(dp.p, positions.data(), positions.size() * 4, cudaMemcpyHostToDevice), "packed fixture input upload");
+    cuda_check(cudaMemcpy(dvalid.p, c.valid_columns.data(), batch * 4, cudaMemcpyHostToDevice), "packed fixture input upload");
+    cuda_check(cudaMemcpy(drows.p, c.table_rows.data(), batch * 4, cudaMemcpyHostToDevice), "packed fixture input upload");
+    GuardedDeviceBuffer dout(q_elements * 2);
+    Tensor tq(dq.p, DType::BF16, {256, geometry.q_heads, c.width, batch});
+    Tensor tk(dk.p, DType::BF16, {256, geometry.kv_heads, c.width, batch});
+    Tensor tv(dv.p, DType::BF16, {256, geometry.kv_heads, c.width, batch});
+    Tensor tp(dp.p, DType::I32, {c.width, batch}), tr(drows.p, DType::I32, {batch});
+    Tensor tout(dout.data(), DType::BF16, {256, geometry.q_heads, c.width, batch});
+    const ops::CausalAttentionExecutionEnvelope envelope{1, static_cast<std::uint32_t>(visible)};
+    const auto bytes = ops::causal_softmax_attention_workspace_capacity_bytes(
+        op_geometry(geometry), storage, envelope, batch, c.width, c.width);
+    GuardedDeviceBuffer scratch(std::max<std::size_t>(bytes, 256));
+    WorkspaceArena workspace(DeviceSpan{scratch.data(), scratch.bytes()});
+    ops::causal_softmax_attention(tq, tk, tv, tp, Tensor(dvalid.p, DType::I32, {batch}), tr,
+        op_geometry(geometry), kAttentionScale, cache, envelope, workspace, tout, nullptr);
+    cuda_synchronize();
+    failures += verify_cache(" published codec");
+    const auto output = copy_from_guarded<std::uint16_t>(dout, q_elements);
+    std::vector<double> reference(q_elements, 0.0);
+    constexpr std::array<float, 16> radius{0.0f, 0.0992f, 0.1250f, 0.1575f, 0.1984f, 0.2500f,
+        0.3150f, 0.3969f, 0.5000f, 0.6300f, 0.7937f, 1.0000f, 1.2599f, 1.5874f, 2.0000f, 2.5198f};
+    const auto root_coordinate = [](std::uint8_t code, int d) {
+        if (code < 112) {
+            int pair = 0;
+            for (int first = 0; first < 7; ++first)
+                for (int second = first + 1; second < 8; ++second, ++pair)
+                    if (pair == code / 4) {
+                        if (d == first) return (code & 2) ? 4 : -4;
+                        if (d == second) return (code & 1) ? 4 : -4;
+                        return 0;
+                    }
+        } else {
+            const int signs = code - 112;
+            if (d < 7) return (signs & (1 << d)) ? 2 : -2;
+            int negative_count = 0;
+            for (int bit = 0; bit < 7; ++bit) negative_count += (signs & (1 << bit)) == 0;
+            return (negative_count & 1) ? -2 : 2;
+        }
+        throw std::invalid_argument("invalid represented E8 root code");
+    };
+    for (int row = 0; row < batch; ++row) {
+        const int valid = c.valid_columns[row];
+        if (valid == 0) continue;
+        const int total = c.contexts[row] + valid;
+        std::vector<double> logical_k(static_cast<std::size_t>(total) * geometry.kv_heads * 256);
+        std::vector<double> logical_v(logical_k.size());
+        for (int position = 0; position < total; ++position)
+            for (int head = 0; head < geometry.kv_heads; ++head) {
+                std::array<double, 256> prepared_k{}, prepared_v{};
+                for (int d = 0; d < 256; ++d) {
+                    const int group = d / 64;
+                    int key_code;
+                    if (storage == KvCacheStorage::RK2V4E8) {
+                        const int block = d / 8;
+                        const auto root = expected_k[physical_index(k_extent, row, head, position, block * 2)];
+                        const auto rad_axis = expected_k[physical_index(k_extent, row, head, position, block * 2 + 1)];
+                        if (rad_axis >> 4) {
+                            const int axis_dim = (rad_axis & 15) / 2;
+                            const int axis = d % 8 == axis_dim ? (rad_axis & 1 ? -1 : 1) : 0;
+                            key_code = round_even_to_i32(static_cast<float>(root_coordinate(root, d % 8) + axis) * radius[rad_axis >> 4]);
+                        } else key_code = 0;
+                    } else {
+                        key_code = unpack_int4_code(expected_k[physical_index(k_extent, row, head, position, d / 2)], d & 1);
+                    }
+                    const int value_code = unpack_int4_code(expected_v[physical_index(128, row, head, position, d / 2)], d & 1);
+                    prepared_k[d] = static_cast<double>(key_code) * f16_bits_to_f32(expected_ks[physical_index(4, row, head, position, group)]);
+                    prepared_v[d] = static_cast<double>(value_code) * f16_bits_to_f32(expected_vs[physical_index(4, row, head, position, group)]);
+                }
+                normalized_hadamard_d64_groups(prepared_k);
+                normalized_hadamard_d64_groups(prepared_v);
+                const auto offset = kv_input_index(geometry, head, 0, position);
+                std::copy(prepared_k.begin(), prepared_k.end(), logical_k.begin() + offset);
+                std::copy(prepared_v.begin(), prepared_v.end(), logical_v.begin() + offset);
+            }
+        const auto decoded_key = [&](int d, int head, int position) { return logical_k[kv_input_index(geometry, head, d, position)]; };
+        const auto decoded_value = [&](int d, int head, int position) { return logical_v[kv_input_index(geometry, head, d, position)]; };
+        naive_dense_softmax_attention(op_geometry(geometry), valid, c.contexts[row] + valid,
+            kAttentionScale,
+            [&](int d, int head, int column) { return static_cast<double>(q[q_index(geometry, head, d, row * c.width + column)]); },
+            decoded_key, decoded_value,
+            [&](int column, int position) { return position <= c.contexts[row] + column; },
+            [&](int d, int head, int column, double value) { reference[q_index(geometry, head, d, row * c.width + column)] = value; });
+    }
+    failures += verify_attention(label, bf16_bits_to_double(output), reference, kAttentionRk8v4Criterion);
+    failures += verify_invalid_columns_zero(label, output, geometry, c.width, c.valid_columns);
+    GuardedDeviceBuffer single_output(static_cast<std::size_t>(geometry.q_heads) * 256 * 2);
+    Tensor single_out(single_output.data(), DType::BF16, {256, geometry.q_heads, 1, 1});
+    const auto single_bytes = ops::causal_softmax_attention_workspace_capacity_bytes(
+        op_geometry(geometry), storage, envelope, 1, 1, 1);
+    GuardedDeviceBuffer single_scratch(std::max<std::size_t>(single_bytes, 256));
+    WorkspaceArena single_workspace(DeviceSpan{single_scratch.data(), single_scratch.bytes()});
+    for (int row = 0; row < batch; ++row)
+        for (int column = 0; column < c.valid_columns[row]; ++column) {
+            // Retain the previously published prefix, but require this W1 call to publish
+            // its current row rather than inheriting the earlier wide call's bytes.
+            invalidate_new_row(row, c.contexts[row] + column);
+            ops::causal_softmax_attention(tq.slice(3, row, 1).slice(2, column, 1),
+                tk.slice(3, row, 1).slice(2, column, 1), tv.slice(3, row, 1).slice(2, column, 1),
+                tp.slice(1, row, 1).slice(0, column, 1), Tensor{}, tr.slice(0, row, 1),
+                op_geometry(geometry), kAttentionScale, cache, envelope, single_workspace, single_out, nullptr);
+            cuda_synchronize();
+            failures += verify_cache(" width-one published codec");
+            failures += verify_exact((label + " same query width-one").c_str(),
+                copy_from_guarded<std::uint16_t>(single_output, geometry.q_heads * 256),
+                std::vector<std::uint16_t>(
+                    output.begin() + static_cast<std::size_t>(row * c.width + column) * geometry.q_heads * 256,
+                    output.begin() + static_cast<std::size_t>(row * c.width + column + 1) * geometry.q_heads * 256));
+        }
+    failures += verify_cache(" final codec");
+    for (const auto* buffer : {&dkcache, &dvcache, &dks, &dvs, &dtable, &dout, &scratch, &single_output, &single_scratch})
+        failures += buffer->verify_guards(label.c_str());
+    return failures;
+}
+
+int run_softmax_attention_width_consistency_tests(const char* family = nullptr) {
+    const std::string_view selected = family == nullptr ? "all" : family;
+    if (selected != "all" && selected != "int8" && selected != "rk8v4" && selected != "packed" && selected != "rk2v4-e8")
+        throw std::invalid_argument("width consistency family must be all/int8/rk8v4/packed/rk2v4-e8");
+    if (cuda_unavailable()) return 77;
+    int failures = 0;
+    int executed_cases = 0;
+    if (selected == "all" || selected == "int8") {
+    for (int width : {7, 8, 16, 50}) {
+        ++executed_cases;
+        failures += run_batch_case(kGeometries[0], kPlanInt8,
+            {width, {54}, {width}, {0}, MappingPattern::Fragmented, 1701u}, true);
+    }
+    ++executed_cases;
+    failures += run_batch_case(kGeometries[0], kPlanInt8,
+        {16, {54, 61}, {16, 16}, {1, 0}, MappingPattern::Fragmented, 1708u}, true);
+    ++executed_cases;
+    failures += run_batch_case(kGeometries[0], kPlanInt8,
+        {128, {54}, {128}, {0}, MappingPattern::Fragmented, 1709u}, true, nullptr, 2.0f);
+    for (int width : {127, 128, 129}) {
+        ++executed_cases;
+        failures += run_batch_case(kGeometries[1], kPlanInt8,
+            {width, {54}, {width}, {0}, MappingPattern::Fragmented, 1710u}, true, nullptr, 2.0f);
+    }
+    for (int context : {120, 4090, 8190}) {
+        ++executed_cases;
+        failures += run_batch_case(kGeometries[0], kPlanInt8,
+            {16, {context, context + 5}, {16, 11}, {1, 0}, MappingPattern::Fragmented, 1702u}, true);
+    }
+    ++executed_cases;
+    failures += run_batch_case(kGeometries[1], kPlanInt8,
+        {16, {61, 127, 511}, {16, 3, 0}, {2, 0, 1}, MappingPattern::Fragmented, 1703u}, true);
+    }
+    if (selected == "all" || selected == "rk8v4") {
+    ++executed_cases;
+    failures += run_batch_case(kGeometries[0], kPlanRk8v4,
+        {16, {61, 127, 511}, {16, 3, 0}, {2, 0, 1}, MappingPattern::Fragmented, 1704u}, true);
+    }
+    // Changed packed-key families are qualified directly against independently decoded KV.
+    if (selected == "all" || selected == "packed" || selected == "rk2v4-e8")
+    for (KvCacheStorage storage : {KvCacheStorage::RotatedInt4KeyInt4ValueGroup64,
+                                  KvCacheStorage::RK4V4E8,
+                                  KvCacheStorage::RK2V4E8}) {
+        if (selected == "rk2v4-e8" && storage != KvCacheStorage::RK2V4E8) continue;
+        ++executed_cases;
+        failures += run_packed_key_case(kGeometries[0], storage,
+            {16, {61, 127, 511}, {16, 3, 0}, {2, 0, 1}, MappingPattern::Fragmented, 1705u});
+        ++executed_cases;
+        failures += run_packed_key_case(kGeometries[1], storage,
+            {50, {54}, {50}, {0}, MappingPattern::Fragmented, 1706u});
+        ++executed_cases;
+        failures += run_packed_key_case(kGeometries[0], storage,
+            {129, {0}, {129}, {0}, MappingPattern::Fragmented, 1707u});
+    }
+    std::cout << (failures == 0 ? "PASS" : "FAIL") << " causal attention query-width consistency family=" << selected
+              << " cases=" << executed_cases << '\n';
+    return failures == 0 ? 0 : 1;
+}
+
+int run_softmax_attention_representative_range_tests() {
+    if (cuda_unavailable()) return 77;
+    int failures = run_batch_case(kGeometries[0], kPlanInt8,
+        {50, {0}, {50}, {0}, MappingPattern::Fragmented, 1751u}, true, nullptr, 2.0f);
+    failures += run_batch_case(kGeometries[1], kPlanInt8,
+        {129, {0}, {129}, {0}, MappingPattern::Fragmented, 1752u}, true, nullptr, 2.0f);
+    return failures;
+}
+
+int run_softmax_attention_represented_input_tests(const char* directory) {
+    if (cuda_unavailable()) return 77;
+    return run_batch_case(kGeometries[0], kPlanInt8,
+        {50, {0}, {50}, {0}, MappingPattern::Fragmented, 1750u}, true, directory);
+}
+
 int run_softmax_attention_dflash2_tests() {
     // Profile validation first, and without a GPU: it is pure host logic, and if it is broken the
     // sweep below is the thing it was meant to protect.
@@ -3480,6 +3931,8 @@ int run_softmax_attention_causal_cache_tests() {
                                             [&] { return run_fp8_prompt_cases(); });
     failures += run_rk8v4_cases();
     failures += run_batch_cases();
+    failures += run_softmax_attention_representative_range_tests();
+    failures += run_softmax_attention_width_consistency_tests();
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention public-contract correctness\n";
     return failures == 0 ? 0 : 1;

@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -23,7 +24,8 @@ void validate_graph_profiles(const std::vector<GraphExecutionProfile>& profiles,
 
 template <class Prepare>
 void instantiate_graph_family(DecodeGraphFamily& family, const char* label, DeviceContext& device,
-                              Prepare&& prepare);
+                              Prepare&& prepare, const std::function<void()>& observe,
+                              bool warm_all_profiles = false);
 
 void validate_graph_profiles(const std::vector<GraphExecutionProfile>& profiles,
                              std::uint32_t max_frontier, const char* label) {
@@ -40,7 +42,8 @@ void validate_graph_profiles(const std::vector<GraphExecutionProfile>& profiles,
 
 template <class Prepare>
 void instantiate_graph_family(DecodeGraphFamily& family, const char* label, DeviceContext& device,
-                              Prepare&& prepare) {
+                              Prepare&& prepare, const std::function<void()>& observe,
+                              bool warm_all_profiles) {
     if (family.profiles.empty()) {
         throw std::logic_error(std::string(label) + " CUDA Graph family has no profiles");
     }
@@ -62,6 +65,7 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
         topology.topology_class       = profile.topology_class;
         topology.executable.instantiate(profile.definition);
         topology.installed_profile = i;
+        observe();
     }
 
     const auto install_and_upload = [&](DecodeGraphTopology& topology, std::size_t profile_index) {
@@ -72,24 +76,24 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
         }
         topology.executable.upload(device.stream);
         device.synchronize();
+        observe();
     };
 
     for (DecodeGraphTopology& topology : family.topologies) {
         std::optional<std::size_t> first_profile;
         for (std::size_t i = 0; i < family.profiles.size(); ++i) {
             if (family.profiles[i].topology_class == topology.topology_class) {
-                if (!first_profile) {
-                    first_profile = i;
-                    install_and_upload(topology, i);
-
+                const bool first = !first_profile;
+                if (first) { first_profile = i; }
+                install_and_upload(topology, i);
+                if (first || warm_all_profiles) {
                     DecodeGraphProfile& profile = family.profiles[i];
                     prepare(profile.min_execution_frontier, profile.batch_size);
                     device.synchronize();
                     topology.executable.launch(device.stream);
                     device.synchronize();
-                    continue;
+                    observe();
                 }
-                install_and_upload(topology, i);
             }
         }
         if (!first_profile) {
@@ -106,6 +110,16 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 void ProgramImpl::prepare_graphs() {
     if (!use_cuda_graph) { return; }
     nvtx::ScopedRange prepare_range(nvtx::Name::CudaGraphPrepare, nvtx::Category::Graph);
+    std::size_t graph_begin_free = 0, device_total = 0;
+    CUDA_CHECK(cudaMemGetInfo(&graph_begin_free, &device_total));
+    const std::function<void()> observe = [&] {
+        std::size_t current_free = 0;
+        CUDA_CHECK(cudaMemGetInfo(&current_free, &device_total));
+        graph_prepare_device_delta_bytes = graph_begin_free > current_free ?
+                                          graph_begin_free - current_free : 0;
+        graph_prepare_peak_device_delta_bytes = std::max(
+            graph_prepare_peak_device_delta_bytes, graph_prepare_device_delta_bytes);
+    };
 
     std::array<StateImageHandle, kMaximumConcurrency> capture_states{};
     for (std::uint32_t row = 0; row < max_concurrency; ++row) {
@@ -189,6 +203,7 @@ void ProgramImpl::prepare_graphs() {
             }
             cache.page_pool().zero_pages(pages, device.stream);
         };
+    std::uint32_t capture_target_drafts = draft_window;
     const auto prepare_representative = [&](std::uint32_t frontier, std::uint32_t batch_size) {
         if (batch_size == 0 || batch_size > max_concurrency) {
             throw std::logic_error("CUDA Graph representative batch is invalid");
@@ -222,15 +237,15 @@ void ProgramImpl::prepare_graphs() {
         if (io.dflash_decode) {
             *dflash_host_ingress       = {};
             *dflash_host_egress        = {};
-            const std::uint32_t extent = std::min(draft_window, capacity - frontier - 1U);
-            const std::uint32_t width  = draft_window + 1U;
+            const std::uint32_t extent = std::min(capture_target_drafts, capacity - frontier - 1U);
+            const std::uint32_t width  = capture_target_drafts + 1U;
             for (std::uint32_t row = 0; row < batch_size; ++row) {
                 dflash_host_ingress->anchors[row] = 0;
                 dflash_host_ingress->execution_frontiers[row] =
                     checked_i32(frontier, "graph representative DFlash frontier");
                 dflash_host_ingress->context_frontiers[row] =
                     checked_i32(frontier, "graph representative DFlash context frontier");
-                dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(width);
+                dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(draft_window + 1U);
                 dflash_host_ingress->proposal_extents[row] = static_cast<std::int32_t>(extent);
                 dflash_host_ingress->target_valid_columns[row] =
                     static_cast<std::int32_t>(extent + 1U);
@@ -298,7 +313,7 @@ void ProgramImpl::prepare_graphs() {
                                         parameters,
                                         work,
                                         state_images->linear(),
-                                        replay_records ? &*replay_records : nullptr,
+                                        replay_records_for_width(capture_target_drafts + 1U),
                                         io,
                                         prefill_hidden,
                                         prefill_chunk,
@@ -377,65 +392,96 @@ void ProgramImpl::prepare_graphs() {
         }
     }
     if (is_masked_draft_backend(speculative_backend)) {
-        const auto batch_one_profiles =
-            dflash_graph_profiles(speculative_backend, capacity, draft_window, 1);
-        validate_graph_profiles(batch_one_profiles, capacity - 1, "DFlash");
-        execution::DFlashBatchContext dflash_state{execution_core(),
-                                                   decoder->text_kv,
-                                                   *dflash,
-                                                   *io.dflash_decode,
-                                                   *dflash_host_ingress,
-                                                   *dflash_host_egress,
-                                                   state_images->continuation_hidden_store()};
-        const GraphExecutionProfile code_warm = batch_one_profiles.front();
-        const ops::CausalAttentionExecutionEnvelope code_warm_target{
-            1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
-                   capacity, static_cast<std::uint64_t>(code_warm.max) + draft_window + 1ULL))};
-        prepare_representative(code_warm.min, 1);
-        device.synchronize();
-        execution::dflash_decode_batch(dflash_state, 1, draft_window,
-                                       dflash_envelopes(code_warm.min, code_warm.max, draft_window),
-                                       code_warm_target, nullptr);
-        device.synchronize();
+        const bool calibrated = speculative_routing.mode == SpeculativeRoutingMode::Calibrated;
+        const auto actions = calibrated ? std::vector<std::uint32_t>(
+            runtime::kCalibratedDraftActions.begin(), runtime::kCalibratedDraftActions.end()) :
+            std::vector<std::uint32_t>{draft_window};
+        for (std::size_t action_index = 0; action_index < actions.size(); ++action_index) {
+            capture_target_drafts = actions[action_index];
+            DecodeGraphFamily& graphs = calibrated ? calibrated_dflash_graphs[action_index] : dflash_graphs;
+            const auto selected_drafts = calibrated ? std::optional(capture_target_drafts) : std::nullopt;
+            const auto batch_one_profiles =
+                dflash_graph_profiles(speculative_backend, capacity, draft_window, 1);
+            validate_graph_profiles(batch_one_profiles, capacity - 1, "DFlash");
+            execution::DFlashBatchContext dflash_state{execution_core(),
+                                                       decoder->text_kv,
+                                                       *dflash,
+                                                       *io.dflash_decode,
+                                                       *dflash_host_ingress,
+                                                       *dflash_host_egress,
+                                                       state_images->continuation_hidden_store()};
+            const GraphExecutionProfile code_warm = batch_one_profiles.front();
+            const ops::CausalAttentionExecutionEnvelope code_warm_target{
+                1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                       capacity, static_cast<std::uint64_t>(code_warm.max) + capture_target_drafts + 1ULL))};
+            prepare_representative(code_warm.min, 1);
+            device.synchronize();
+            execution::dflash_decode_batch(dflash_state, 1, draft_window,
+                                           dflash_envelopes(code_warm.min, code_warm.max, draft_window),
+                                           code_warm_target, nullptr, selected_drafts);
+            device.synchronize();
 
-        dflash_graphs.profiles.reserve(batch_one_profiles.size() * max_concurrency);
-        for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
-            const auto planned_profiles = batch_size == 1
-                                              ? batch_one_profiles
-                                              : dflash_graph_profiles(speculative_backend, capacity,
-                                                                      draft_window, batch_size);
-            validate_graph_profiles(planned_profiles, capacity - 1, "DFlash");
-            for (const GraphExecutionProfile planned : planned_profiles) {
-                dflash_graphs.profiles.emplace_back();
-                DecodeGraphProfile& profile    = dflash_graphs.profiles.back();
-                profile.batch_size             = batch_size;
-                profile.min_execution_frontier = planned.min;
-                profile.max_execution_frontier = planned.max;
-                profile.topology_class =
-                    planned.topology_class * max_concurrency + (batch_size - 1U);
-                const ops::CausalAttentionExecutionEnvelope target_envelope{
-                    1,
-                    static_cast<std::uint32_t>(std::min<std::uint64_t>(
-                        capacity, static_cast<std::uint64_t>(planned.max) + draft_window + 1ULL))};
+            graphs.profiles.reserve(batch_one_profiles.size() * max_concurrency);
+            for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
+                const auto planned_profiles = batch_size == 1
+                                                  ? batch_one_profiles
+                                                  : dflash_graph_profiles(speculative_backend, capacity,
+                                                                          draft_window, batch_size);
+                validate_graph_profiles(planned_profiles, capacity - 1, "DFlash");
+                for (const GraphExecutionProfile planned : planned_profiles) {
+                    graphs.profiles.emplace_back();
+                    DecodeGraphProfile& profile    = graphs.profiles.back();
+                    profile.batch_size             = batch_size;
+                    profile.min_execution_frontier = planned.min;
+                    profile.max_execution_frontier = planned.max;
+                    profile.topology_class =
+                        planned.topology_class * max_concurrency + (batch_size - 1U);
+                    const ops::CausalAttentionExecutionEnvelope target_envelope{
+                        1,
+                        static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                            capacity, static_cast<std::uint64_t>(planned.max) + capture_target_drafts + 1ULL))};
 
-                execution::capture_dflash_decode_batch(
-                    dflash_state, static_cast<std::int32_t>(batch_size), draft_window,
-                    dflash_envelopes(planned.min, planned.max, draft_window), target_envelope,
-                    profile.definition);
+                    execution::capture_dflash_decode_batch(
+                        dflash_state, static_cast<std::int32_t>(batch_size), draft_window,
+                        dflash_envelopes(planned.min, planned.max, draft_window), target_envelope,
+                        profile.definition, selected_drafts);
+                    observe();
+                }
             }
         }
     }
 
     if (!ordinary_graphs.profiles.empty()) {
-        instantiate_graph_family(ordinary_graphs, "ordinary", device, prepare_representative);
+        instantiate_graph_family(ordinary_graphs, "ordinary", device, prepare_representative, observe);
     }
     if (speculative_backend == SpeculativeBackend::Mtp) {
-        instantiate_graph_family(mtp_graphs, "MTP", device, prepare_representative);
+        instantiate_graph_family(mtp_graphs, "MTP", device, prepare_representative, observe);
     }
     if (is_masked_draft_backend(speculative_backend)) {
-        instantiate_graph_family(dflash_graphs, "DFlash", device, prepare_representative);
+        if (speculative_routing.mode == SpeculativeRoutingMode::Calibrated) {
+            for (std::size_t i = 0; i < calibrated_dflash_graphs.size(); ++i) {
+                capture_target_drafts = runtime::kCalibratedDraftActions[i];
+                instantiate_graph_family(calibrated_dflash_graphs[i], "calibrated DFlash", device,
+                                         prepare_representative, observe, true);
+            }
+        } else {
+            instantiate_graph_family(dflash_graphs, "DFlash", device, prepare_representative, observe);
+        }
     }
 
+    const auto count_family = [&](const DecodeGraphFamily& family) {
+        for (const auto& profile : family.profiles) {
+            graph_definition_count += profile.definition.ready() ? 1U : 0U;
+        }
+        for (const auto& topology : family.topologies) {
+            graph_executable_count += topology.executable.ready() ? 1U : 0U;
+        }
+    };
+    count_family(ordinary_graphs);
+    count_family(mtp_graphs);
+    count_family(dflash_graphs);
+    for (const auto& family : calibrated_dflash_graphs) { count_family(family); }
+    observe();
     clear_stable_controls();
     state_images->zero_all(device.stream);
     if (dflash) {
@@ -471,6 +517,7 @@ void ProgramImpl::prepare_graphs() {
         release_capture_rows(*backend_kv_addresses, mtp_capture_allocations);
     }
     release_capture_rows(*text_kv_addresses, text_capture_allocations);
+    observe();
 }
 
 

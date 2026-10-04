@@ -247,15 +247,15 @@ struct FoldEffects {
                    std::int32_t) {}
 };
 
-template <class StateT = float>
+template <class ReadStateT = float, class WriteStateT = ReadStateT>
 struct DirectAccess {
     const __nv_bfloat16* q;
     const __nv_bfloat16* k;
     const __nv_bfloat16* v;
     const float* g;
     const float* beta;
-    const StateT* state_read;
-    StateT* state_write;
+    const ReadStateT* state_read;
+    WriteStateT* state_write;
     __nv_bfloat16* out;
     head_map heads;
     std::int32_t width;
@@ -271,12 +271,12 @@ struct DirectAccess {
         return token;
     }
 
-    __device__ __forceinline__ const StateT*
+    __device__ __forceinline__ const ReadStateT*
     state_read_base(const RecurrentCoordinates& coord) const {
         return state_read + static_cast<std::int64_t>(coord.value_head) * kStateDim * kStateDim;
     }
 
-    __device__ __forceinline__ StateT* state_write_base(const RecurrentCoordinates& coord) const {
+    __device__ __forceinline__ WriteStateT* state_write_base(const RecurrentCoordinates& coord) const {
         return state_write + static_cast<std::int64_t>(coord.value_head) * kStateDim * kStateDim;
     }
 
@@ -804,16 +804,16 @@ __device__ __forceinline__ void zero_output_suffix(const Access& access,
     }
 }
 
-template <bool NormalizeInputs, class StateT>
+template <bool NormalizeInputs, class ReadStateT, class WriteStateT = ReadStateT>
 __global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
     recurrent_bf16_direct_kernel(const __nv_bfloat16* __restrict__ q,
                                  const __nv_bfloat16* __restrict__ k,
                                  const __nv_bfloat16* __restrict__ v, const float* __restrict__ g,
                                  const float* __restrict__ beta,
-                                 const StateT* __restrict__ state_read,
-                                 StateT* __restrict__ state_write, __nv_bfloat16* __restrict__ out,
+                                 const ReadStateT* __restrict__ state_read,
+                                 WriteStateT* __restrict__ state_write, __nv_bfloat16* __restrict__ out,
                                  std::int32_t width, head_map heads, float scale) {
-    const DirectAccess<StateT> access{q,     k,          v,   g,     beta, state_read,
+    const DirectAccess<ReadStateT, WriteStateT> access{q,     k,          v,   g,     beta, state_read,
                                       state_write, out, heads, width, scale};
     const RecurrentCoordinates coord = access.coordinates();
     __align__(16) float state[kDvPerWarp][kQkPerLane];
@@ -856,6 +856,75 @@ __device__ __forceinline__ RawQkLane staged_qk_lane(const __nv_bfloat16 (&row)[k
     out.value[2]    = hi.x;
     out.value[3]    = hi.y;
     return out;
+}
+
+// The tile changes only operand loading. State and the FP32 transition/readout sequence remain
+// resident and identical across tile and call boundaries; no BF16 state or normalized staging.
+template <bool NormalizeInputs, class ReadStateT, class WriteStateT>
+__global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
+    recurrent_staged_direct_kernel(const __nv_bfloat16* __restrict__ q,
+                                   const __nv_bfloat16* __restrict__ k,
+                                   const __nv_bfloat16* __restrict__ v,
+                                   const float* __restrict__ g, const float* __restrict__ beta,
+                                   const ReadStateT* __restrict__ state_read,
+                                   WriteStateT* __restrict__ state_write,
+                                   __nv_bfloat16* __restrict__ out, std::int32_t width,
+                                   head_map heads, float scale) {
+    const DirectAccess<ReadStateT, WriteStateT> access{
+        q, k, v, g, beta, state_read, state_write, out, heads, width, scale};
+    const RecurrentCoordinates coord = access.coordinates();
+    __shared__ RecordStage stage;
+    constexpr int kThreads = kWarpSize * kNumWarps;
+    constexpr int kRowChunks = kStateDim * sizeof(__nv_bfloat16) / 16;
+    constexpr int kValueChunks = kBlockDv * sizeof(__nv_bfloat16) / 16;
+    const int tid = coord.warp * kWarpSize + coord.lane;
+    __align__(16) float state[kDvPerWarp][kQkPerLane];
+    load_state_tile(state, access.state_read_base(coord), coord);
+    for (int begin = 0; begin < width;) {
+        const int remaining = width - begin;
+        const int count = remaining < kRecordMaxTokens ? remaining : kRecordMaxTokens;
+        for (int i = tid; i < count * kRowChunks; i += kThreads) {
+            const int token = i / kRowChunks;
+            const int offset = (i - token * kRowChunks) * 8;
+            cp_async<16>(&stage.key[token][offset], access.key_ptr(coord, begin + token) + offset);
+            cp_async<16>(&stage.query[token][offset],
+                         access.query_ptr(coord, begin + token) + offset);
+        }
+        for (int i = tid; i < count * kValueChunks; i += kThreads) {
+            const int token = i / kValueChunks;
+            const int offset = (i - token * kValueChunks) * 8;
+            cp_async<16>(&stage.value[token][offset],
+                         access.value_ptr(coord, begin + token) + coord.state_tile * kBlockDv + offset);
+        }
+        if (tid < count) {
+            const RawGatePair gate = access.load_gate(coord, begin + tid);
+            stage.g[tid] = gate.g;
+            stage.beta[tid] = gate.beta;
+        }
+        cp_commit();
+        cp_wait<0>();
+        __syncthreads();
+        RawQkLane key = staged_qk_lane(stage.key[0], coord.dqk_base);
+        normalize_qk_lane<NormalizeInputs>(key.value, coord.lane);
+        for (int token = 0; token < count; ++token) {
+            RawValueLane value{__float2bfloat16(0.0f), 0.0f};
+            if (coord.lane < kDvPerWarp) {
+                value.bits = stage.value[token][coord.warp * kDvPerWarp + coord.lane];
+                value.value = __bfloat162float(value.bits);
+            }
+            apply_gdn_transition(state, key.value, value.value, stage.g[token], stage.beta[token]);
+            if (token + 1 < count) {
+                key = staged_qk_lane(stage.key[token + 1], coord.dqk_base);
+                normalize_qk_lane<NormalizeInputs>(key.value, coord.lane);
+            }
+            readout_and_store<NormalizeInputs>(state, stage.query[token],
+                access.output_ptr(coord, begin + token), coord.dqk_base, coord.dv_base,
+                coord.lane, access.scale);
+        }
+        __syncthreads(); // All readers finish before the next tile overwrites shared operands.
+        begin += count;
+    }
+    store_state_tile(state, access.state_write_base(coord), coord);
 }
 
 template <bool Masked, class StateT>

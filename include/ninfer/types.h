@@ -103,6 +103,7 @@ enum class SpeculativeBackend : std::uint8_t {
 enum class SpeculativeRoutingMode : std::uint8_t {
     Fixed,
     Stair,
+    Calibrated,
 };
 
 enum class SpeculativeRouterScope : std::uint8_t {
@@ -171,6 +172,8 @@ inline constexpr std::size_t kSpeculativeStairLevels = 4;
 // its own verify staircase. Fixed mode is the default and preserves the pre-router behavior.
 struct SpeculativeRoutingOptions {
     SpeculativeRoutingMode mode = SpeculativeRoutingMode::Fixed;
+    // Calibrated mode loads a strict, machine/configuration-specific routing table at startup.
+    std::filesystem::path profile_path;
     // Request preserves the original A/B behavior. Engine reuses observed chain/tree economics
     // across requests. A nonempty state_path also restores/saves that engine state across restarts.
     SpeculativeRouterScope scope = SpeculativeRouterScope::Request;
@@ -244,6 +247,27 @@ struct StartupObserver {
     // Startup diagnostics never participate in Engine control flow. Callback exceptions are
     // ignored by the publishing boundary so a logging failure cannot invalidate model startup.
     std::function<void(const StartupEvent& event)> callback;
+};
+
+// One successfully settled compact decode batch. Callback publication is outside elapsed_ns.
+struct DecodeRoundEvent {
+    std::uint32_t active_batch = 0;
+    std::uint32_t max_execution_frontier = 0;
+    std::uint32_t verify_width = 1;
+    // Selected verification action K, independent of the resident drafter width.
+    std::uint32_t draft_tokens = 0;
+    SpeculativeBackend backend = SpeculativeBackend::None;
+    // Physical neural proposal query width; zero when the drafter did not execute.
+    std::uint32_t proposal_width = 0;
+    bool neural_drafter_executed = false;
+    std::uint64_t committed_tokens = 0;
+    std::uint64_t elapsed_ns = 0;
+};
+
+struct DecodeRoundObserver {
+    // Invoked serially on the Engine worker after commit/output publication. Exceptions are
+    // ignored. The observer must not wait for work on the same Engine worker.
+    std::function<void(const DecodeRoundEvent& event)> callback;
 };
 
 struct ContextCacheOptions {
@@ -359,6 +383,7 @@ struct EngineOptions {
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;
+    DecodeRoundObserver decode_round_observer;
 };
 
 enum class SamplingMode : std::uint8_t {
@@ -1089,6 +1114,13 @@ struct MemorySummary {
     std::size_t planned_slack_bytes               = 0;
     std::size_t workspace_logical_peak_bytes      = 0;
     std::size_t cuda_graph_allowance_bytes        = 0;
+    std::uint64_t cuda_graph_definition_count      = 0;
+    std::uint64_t cuda_graph_executable_count      = 0;
+    // Startup cudaMemGetInfo observations relative to graph preparation begin. These include
+    // driver/module allocations and can be affected by other GPU processes; they are not an
+    // exact account of Program-owned allocation. No observations occur during ordinary decode.
+    std::size_t cuda_graph_prepare_peak_device_delta_bytes = 0;
+    std::size_t cuda_graph_prepare_device_delta_bytes = 0;
     std::size_t kv_payload_bytes                  = 0;
     std::uint32_t host_state_capacity_slots       = 0;
     std::uint32_t host_state_occupied_slots       = 0;
@@ -1135,6 +1167,14 @@ struct RuntimeStats {
     // Decode batch executions and the sum of their batch sizes.
     std::uint64_t decode_rounds             = 0;
     std::uint64_t decode_row_rounds         = 0;
+    // Successful settled Calibrated rounds, including fixed sampling fallbacks. Other routing
+    // modes leave these counters at zero. Switches compare consecutive settled actual actions.
+    std::uint64_t calibrated_target_only_rounds    = 0;
+    std::uint64_t calibrated_k7_rounds             = 0;
+    std::uint64_t calibrated_k11_rounds            = 0;
+    std::uint64_t calibrated_k15_rounds            = 0;
+    std::uint64_t calibrated_route_switches        = 0;
+    std::uint64_t calibrated_fixed_fallback_rounds = 0;
     std::uint32_t running_requests          = 0;
     std::uint32_t prefilling_requests       = 0;
     std::uint32_t decode_ready_requests     = 0;
@@ -1235,7 +1275,66 @@ struct ContextCostSummary {
     std::filesystem::path preset_path;
 };
 
+// Effective execution options are part of a calibration's identity, independently of the
+// stored model's prefill signature. These values describe loaded operands and execution cost.
+struct SpeculativeRoutingExecutionOptions {
+    bool lm_head_q4 = false;
+    bool lm_head_q6 = false;
+    bool embedding_q4 = false;
+    bool embedding_q6 = false;
+    bool gdn_state_fp16 = false;
+    bool mlp_a8_decode = false;
+    bool prefill_a8 = true;
+    bool prefill_cublas = false;
+    bool prefill_cublas_projections = true;
+    bool mtp_experts_q4 = false;
+    bool enable_vision = false;
+    VisionResidency vision_residency = VisionResidency::Resident;
+    std::uint32_t vision_max_merged_tokens = 16384;
+    float rope_scaling_factor = 1.0F;
+    std::uint32_t rope_scaling_original_context = 262144;
+
+    [[nodiscard]] friend bool operator==(const SpeculativeRoutingExecutionOptions&,
+                                         const SpeculativeRoutingExecutionOptions&) = default;
+};
+
+struct SpeculativeRoutingContextCacheIdentity {
+    bool enabled = true;
+    std::uint32_t extra_device_state_slots = 0;
+    std::uint32_t host_state_slots = 0;
+    std::uint64_t host_kv_capacity_bytes = 0;
+    std::uint32_t max_private_continuations = 0;
+    std::uint32_t max_shared_prefixes = 0;
+    std::uint32_t max_long_anchors_per_continuation = 0;
+    std::uint32_t max_cache_markers_per_request = 0;
+
+    [[nodiscard]] friend bool operator==(const SpeculativeRoutingContextCacheIdentity&,
+                                         const SpeculativeRoutingContextCacheIdentity&) = default;
+};
+
+struct SpeculativeRoutingProfileIdentity {
+    // Artifact directory UUID, encoded as 32 lowercase hexadecimal characters.
+    std::string artifact_id;
+    std::string prefill_signature;
+    std::string hardware_class;
+    SpeculativeBackend backend = SpeculativeBackend::DFlash2;
+    KvCacheStorage kv_storage = KvCacheStorage::BFloat16;
+    std::uint32_t startup_draft_tokens = 15;
+    ProposalHead proposal_head = ProposalHead::Full;
+    bool use_cuda_graph = true;
+    std::uint32_t max_concurrency = 1;
+    std::uint32_t max_context = 0;
+    std::uint32_t prefill_chunk = 0;
+    std::uint32_t resolved_kv_capacity = 0;
+    SpeculativeRoutingContextCacheIdentity context_cache;
+    SpeculativeRoutingExecutionOptions execution_options;
+
+    [[nodiscard]] friend bool operator==(const SpeculativeRoutingProfileIdentity&,
+                                         const SpeculativeRoutingProfileIdentity&) = default;
+};
+
 struct LoadSummary {
+    std::optional<SpeculativeRoutingProfileIdentity> speculative_routing_identity;
     std::string architecture;
     std::string model_name;
     std::vector<std::string> weight_formats;

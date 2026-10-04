@@ -46,6 +46,179 @@ keeps the requested token count exact without adding another generation path. Wh
 enabled and the matrix contains decode work, one ordinary public generation request primes the
 decode graph before warmups and measured repetitions.
 
+## DFlash2 route calibration measurements
+
+Use `tools.bench.run_spec_router_matrix` for a resumable fixed/resident/Auto
+campaign. Its explicit JSON plan lists workloads, startup settings, physical
+GPUs, output roots and existing evidence. The default invocation is a CPU-only
+dry run; `--execute` runs the missing comparisons. A complete comparison is
+the resume unit: two AB/BA pairs for fixed/resident, or two three-arm pairs for
+Auto. Interrupted comparisons retain their old attempt and restart as a whole;
+arms from separate attempts are never joined for performance qualification.
+
+Reuse requires matching executable/model hashes, prompt bytes, startup and
+sampling configuration, measurement settings and, for Auto, profile bytes.
+Raw responses, commands and memory sidecars are checked again. Correct results
+without a performance gain are completed measurements and are skipped too.
+Correctness failures block dependent stages rather than being silently retried.
+Legacy imports require explicit audit evidence and an operator attestation;
+missing historical model hashes and validation fingerprints remain documented
+limitations. Deferred suites are reported without reading running outputs.
+
+```bash
+/home/fofo/.local/bin/python3.11 -m tools.bench.run_spec_router_matrix \
+  --plan /absolute/path/to/matrix-plan.json
+```
+
+A plan uses absolute paths and explicit selections. For example:
+
+```json
+{
+  "schema_version": 1,
+  "artifact_type": "ninfer_spec_router_matrix_plan",
+  "suites": [{
+    "id": "fixed-chat", "kind": "fixed", "state": "ready", "depends_on": [],
+    "exe": "/opt/ninfer-4090/build/bench/ninfer_spec_router_calibration_bench",
+    "model": "/opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer",
+    "gpu": {"physical": 0, "cuda_visible_devices": "0", "device": 0},
+    "options": {
+      "workloads": ["chat"], "concurrency": [1], "draft_tokens": [7, 11, 15],
+      "pairs": 2, "repeats": 2, "max_tokens": 512, "max_context": 32768,
+      "kv_capacity": 32768, "engine_concurrency": 8,
+      "cooldown": 2, "memory_sample_seconds": 0.05
+    },
+    "output_root": "/tmp/ninfer-fixed-chat-matrix", "existing_evidence": null
+  }]
+}
+```
+
+`resident` options also require `prime`, `workload_label_prefix` and
+`prompt_dir` (an absolute directory or `null` for built-in prompts). `auto`
+replaces `draft_tokens` with `fixed_draft_tokens` and `profile` (an absolute
+qualified profile path). Use `state: "deferred"` for stages whose inputs are
+not ready; a deferred Auto profile may be `null`. `depends_on` lists suite IDs
+and requires all their comparisons to pass correctness before execution.
+`--suite ID` selects a stage, while `--report PATH` retains the inventory.
+Add `--execute` to the dry-run command when ready to measure missing items.
+Use `--retry-failed` only for an intentional retry of failed comparisons.
+
+Existing campaigns can be imported with `existing_evidence` containing absolute
+`campaign_root`, `audit_path` and `attestation_path`. The attestation binds the
+audit SHA, historical executable SHA/path and the operator-confirmed model
+SHA/path, with explicit legacy limitations. Current raw validation decides
+reuse; a saved success flag alone is insufficient. Changes confined to host
+validation code trigger raw revalidation without repeating GPU measurements.
+
+`ninfer_spec_router_calibration_bench` measures chat generation through the
+public Engine with INT8 KV, greedy zero-penalty sampling, prefix reuse and CUDA
+Graphs enabled. It submits concurrent requests, records each completed request's
+full token/output identity and latency, and observes actual compact decode rounds.
+Client concurrency is an input; only `DecodeRoundEvent.active_batch` establishes
+actual batch coverage. Each event includes maximum execution frontier, physical
+verification/proposal widths, drafter execution, settled commits and complete
+Engine round wall time. The observer adds no device synchronization and remains
+unset in ordinary execution.
+
+The Python driver retains two AB/BA pairs by default and rejects unstable or
+mismatching outputs before reporting qualified performance. Request throughput
+and p50/p95 latency include submission through completion. Round throughput and
+p50/p95 are reported separately by actual batch/frontier. Device memory sampling
+is an observed lower bound with a recorded interval; it is distinct from Engine
+logical/allocator peaks. A measurement report is not a routing profile, and
+unobserved cells provide no policy qualification.
+
+```bash
+cmake --build build -j --target ninfer_spec_router_calibration_bench
+CUDA_VISIBLE_DEVICES=0 /home/fofo/.local/bin/python3.11 \
+  -m tools.bench.run_spec_router_calibration \
+  --exe build/bench/ninfer_spec_router_calibration_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out /tmp/ninfer-fixed-calibration --nvml-device 0 \
+  --max-context 32768 --kv-capacity 32768
+```
+
+Use an explicit physical NVML index/UUID for memory sampling and a CUDA-visible
+ordinal for `--device`. Select capacity to admit the represented concurrent
+prompts; context size is per request, while the KV pool serves all resident
+requests. Keep workload inputs and startup configuration paired. Standalone
+fixed K7/K11 measurements do not establish the cost of selecting those actions
+with the maximum K15 drafter resident.
+
+Resident-action comparisons use the complete public startup identity and forced
+action profiles. Their raw records include a consecutive measurement-local
+`round_index`, complete responses, wave wall times and actual physical actions.
+Convert the paired `ninfer_resident_router_measurements` document into an
+audited execution profile with:
+
+```bash
+/home/fofo/.local/bin/python3.11 -m tools.bench.calibrated_router_profile \
+  --input /tmp/ninfer-resident-measurements.json \
+  --output /tmp/ninfer-spec-router.json
+```
+
+The generator applies the [calibrated qualification rules](../docs/maintainer/speculative-routing.md#profile-contract),
+records all retained comparisons and rejects fabricated coverage. It accepts
+resident-K15 measurements, not the standalone fixed-route summary above.
+Full Engine round time and submission-to-response wave time have different end
+boundaries and are reported separately; the final stats publication can follow
+response readiness. Uncovered or unprofitable cells explicitly select zero.
+When merging resident campaigns, use a distinct `--workload-label-prefix` for
+each prompt suite. Comparison labels include requested client concurrency to
+avoid collisions when different submissions produce the same actual batch;
+labels never establish batch or frontier coverage.
+
+The resident driver exports a public startup identity with `--identity-only`,
+then measures target-only and K7/K11/K15 using constant action profiles with
+the K15 drafter resident. Explicitly choose `--prime-prefix` or
+`--no-prime-prefix`; priming runs a separate 16-token request and waits for
+its settled round publication before starting measured waves. Primer responses,
+rounds and time remain in the raw report but do not enter measured throughput.
+The resident wrapper is `ninfer_resident_router_measurement`; it carries
+`record`, `resources` and `priming`, separate from fixed-route reports.
+
+```bash
+/home/fofo/.local/bin/python3.11 -m tools.bench.run_resident_spec_router_calibration \
+  --exe build/bench/ninfer_spec_router_calibration_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out /tmp/ninfer-resident-calibration --nvml-device 0 \
+  --workload-label-prefix original --concurrency 1,2,4,8 \
+  --max-context 32768 --kv-capacity 131072 --prime-prefix
+```
+
+Use `--prompt-dir PATH` for explicit UTF-8 workload variants. For supplemental
+batch coverage, request C1 through C8 and check the observed cells; requested
+concurrency alone never qualifies a policy entry. These commands collect
+measurements, not a prequalified profile.
+
+After correctness acceptance and profile qualification, compare automatic
+routing against true target-only and a selected standalone fixed K:
+
+```bash
+/home/fofo/.local/bin/python3.11 -m tools.bench.run_auto_spec_router_comparison \
+  --exe build/bench/ninfer_spec_router_calibration_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --profile /tmp/ninfer-router-profile.json --out /tmp/ninfer-auto-comparison \
+  --fixed-draft-tokens 7 --concurrency 1,2,4,8 --nvml-device 0 \
+  --max-context 32768 --kv-capacity 131072
+```
+
+Each retained pair runs fresh Engine processes in None/fixed/Auto order and
+then the reverse order. All arms use natural repeated-prefix reuse without
+an explicit primer. Generation-wave timing includes prefill and decode,
+excluding model startup and prompt preparation. Full token IDs and complete
+responses must agree across arms, repeats and pairs before performance is
+qualified. Auto is compared separately against bare None and fixed K; resident
+calibrated action zero is a different execution cost.
+
+The native `--allow-route-switching` flag requires `--spec-router-profile` and
+excludes explicit `--draft-tokens`. Its `ninfer_auto_router_measurement` wrapper
+records mixed actions and the loader's normalized table. The comparison driver
+preserves profile bytes/hash, raw commands, per-round actual batch/frontier,
+physical widths, cache sources, latency, Engine memory and sampled device-wide
+memory. Published counters may lag response readiness; raw round counts are
+reported independently. Missing coverage selects target-only. A correctness
+failure or insufficient speed/latency benefit cannot qualify a gain.
+
 ## CLI
 
 ```text
@@ -421,28 +594,19 @@ cmake --build build -j --target ninfer_dynamic_grouped_conv_prepare_bench
 
 `ninfer_gated_delta_net_bench` measures the BF16 Gated DeltaNet contract with state/head dimension
 128, production Q/K normalization, and any positive, divisible `value_heads >= qk_heads` mapping.
-Running/chunked modes use batch 1; snapshot mode accepts exact `B=1..8` and optional mixed valid
+Running mode uses batch 1; snapshot mode accepts exact `B=1..8` and optional mixed valid
 prefixes. Every measurement is a CUDA Graph replay preceded by a 256 MiB L2 flush outside the timed
 interval.
 
-`--running` measures the public running-state entry across recurrent-only, complete 64-token
-chunks, and chunked-plus-recurrent-tail routes. `--snapshot` measures the snapshot entry over the
+`--running` measures the public running-state entry using the same FP32 transition
+at every positive width, within one persistent kernel. `--snapshot` measures the snapshot entry over the
 production `W=1..16` batch range; `--qk-norm composed` retains the B=1 two-L2Norm comparison.
-`--chunked-only` measures the complete pre-normalized BF16 pipeline through the public Op. Adding
-`--breakdown` reports isolated `prepare_wy_wu`, `state_passing`, and `output` stage timings. These
-three intrinsic algorithm stages are the benchmark's sole private-launcher exception; the complete
-pipeline and every other mode remain public-contract calls.
-`stage_share_pct` partitions the sum of isolated-stage medians. Each isolated stage receives its own
-cold-L2 flush, so `relative_to_e2e_pct` is informative but is not an additive partition of the
-pipeline latency.
 
 `logical_bytes` and `logical_gbps` count each contract-visible tensor and state transfer once.
-`traffic_bytes` and `traffic_gbps` instead sum one full tensor extent for every kernel input and
-output in the selected implementation. This includes repeated consumption by different kernels,
-the composed or public chunked Q/K-normalization intermediates, and every producer/consumer access
-to chunked `g_cumsum`, W, U, `v_new`, and `h_chunk`. `intermediate_traffic_bytes` isolates those
-normalization and chunked-workspace accesses. These deterministic byte counts describe
-implementation-level tensor traffic; physical DRAM/L2 sectors and cache reuse still require NCU.
+They do not count physical DRAM/L2 sectors, repeated CTA consumption or cache
+reuse; those require profiling. Inputs use deterministic synthetic values and
+zero initial state, so these are shape-specific Op costs rather than real-model
+performance measurements.
 
 ```bash
 cmake --build build --parallel --target ninfer_gated_delta_net_bench
@@ -451,7 +615,7 @@ cmake --build build --parallel --target ninfer_gated_delta_net_bench
 ./build/bench/ninfer_gated_delta_net_bench \
   --snapshot --value-heads 32 --qk-norm fused --warmup 20 --repeat 100 --csv
 ./build/bench/ninfer_gated_delta_net_bench \
-  --chunked-only --value-heads 32 --tokens 1024 --breakdown \
+  --running --value-heads 48 --tokens 1024 \
   --warmup 20 --repeat 100
 ```
 

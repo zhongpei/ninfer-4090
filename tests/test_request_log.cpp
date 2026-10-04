@@ -680,9 +680,34 @@ int main() {
             single_decode_pretty.find("prefill") == std::string::npos &&
             single_decode_pretty.find("waiting") == std::string::npos,
         "single-request pretty throughput is noisy or incomplete");
+    throughput.previous.calibrated_target_only_rounds = 2;
+    throughput.current.calibrated_target_only_rounds = 11;
+    throughput.current.calibrated_k7_rounds = 12;
+    throughput.current.calibrated_k11_rounds = 13;
+    throughput.current.calibrated_k15_rounds = 14;
+    throughput.current.calibrated_route_switches = 15;
+    throughput.current.calibrated_fixed_fallback_rounds = 16;
     const Json throughput_json =
         Json::parse(format_throughput_json("serve-test", 5000, throughput));
     failures += check(throughput_json.at("event") == "throughput", "throughput event mismatch");
+    const std::vector<std::pair<std::string, std::uint64_t>> route_counts = {
+        {"calibrated_target_only_rounds", 11}, {"calibrated_k7_rounds", 12},
+        {"calibrated_k11_rounds", 13}, {"calibrated_k15_rounds", 14},
+        {"calibrated_route_switches", 15}, {"calibrated_fixed_fallback_rounds", 16}};
+    for (const auto& [name, value] : route_counts) {
+        failures += check(throughput_json.contains("speculative_routing") &&
+                              throughput_json["speculative_routing"].contains(name) &&
+                              throughput_json["speculative_routing"][name] == value,
+                          "calibrated cumulative route counter missing or incorrectly serialized");
+    }
+    const Json default_routing = Json::parse(format_throughput_json("serve-test", 5002, ThroughputReport{}));
+    for (const auto& [name, value] : route_counts) {
+        (void)value;
+        failures += check(default_routing.contains("speculative_routing") &&
+                              default_routing["speculative_routing"].contains(name) &&
+                              default_routing["speculative_routing"][name] == 0,
+                          "default fixed/stair calibrated counter is not zero");
+    }
     failures += check(throughput_json.at("tokens").at("computed_prefill") == 100 &&
                           throughput_json.at("tokens").at("committed_decode") == 40,
                       "throughput token deltas mismatch");

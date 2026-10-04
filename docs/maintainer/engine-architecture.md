@@ -525,6 +525,9 @@ ResourceManager 与完成所有 request response。内部不变量错误不能�
 - growing KV 由共享 paged pools 支持，active request 持有完整增长 reservation；
 - 一个 GPU execution unit 内 State/KV mapping 保持稳定；
 - CUDA Graph 按合法 exact-`B` topology 建立，request identity 和 page IDs 是稳定输入数据，不是 graph key；
+- calibrated DFlash2 的物理 target width 是执行 topology 的一部分；Program 在上一轮完整提交后
+  为整个 compact batch 按实际 `B` 和最大 execution frontier 选动作，pending replay/commit 保留
+  前一轮实际宽度，不能用下一轮的较窄 view 截断尚未折叠的 features；
 - ordinary decode 不运行 catalog scan、pressure search 或后台 replica scan；
 - workspace 是 Program 启动时统一规划的 backing，Vision、Text 和 speculative schedule 按互斥 lifetime
   使用其内部区域。

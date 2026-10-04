@@ -2,6 +2,7 @@
 #include "core/device.h"
 
 #include "ops/op_tester.h"
+#include "ops/gdn_ref.h"
 
 #include <algorithm>
 #include <bit>
@@ -11,6 +12,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace ninfer;
@@ -155,7 +157,7 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
     launch_reference();
     launch_record();
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    if (width == 2 || width == 9 || width == 16) {
+    if (width == 1 || width == 2 || width == 9 || width == 16) {
         cudaGraph_t graph;
         cudaGraphExec_t executable;
         CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
@@ -191,6 +193,37 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
         from_device<std::uint16_t>(record_out, value_elements);
     failures +=
         verify_equal("replay record output" + suffix, reference_output_bits, record_output_bits);
+    if (width == 1) {
+        for (int row = 0; row < batch; ++row) {
+            gdn_ref::Inputs input;
+            input.head_dim = kStateDim;
+            input.qk_heads = kQkHeads;
+            input.value_heads = value_heads;
+            input.tokens = 1;
+            const auto decode = [&](const std::vector<std::uint16_t>& bits, int count) {
+                std::vector<float> values(count);
+                for (int i = 0; i < count; ++i) {
+                    values[i] = bf16_to_f32(bits[std::size_t(row) * count + i]);
+                }
+                return values;
+            };
+            input.q = decode(q_bits, kStateDim * kQkHeads);
+            input.k = decode(k_bits, kStateDim * kQkHeads);
+            input.v = decode(v_bits, kStateDim * value_heads);
+            input.g.assign(g.begin() + row * value_heads, g.begin() + (row + 1) * value_heads);
+            input.beta.assign(beta.begin() + row * value_heads, beta.begin() + (row + 1) * value_heads);
+            const std::size_t slot_size = std::size_t(kStateDim) * kStateDim * value_heads;
+            const std::size_t state_offset = std::size_t(initial_slots[row]) * slot_size;
+            input.state.assign(state.begin() + state_offset, state.begin() + state_offset + slot_size);
+            const auto oracle = gdn_ref::evaluate(input, kScale, true);
+            const auto represented_output = decode(record_output_bits, kStateDim * value_heads);
+            const std::vector<double> actual(represented_output.begin(), represented_output.end());
+            const ReductionCriterion output_criterion{4.1e-3, 5.0e-6, kBf16GrossRelativeFloor};
+            failures += verify_reduction(("replay record FP64 output" + suffix).c_str(),
+                                         actual, oracle.out, output_criterion);
+        }
+    }
+
 
     const std::vector<std::uint16_t> key_bits_after =
         from_device<std::uint16_t>(key_record, qk_elements);
@@ -267,17 +300,33 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
 
     int failures = 0;
+    try {
+        for (int batch = 1; batch <= 8; ++batch) {
+            failures += run_case(48, 1, batch, {}, 1900U + batch);
+        }
+        failures += run_case(32, 1, 1, {}, 1921U);
+        failures += run_case(32, 1, 8, std::vector<std::int32_t>(8, 1), 1928U);
+    } catch (const std::exception& error) {
+        std::cerr << "FAIL replay record T1 oracle: " << error.what() << '\n';
+        return 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--t1-oracle-only") {
+        std::cout << (failures == 0 ? "OK" : "FAIL") << " gated_delta_net_replay_record T1 oracle\n";
+        return failures == 0 ? 0 : 1;
+    }
     failures += run_case(32, 2, 1, {}, 1701U);
     failures += run_case(32, 16, 1, {7}, 1711U);
     failures += run_case(32, 6, 8, {6, 5, 4, 3, 2, 1, 6, 2}, 1721U);
+    const bool domain_only = argc == 2 && std::string_view(argv[1]) == "--record-domain-regression-only";
     for (int width = 2; width <= 16; ++width) {
+        if (domain_only && width != 2 && width != 16) { continue; }
         failures += run_case(48, width, 1, {}, 1730U + width);
         std::vector<std::int32_t> valid(8);
         for (int b = 0; b < 8; ++b) valid[b] = b == 0 ? width : 1 + (3 * b) % width;

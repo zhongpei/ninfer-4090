@@ -74,11 +74,11 @@ void launch_record_small_t(const Tensor& x, const Weight& weight, const Tensor& 
                                  stream);
 }
 
-void launch_snapshot_decode(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
-                            Tensor& conv_states, const Tensor& valid_columns,
-                            const Tensor& initial_slot, const Tensor& snapshot_base_slot,
-                            Tensor& query, Tensor& key, Tensor& value, Tensor& z,
-                            cudaStream_t stream) {
+template <class Publish>
+void launch_decode(const Tensor& x, const Weight& weight, const Tensor& conv_weight,
+                   const Tensor& conv_states, const Tensor& valid_columns,
+                   const Tensor& initial_slot, Tensor& query, Tensor& key,
+                   Tensor& value, Tensor& z, Publish publish, cudaStream_t stream) {
     using Schedule        = Fp8GemvSchedule<8, 2, 8, 4, Fp8CodeCache::Default, 2, 2>;
     constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
     fp8_gemv_kernel<Geometry, Schedule><<<kBlocks, Schedule::kThreads, 0, stream>>>(
@@ -86,9 +86,7 @@ void launch_snapshot_decode(const Tensor& x, const Weight& weight, const Tensor&
         static_cast<const __nv_bfloat16*>(weight.scales),
         make_gdn_conv_output<1>(
             conv_weight, conv_states, valid_columns, initial_slot, query, key, value, z,
-            SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
-                                   static_cast<const std::int32_t*>(snapshot_base_slot.data),
-                                   kGdnChannels}));
+            publish));
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -118,8 +116,10 @@ void fp8_gdn_snapshot_fused_launch(const Tensor& x, const Weight& weight, const 
         throw std::invalid_argument("fp8 GDN snapshot fused: unsupported B/W");
     }
     if (x.ne[1] == 1) {
-        launch_snapshot_decode(x, weight, conv_weight, conv_states, valid_columns, initial_slot,
-                               snapshot_base_slot, query, key, value, z, stream);
+        launch_decode(x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key,
+                      value, z, SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
+                                                      static_cast<const std::int32_t*>(snapshot_base_slot.data),
+                                                      kGdnChannels}, stream);
         return;
     }
     kSnapshotLaunchers[static_cast<std::size_t>(x.ne[1] - 2)](
@@ -131,8 +131,14 @@ void fp8_gdn_record_fused_launch(const Tensor& x, const Weight& weight, const Te
                                  const Tensor& conv_states, const Tensor& valid_columns,
                                  const Tensor& initial_slot, Tensor& conv_record, Tensor& query,
                                  Tensor& key, Tensor& value, Tensor& z, cudaStream_t stream) {
-    if (x.ne[2] != 1 || x.ne[1] < 2 || x.ne[1] > 10) {
+    if (x.ne[2] != 1 || x.ne[1] < 1 || x.ne[1] > 10) {
         throw std::invalid_argument("fp8 GDN record fused: unsupported B/W");
+    }
+    if (x.ne[1] == 1) {
+        launch_decode(x, weight, conv_weight, conv_states, valid_columns, initial_slot, query, key,
+                      value, z, RecordColumnPublish{static_cast<__nv_bfloat16*>(conv_record.data),
+                                                   kGdnChannels, 1}, stream);
+        return;
     }
     kRecordLaunchers[static_cast<std::size_t>(x.ne[1] - 2)](
         x, weight, conv_weight, conv_states, valid_columns, initial_slot, conv_record, query, key,

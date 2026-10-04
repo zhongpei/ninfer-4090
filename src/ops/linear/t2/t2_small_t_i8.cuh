@@ -7,8 +7,9 @@
 // holds the text layers near 550-630 GB/s. Here the same tile takes a quarter of that time and the
 // code unpack is four prmt per sixteen weights instead of sixteen.
 //
-// Layout follows v2: eight warps per CTA, KWarps of them split every K slab (64 k per code word a
-// lane takes), the CTA covers 8 / KWarps sets of TilesPerWarp sixteen-row tiles; codes and scales
+// Each exact integer dot covers an absolute 64-k group. Buffered schedules compute a bounded
+// group window in parallel; sequential schedules use column-tile parallelism instead. Both
+// consume those groups in absolute ascending order with the prefill FP32 fmaf sequence. Codes
 // are staged by cp.async; activations are read straight from global memory through L1. They arrive
 // quantised to s8 with one binary16 scale per (token, 64-k group), as in the integer prefill route:
 // codes [T, K] token-major, scales [K / 64, 192] group-major, so a lane's two output columns share
@@ -37,20 +38,27 @@ inline constexpr int kT2I8MaxColumns    = 192;
 inline constexpr int kT2I8LaunchColumns = 32;
 inline constexpr int kT2I8ActivationK   = 64;
 
-// WordsPerLane code words of a row per lane and slab: a warp's slice of a slab is 64 * WordsPerLane
-// k, taken as that many 64-k groups one after another.
-template <int KWarps_, int TilesPerWarp_, int ColumnTiles_, int Stages_, int MinBlocks_,
-          int WordsPerLane_ = 1>
+// Buffered integer windows parallelize group dot products; a sequential row warp avoids
+// that buffer when wider column tiles already provide enough independent tensor work.
+// Both schedules consume absolute group64 contributions in the same ascending FP32 order.
+template <bool Enabled, int Groups, int Columns> struct T2IntegerGroupWindow {};
+template <int Groups, int Columns>
+struct T2IntegerGroupWindow<true, Groups, Columns> {
+    int4 group_sums[Groups][Columns / 8][32];
+    float column_scales[Groups][Columns];
+};
+
+template <int KWarps_, int Words_, int ColumnTiles_, int MinBlocks_>
 struct T2SmallTI8Schedule {
-    static constexpr int kWarps               = 8;
+    static constexpr int kWarps               = KWarps_;
     static constexpr int kThreads             = kWarps * 32;
     static constexpr int kKWarps              = KWarps_;
-    static constexpr int kTilesPerWarp        = TilesPerWarp_;
+    static constexpr int kTilesPerWarp        = 1;
     static constexpr int kRowTiles            = kWarps / kKWarps * kTilesPerWarp;
     static constexpr int kRows                = 16 * kRowTiles;
     static constexpr int kColumnTiles         = ColumnTiles_;
     static constexpr int kColumns             = 8 * kColumnTiles;
-    static constexpr int kWords               = WordsPerLane_;
+    static constexpr int kWords               = Words_;
     static constexpr int kWarpK               = 64 * kWords;
     static constexpr int kSlabK               = kWarpK * kKWarps;
     static constexpr int kGroupsPerSlab       = kSlabK / T2RowSplitStorage::kGroupK;
@@ -59,10 +67,10 @@ struct T2SmallTI8Schedule {
     static constexpr int kCodeRowStride = kCodeBytesPerRowSlab + 16;
     static constexpr int kScaleBytesPerRowSlab =
         kGroupsPerSlab * T2RowSplitStorage::kScaleBytesPerGroup;
-    static constexpr int kStages    = Stages_;
+    static constexpr int kStages    = 2;
     static constexpr int kMinBlocks = MinBlocks_;
 
-    static_assert(kKWarps == 4 || kKWarps == 8, "T2 small-T i8 splits K over four or eight warps");
+    static_assert(kWarps == 1 || kWarps == 8, "T2 small-T i8 uses sequential or buffered groups");
     static_assert(kTilesPerWarp == 1 || kTilesPerWarp == 2 || kTilesPerWarp == 4,
                   "T2 small-T i8 gives a warp one, two or four tiles");
     static_assert(kColumnTiles == 1 || kColumnTiles == 2 || kColumnTiles == 4,
@@ -80,11 +88,8 @@ struct T2SmallTI8Schedule {
         __align__(16) std::uint8_t scales[kRows][kScaleBytesPerRowSlab];
     };
 
-    static constexpr int kPartialFloats = kWarps * kTilesPerWarp * kColumnTiles * 32 * 4;
-
-    union Shared {
+    struct Shared : T2IntegerGroupWindow<(kKWarps > 1), kKWarps * kWords, kColumns> {
         Stage stages[kStages];
-        float partial[kPartialFloats];
     };
 
     static_assert(sizeof(Shared) <= 48 * 1024,
@@ -247,25 +252,56 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void t2_s
                 }
             }
 
-            const int group_in_slab = (k_split * kWords + w) >> 1;
-#pragma unroll
-            for (int t = 0; t < kTpw; ++t) {
-                const int tile_row = (first_tile + t) * 16 + gid;
-                const float top_scale =
-                    __half2float(__ushort_as_half(*reinterpret_cast<const std::uint16_t*>(
-                        &stage.scales[tile_row][2 * group_in_slab])));
-                const float bottom_scale =
-                    __half2float(__ushort_as_half(*reinterpret_cast<const std::uint16_t*>(
-                        &stage.scales[tile_row + 8][2 * group_in_slab])));
+            if constexpr (kKW == 1) {
+                const int scale_group = w / 2;
+                const float top_scale = __half2float(__ushort_as_half(
+                    *reinterpret_cast<const std::uint16_t*>(&stage.scales[gid][2 * scale_group])));
+                const float bottom_scale = __half2float(__ushort_as_half(
+                    *reinterpret_cast<const std::uint16_t*>(&stage.scales[gid + 8][2 * scale_group])));
 #pragma unroll
                 for (int nt = 0; nt < kNt; ++nt) {
                     const float2 column = __half22float2(xs[w][nt]);
-                    const int (&s)[4]   = sums[t][nt];
-                    float (&c)[4]       = acc[t][nt];
-                    c[0] = fmaf(static_cast<float>(s[0]), top_scale * column.x, c[0]);
-                    c[1] = fmaf(static_cast<float>(s[1]), top_scale * column.y, c[1]);
-                    c[2] = fmaf(static_cast<float>(s[2]), bottom_scale * column.x, c[2]);
-                    c[3] = fmaf(static_cast<float>(s[3]), bottom_scale * column.y, c[3]);
+                    const int (&value)[4] = sums[0][nt];
+                    float (&c)[4] = acc[0][nt];
+                    c[0] = fmaf(static_cast<float>(value[0]), top_scale * column.x, c[0]);
+                    c[1] = fmaf(static_cast<float>(value[1]), top_scale * column.y, c[1]);
+                    c[2] = fmaf(static_cast<float>(value[2]), bottom_scale * column.x, c[2]);
+                    c[3] = fmaf(static_cast<float>(value[3]), bottom_scale * column.y, c[3]);
+                }
+            } else {
+#pragma unroll
+                for (int nt = 0; nt < kNt; ++nt) {
+                    const int (&value)[4] = sums[0][nt];
+                    shared.group_sums[k_split * kWords + w][nt][lane] =
+                        make_int4(value[0], value[1], value[2], value[3]);
+                    if (gid == 0) {
+                        const float2 column = __half22float2(xs[w][nt]);
+                        shared.column_scales[k_split * kWords + w][nt * 8 + 2 * lid] = column.x;
+                        shared.column_scales[k_split * kWords + w][nt * 8 + 2 * lid + 1] = column.y;
+                    }
+                }
+            }
+        }
+        if constexpr (kKW > 1) {
+            __syncthreads();
+            if (k_split == 0) {
+#pragma unroll
+                for (int group = 0; group < kKW * kWords; ++group) {
+                    const float top_scale = __half2float(__ushort_as_half(
+                        *reinterpret_cast<const std::uint16_t*>(&stage.scales[gid][2 * (group / 2)])));
+                    const float bottom_scale = __half2float(__ushort_as_half(
+                        *reinterpret_cast<const std::uint16_t*>(&stage.scales[gid + 8][2 * (group / 2)])));
+#pragma unroll
+                    for (int nt = 0; nt < kNt; ++nt) {
+                        const int4 value = shared.group_sums[group][nt][lane];
+                        const float low = shared.column_scales[group][nt * 8 + 2 * lid];
+                        const float high = shared.column_scales[group][nt * 8 + 2 * lid + 1];
+                        float (&c)[4] = acc[0][nt];
+                        c[0] = fmaf(static_cast<float>(value.x), top_scale * low, c[0]);
+                        c[1] = fmaf(static_cast<float>(value.y), top_scale * high, c[1]);
+                        c[2] = fmaf(static_cast<float>(value.z), bottom_scale * low, c[2]);
+                        c[3] = fmaf(static_cast<float>(value.w), bottom_scale * high, c[3]);
+                    }
                 }
             }
         }
@@ -275,42 +311,6 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void t2_s
     cp_wait<0>();
     __syncthreads();
 
-    // Reduce the K partials of each tile in a fixed order: odd K warps publish, even ones fold
-    // their neighbour, then K warp 0 sums the even ones.
-    float* partial  = shared.partial;
-    const auto slot = [&](int w, int t, int nt) {
-        return partial + (((w * kTpw + t) * kNt + nt) * 32 + lane) * 4;
-    };
-    if ((k_split & 1) != 0) {
-#pragma unroll
-        for (int t = 0; t < kTpw; ++t) {
-#pragma unroll
-            for (int nt = 0; nt < kNt; ++nt) {
-                const float (&c)[4] = acc[t][nt];
-                store_vec(slot(warp, t, nt), make_float4(c[0], c[1], c[2], c[3]));
-            }
-        }
-    }
-    __syncthreads();
-    if ((k_split & 1) == 0) {
-#pragma unroll
-        for (int t = 0; t < kTpw; ++t) {
-#pragma unroll
-            for (int nt = 0; nt < kNt; ++nt) {
-                float (&c)[4]        = acc[t][nt];
-                const float4 partner = load_vec<float4>(slot(warp + 1, t, nt));
-                c[0] += partner.x;
-                c[1] += partner.y;
-                c[2] += partner.z;
-                c[3] += partner.w;
-                if (k_split != 0) {
-                    store_vec(slot(warp, t, nt), make_float4(c[0], c[1], c[2], c[3]));
-                }
-            }
-        }
-    }
-    if constexpr (kKW > 2) { __syncthreads(); }
-
     if (k_split == 0) {
 #pragma unroll
         for (int t = 0; t < kTpw; ++t) {
@@ -319,14 +319,6 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void t2_s
             for (int nt = 0; nt < kNt; ++nt) {
                 float4 sum =
                     make_float4(acc[t][nt][0], acc[t][nt][1], acc[t][nt][2], acc[t][nt][3]);
-#pragma unroll
-                for (int split = 2; split < kKW; split += 2) {
-                    const float4 value = load_vec<float4>(slot(warp + split, t, nt));
-                    sum.x += value.x;
-                    sum.y += value.y;
-                    sum.z += value.z;
-                    sum.w += value.w;
-                }
                 const int col = nt * 8 + 2 * lid;
                 if (col < cols) {
                     epilogue(row, col0 + col, sum.x);

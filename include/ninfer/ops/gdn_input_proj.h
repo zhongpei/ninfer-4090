@@ -109,17 +109,17 @@ void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Ten
 
 /**
  * Two-parent snapshot capacity keyed by the parents' formats. The Q4/Q5 pair answers as the
- * row-count query above; a T2 pair (ternary checkpoints, both parents T2_G128_FP16) projects every
- * part through the T2 linear routes, so it adds its private projection planes to the materialized
- * convolution path at every batch size.
+ * row-count query above. A T2 pair (both parents T2_G128_FP16) reserves an FP32 current-projection
+ * plane for its A16 convolution route at every batch size.
  */
 [[nodiscard]] std::size_t gdn_input_proj_split_conv_snapshot_workspace_capacity_bytes(
     QType qk_qtype, QType value_z_qtype, std::int32_t batch_size, std::int32_t min_width,
     std::int32_t max_width);
 
 /**
- * Policy-bearing two-parent snapshot capacity: a T2 pair adds the integer-activation planes its
- * projections take under AllowA8Int; the Q4/Q5 pair answers as the query above.
+ * Policy-bearing two-parent snapshot capacity: a T2 pair reserves BF16 projection and integer
+ * activation planes on admitted A8 widths, or FP32 current projections on A16 widths. The Q4/Q5
+ * pair answers as the query above.
  */
 [[nodiscard]] std::size_t gdn_input_proj_split_conv_snapshot_workspace_capacity_bytes(
     QType qk_qtype, QType value_z_qtype, LinearPolicy policy, std::int32_t batch_size,
@@ -181,6 +181,11 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
  * Policy-bearing two-parent snapshot. The policy reaches a T2 pair's projections, which take the
  * integer-activation routes under AllowA8Int (see the split gdn_input_proj); the Q4/Q5 pair runs as
  * the form above. Size the workspace with the policy-bearing capacity query.
+ * The T2 A16 route consumes current p in FP32. Each column crosses BF16_RN before becoming
+ * older convolution history, including within one call, so split continuations use the same
+ * history as the multi-column call. Snapshot and Record share this finishing arithmetic; z and
+ * public history/record remain BF16. Admitted A8 widths retain their activation quantization and
+ * BF16 private projected plane.
  */
 void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
                                   const Weight& value_z_weight, const Tensor& conv_weight,
@@ -223,7 +228,7 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& query_key_value
 /**
  * Returns the transient capacity for the registered Q4/Q5 or Q8 record-producing profile.
  * `batch_size` is exact, and the inclusive T interval must lie within ReplaySSM's B=1..8,
- * T=2..16 execution domain. These profiles require no transient storage because materialized
+ * T=1..16 execution domain. These profiles require no transient storage because materialized
  * projection writes directly to caller-owned conv_record.
  */
 [[nodiscard]] std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
@@ -232,7 +237,7 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& query_key_value
 
 /**
  * Two-parent record capacity keyed by the parents' formats: zero for the Q4/Q5 pair, the private
- * projection planes of every recorded column for a T2 pair.
+ * FP32 current-projection plane of every recorded column for an A16 T2 pair.
  */
 [[nodiscard]] std::size_t gdn_input_proj_split_conv_record_workspace_capacity_bytes(
     QType qk_qtype, QType value_z_qtype, std::int32_t batch_size, std::int32_t min_width,
@@ -263,7 +268,7 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& query_key_value
  * newest history column to conv_record [C,T,B]. Query, key,
  * and value are zero in each row's invalid tail; z is projected for every physical column.
  *
- * The execution domain is B=1..8 and T=2..16. valid_columns is empty for dense input or device
+ * The execution domain is B=1..8 and T=1..16. valid_columns is empty for dense input or device
  * I32 [B], with each caller-supplied extent in [1,T]. conv_states is a read-only BF16 [C,3,S]
  * state-pool view, and initial_state_slots contains absolute slots in [0,S). Source state is not
  * modified. Only the valid prefix of conv_record is semantically defined. Outputs and valid

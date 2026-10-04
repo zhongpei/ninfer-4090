@@ -58,6 +58,15 @@ The sections below are inherited from the franken/v0.11 3090 line and remain use
 artifact conversion and runtime details; published 3090 performance numbers are historical rather
 than measurements of this 4090+YaRN merge.
 
+DFlash2 routing defaults to fixed K. Opt-in
+[calibrated routing](docs/maintainer/speculative-routing.md#calibrated-dflash2-chain)
+requires `--draft-tokens 15 --spec-router calibrated --spec-router-profile PATH`
+and a profile matching the actual artifact and startup configuration. It uses
+actual compact batch and execution frontier to select target-only/K7/K11/K15
+while retaining the maximum drafter. The
+[RTX 4090 qualification record](docs/performance.md#rtx-4090-sm_89-chain-qualification)
+distinguishes fixed-route measurements from resident-drafter policy evidence.
+
 **New in v0.11.0: prompt processing is roughly twice as fast, and the recommended profile is the fast one.**
 Qwen3.8-27B prefill reaches 2,989 tok/s at 4K (`--prefill-cublas --prefill-chunk 4096`, +0.156%
 perplexity, opt-in) and 1,649 tok/s on the default route, single-stream decode reaches 187 tok/s with

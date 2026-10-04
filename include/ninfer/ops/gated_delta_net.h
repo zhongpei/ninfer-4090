@@ -12,7 +12,7 @@ namespace ninfer::ops {
 
 /**
  * Returns the transient arena capacity required by gated_delta_net for the given geometry. It is
- * zero when the private implementation requires no transient storage. The state/head dimension is
+ * zero for every supported width. The state/head dimension is
  * fixed at 128; `value_heads` must be at least `qk_heads` and divisible by it. The query covers
  * every T in the inclusive interval and throws for an invalid profile or interval.
  */
@@ -33,15 +33,16 @@ namespace ninfer::ops {
  *   ideal[:,h,t] = scale * S_h * q[:,qh,t].
  *
  * Shapes/dtypes are contiguous q/k BF16 [128,Hqk,T], v/out BF16 [128,Hv,T], g/beta FP32 [Hv,T],
- * and state FP32 [128,128,Hv], where Hqk>=1, Hv>=Hqk, and Hv%Hqk==0. `scale` is 1/sqrt(128). When
+ * and state FP32 or FP16 [128,128,Hv], where Hqk>=1, Hv>=Hqk, and Hv%Hqk==0. `scale` is 1/sqrt(128). When
  * `normalize_qk` is true, the recurrent implementation consumes raw q/k and applies
  * x / sqrt(sum(x^2) + 1e-6) independently to every 128-element row before using it. When false,
  * q/k are consumed as supplied. The oracle evaluates the complete recurrence and `ideal` naively
- * in FP64 from the represented inputs and FP32 initial state. The BF16 out is promoted and
+ * in FP64 from the represented inputs and stored initial state. The BF16 out is promoted and
  * compared directly with that result; output storage rounding belongs to the Op's numerical
- * criterion, not the oracle. Recurrent implementations may apply the normalization directly;
- * chunked implementations may use private normalized staging. The corresponding private storage
- * is included by gated_delta_net_workspace_capacity_bytes when `normalize_qk` is true.
+ * criterion, not the oracle. Every width uses the same FP32 normalization and transition order.
+ * A call uses one persistent kernel with state held in FP32 registers. With FP32 state storage,
+ * splitting a sequence preserves output and final-state bits. FP16 state storage rounds at call
+ * completion; FP16 splitting can therefore introduce additional public state rounding.
  * Inputs and out do not overlap state or one another. `ws` supplies transient storage reported by
  * gated_delta_net_workspace_capacity_bytes; scratch is scoped to the call. T may be any positive
  * value.
@@ -53,7 +54,9 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
                      Tensor& ssm_state, Tensor& out, cudaStream_t stream);
 
 /**
- * Distinct-state form of the same recurrence. `ssm_state_out` receives the final state;
+ * Distinct-state form of the same recurrence. Either state tensor may use FP32 or FP16 storage;
+ * inputs are widened and the final state is cast to the destination dtype.
+ * `ssm_state_out` receives the final state;
  * `ssm_state_in` and `ssm_state_out` may be disjoint or exactly the same storage. No other
  * arguments may overlap either state.
  */
@@ -83,7 +86,7 @@ void gated_delta_net_batch_update(const Tensor& q, const Tensor& k, const Tensor
  * Evaluates B independent normalized Gated DeltaNet recurrences from absolute state-pool slots
  * without modifying any state. q/k are BF16 [128,Hq,T,B], v/out are BF16 [128,Hv,T,B], g/beta
  * are FP32 [Hv,T,B], and ssm_states is FP32 [128,128,Hv,S]. The ReplaySSM execution domain is
- * B=1..8 and T=2..16, with Hq=16 and Hv in {32,48}. scale is 1/sqrt(128).
+ * B=1..8 and T=1..16, with Hq=16 and Hv in {32,48}. scale is 1/sqrt(128).
  *
  * valid_columns is empty for dense rows or device I32 [B], with every caller-supplied extent in
  * [1,T]. initial_state_slots is device I32 [B] containing absolute slots in [0,S). For each valid

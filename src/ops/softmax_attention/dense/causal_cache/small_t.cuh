@@ -93,26 +93,28 @@ __device__ __forceinline__ int causal_small_t_default_splits(int window) {
     return splits < Geometry::SmallTMaximumSplits ? splits : Geometry::SmallTMaximumSplits;
 }
 
+// Absolute key partitions keep each query's arithmetic independent of later columns,
+// batch occupancy and graph envelopes. Coarser partitions only begin at fixed boundaries.
+__host__ __device__ constexpr int causal_int8_split_start(int split) {
+    if (split < 16) return split * 512;
+    if (split < 32) return 8192 + (split - 16) * 1024;
+    if (split < 48) return 24576 + (split - 32) * 4096;
+    return 90112 + (split - 48) * 16384;
+}
+__host__ __device__ constexpr int causal_int8_split_count(int window) {
+    if (window <= 8192) return (window + 511) / 512;
+    if (window <= 24576) return 16 + (window - 8192 + 1023) / 1024;
+    if (window <= 90112) return 32 + (window - 24576 + 4095) / 4096;
+    return 48 + (window - 90112 + 16383) / 16384;
+}
+
 template <typename Geometry, bool Int8>
 __device__ __forceinline__ int causal_small_t_active_splits(int window, int launch_capacity,
                                                             int tokens) {
     if (window <= 0) { return launch_capacity; }
     int splits = 0;
     if constexpr (Int8) {
-        if (tokens == 5 && window > 128 && window <= 512) {
-            splits = div_up(window, 32 / Geometry::SmallTSplitScale);
-        } else if (tokens >= 6 && window > 128 && window <= 160) {
-            constexpr int kKeysPerSplit = Geometry::SmallTSplitScale == 2 ? 17 : 24;
-            splits                      = div_up(window, kKeysPerSplit);
-        } else if (tokens >= 6 && window > 5000 && window <= 8198) {
-            splits             = div_up(window, 192 / Geometry::SmallTSplitScale);
-            constexpr int kMin = 4 * Geometry::SmallTSplitScale;
-            constexpr int kMax = 42 * Geometry::SmallTSplitScale;
-            splits             = splits > kMin ? splits : kMin;
-            splits             = splits < kMax ? splits : kMax;
-        } else {
-            splits = causal_small_t_default_splits<Geometry>(window);
-        }
+        splits = causal_int8_split_count(window);
     } else {
         splits = causal_small_t_default_splits<Geometry>(window);
     }
@@ -218,7 +220,8 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
 
     if constexpr (Offset) { positions += column_begin; }
     if constexpr (MultiBatch) { positions += batch * full_width; }
-    const int last_pos = positions[tokens - 1];
+    // INT8-family rows use the width-one arithmetic even inside wide verification/prefill.
+    const int last_pos = positions[Int8 ? token : tokens - 1];
     int output_column  = token;
     if constexpr (Offset) { output_column += column_begin; }
     if constexpr (MultiBatch) { output_column += batch * full_width; }
@@ -245,7 +248,7 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
 
     const int window = last_pos + 1;
     const int active_split_count =
-        causal_small_t_active_splits<Geometry, Int8>(window, split_count, tokens);
+        causal_small_t_active_splits<Geometry, Int8>(window, split_count, Int8 ? 1 : tokens);
 
     __shared__ float weights[256], warp_sums[8], scalars[2];
     const float head_l =

@@ -1,15 +1,23 @@
 #include "ninfer/ops/gated_delta_net.h"
 
 #include "ops/gdn_ref.h"
+#include "ops/quantized_weight.h"
 #include "ops/op_tester.h"
+#include "core/decode_graph.h"
+#include "core/device.h"
 
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <fstream>
+#include <memory>
+#include <array>
+#include <type_traits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -183,6 +191,315 @@ struct DeviceInputs {
     DeviceBuffer g;
     DeviceBuffer beta;
 };
+
+struct CausalRun {
+    std::vector<std::uint16_t> out;
+    std::vector<float> state;
+    int failures = 0;
+};
+
+gdn_ref::Inputs token_range(const gdn_ref::Inputs& in, int begin, int count) {
+    gdn_ref::Inputs part = in;
+    part.tokens = count;
+    const auto range = [begin, count](auto& values, int stride) {
+        values = std::vector<float>(values.begin() + std::size_t(begin) * stride,
+                                    values.begin() + std::size_t(begin + count) * stride);
+    };
+    range(part.q, kStateDim * in.qk_heads);
+    range(part.k, kStateDim * in.qk_heads);
+    range(part.v, kStateDim * in.value_heads);
+    range(part.g, in.value_heads);
+    range(part.beta, in.value_heads);
+    return part;
+}
+
+CausalRun causal_run(const gdn_ref::Inputs& in, bool normalize, bool graph_replay,
+                    int future_begin = 0, int qk_offset = 0, int value_offset = 0) {
+    DeviceInputs device(in);
+    GuardedDeviceBuffer source(in.state.size() * sizeof(float));
+    GuardedDeviceBuffer state(in.state.size() * sizeof(float));
+    GuardedDeviceBuffer output(in.v.size() * sizeof(std::uint16_t));
+    source.copy_from_host(in.state.data(), source.bytes());
+    std::array<std::unique_ptr<GuardedDeviceBuffer>, 3> shifted;
+    std::array<std::vector<std::uint8_t>, 3> stored;
+    std::array<void*, 3> pointers{device.q.p, device.k.p, device.v.p};
+    const std::array<const std::vector<float>*, 3> values{&in.q, &in.k, &in.v};
+    const std::array<int, 3> offsets{qk_offset, qk_offset, value_offset};
+    for (int i = 0; i < 3; ++i) {
+        if (!offsets[i]) { continue; }
+        const auto bits = bf16_bits(*values[i]);
+        stored[i].resize(bits.size() * 2 + offsets[i], 0x37);
+        std::memcpy(stored[i].data() + offsets[i], bits.data(), bits.size() * 2);
+        shifted[i] = std::make_unique<GuardedDeviceBuffer>(stored[i].size());
+        shifted[i]->copy_from_host(stored[i].data(), stored[i].size());
+        pointers[i] = static_cast<std::uint8_t*>(shifted[i]->data()) + offsets[i];
+    }
+    const int heads = in.value_heads;
+    const int qheads = in.qk_heads;
+    Tensor q(pointers[0], DType::BF16, {kStateDim, qheads, int(in.tokens)});
+    Tensor k(pointers[1], DType::BF16, {kStateDim, qheads, int(in.tokens)});
+    Tensor v(pointers[2], DType::BF16, {kStateDim, heads, int(in.tokens)});
+    Tensor g(device.g.p, DType::FP32, {heads, int(in.tokens)});
+    Tensor beta(device.beta.p, DType::FP32, {heads, int(in.tokens)});
+    Tensor s0(source.data(), DType::FP32, {kStateDim, kStateDim, heads});
+    Tensor s1(state.data(), DType::FP32, {kStateDim, kStateDim, heads});
+    Tensor out(output.data(), DType::BF16, {kStateDim, heads, int(in.tokens)});
+    const float scale = 1.0f / std::sqrt(float(kStateDim));
+    const auto bytes = ops::gated_delta_net_workspace_capacity_bytes(
+        qheads, heads, normalize, in.tokens, in.tokens);
+    WorkspaceArena workspace(std::max<std::size_t>(bytes, 256));
+    DeviceContext context;
+    const auto launch = [&] {
+        ops::gated_delta_net(q, k, v, g, beta, scale, normalize, workspace, s0, s1, out,
+                             context.stream);
+    };
+    DecodeGraphDefinition definition;
+    DecodeGraphExecutable graph;
+    if (graph_replay) {
+        definition.capture(context.stream, launch);
+        graph.instantiate(definition);
+        // Fill the live inputs after capture, rather than accepting stale captured operands.
+        const auto bits = bf16_bits(in.v);
+        cuda_check(cudaMemcpy(pointers[2], bits.data(), bits.size() * sizeof(std::uint16_t),
+                              cudaMemcpyHostToDevice), "GDN live value upload");
+        graph.launch(context.stream);
+    } else {
+        launch();
+    }
+    cuda_check(cudaStreamSynchronize(context.stream), "GDN causal run");
+    CausalRun result{from_device<std::uint16_t>(output.data(), in.v.size()),
+                     from_device<float>(state.data(), in.state.size()), 0};
+    if (graph_replay && future_begin > 0 && future_begin < in.tokens) {
+        auto future = in.v;
+        for (std::size_t i = std::size_t(future_begin) * heads * kStateDim; i < future.size(); ++i) {
+            future[i] = -future[i];
+        }
+        const auto bits = bf16_bits(future);
+        cuda_check(cudaMemcpy(pointers[2], bits.data(), bits.size() * sizeof(std::uint16_t),
+                              cudaMemcpyHostToDevice), "GDN live value upload");
+        graph.launch(context.stream);
+        cuda_check(cudaStreamSynchronize(context.stream), "GDN live future input");
+        const auto replay = from_device<std::uint16_t>(output.data(), in.v.size());
+        if (!std::equal(result.out.begin(), result.out.begin() +
+                        std::size_t(future_begin) * heads * kStateDim, replay.begin())) {
+            std::cerr << "GDN future values changed a committed output prefix\n";
+            ++result.failures;
+        }
+        const auto original = bf16_bits(in.v);
+        cuda_check(cudaMemcpy(pointers[2], original.data(), original.size() * sizeof(std::uint16_t),
+                              cudaMemcpyHostToDevice), "GDN restore live value");
+    }
+    result.failures += verify_exact("GDN causal source unchanged",
+                                    from_device<float>(source.data(), in.state.size()), in.state);
+    result.failures += verify_common_inputs_unchanged("GDN causal", in, device.q, device.k,
+                                                     device.v, device.g, device.beta);
+    result.failures += source.verify_guards("GDN causal source guards");
+    result.failures += state.verify_guards("GDN causal state guards");
+    result.failures += output.verify_guards("GDN causal output guards");
+    for (int i = 0; i < 3; ++i) {
+        if (!shifted[i]) { continue; }
+        result.failures += verify_exact("GDN shifted operand immutable",
+            from_device<std::uint8_t>(shifted[i]->data(), stored[i].size()), stored[i]);
+        result.failures += shifted[i]->verify_guards("GDN shifted operand guards");
+    }
+    return result;
+}
+
+int causal_pair(const gdn_ref::Inputs& in, int prefix, bool normalize, bool sampled_oracle = false) {
+    const auto short_input = token_range(in, 0, prefix);
+    const auto short_run = causal_run(short_input, normalize, false);
+    const auto full_run = causal_run(in, normalize, true, prefix);
+    auto tail_input = token_range(in, prefix, in.tokens - prefix);
+    tail_input.state = short_run.state; // Exact public FP32 state is the represented continuation input.
+    const auto tail_run = causal_run(tail_input, normalize, true);
+    int failures = short_run.failures + full_run.failures + tail_run.failures;
+    const std::size_t cut = short_run.out.size();
+    if (!std::equal(short_run.out.begin(), short_run.out.end(), full_run.out.begin())) {
+        std::cerr << "GDN T=" << prefix << " vs " << in.tokens << ": common prefix differs\n";
+        ++failures;
+    }
+    if (!std::equal(tail_run.out.begin(), tail_run.out.end(), full_run.out.begin() + cut)) {
+        std::cerr << "GDN T=" << prefix << "+" << in.tokens - prefix << ": continuation differs\n";
+        ++failures;
+    }
+    failures += verify_exact("GDN split final FP32 state", tail_run.state, full_run.state);
+    auto continuation = token_range(in, in.tokens - 3, 3);
+    continuation.state = tail_run.state;
+    const auto after_split = causal_run(continuation, normalize, false);
+    continuation.state = full_run.state;
+    const auto after_full = causal_run(continuation, normalize, true);
+    failures += after_split.failures + after_full.failures;
+    failures += verify_exact("GDN subsequent output", after_split.out, after_full.out);
+    failures += verify_exact("GDN subsequent FP32 state", after_split.state, after_full.state);
+    const auto qualify = [&](const gdn_ref::Inputs& source, const CausalRun& run) {
+        auto oracle_input = source;
+        std::vector<double> actual;
+        std::vector<double> actual_state;
+        if (sampled_oracle) {
+            // Predeclared real value heads 0,1,2 share real key head 0. No synthetic zero heads
+            // enter either metric, and every token and state element of these heads is qualified.
+            oracle_input.qk_heads = 1;
+            oracle_input.value_heads = 3;
+            oracle_input.q.clear(); oracle_input.k.clear(); oracle_input.v.clear();
+            oracle_input.g.clear(); oracle_input.beta.clear();
+            oracle_input.state.resize(3 * kStateDim * kStateDim);
+            for (int t = 0; t < source.tokens; ++t) {
+                const auto copy = [t](const auto& from, auto& to, int stride, int count) {
+                    to.insert(to.end(), from.begin() + std::size_t(t) * stride,
+                              from.begin() + std::size_t(t) * stride + count);
+                };
+                copy(source.q, oracle_input.q, source.qk_heads * kStateDim, kStateDim);
+                copy(source.k, oracle_input.k, source.qk_heads * kStateDim, kStateDim);
+                copy(source.v, oracle_input.v, source.value_heads * kStateDim, 3 * kStateDim);
+                copy(source.g, oracle_input.g, source.value_heads, 3);
+                copy(source.beta, oracle_input.beta, source.value_heads, 3);
+                for (int r = 0; r < 3 * kStateDim; ++r) {
+                    actual.push_back(bf16_to_f32(run.out[std::size_t(t) * source.value_heads *
+                                                           kStateDim + r]));
+                }
+            }
+            actual_state.assign(run.state.begin(), run.state.begin() + oracle_input.state.size());
+        } else {
+            for (auto bits : run.out) { actual.push_back(bf16_to_f32(bits)); }
+            actual_state.assign(run.state.begin(), run.state.end());
+        }
+        const auto ref = gdn_ref::evaluate(oracle_input, double(1.0f / std::sqrt(float(kStateDim))),
+                                          normalize);
+        failures += verify_recurrence("GDN causal independent output", actual, ref.out,
+                                      gated_delta_net_output_bf16_criterion());
+        failures += verify_recurrence("GDN causal independent state", actual_state, ref.final_state,
+                                      gated_delta_net_state_fp32_criterion());
+    };
+    qualify(short_input, short_run);
+    qualify(in, full_run);
+    qualify(tail_input, tail_run);
+    return failures;
+}
+
+int causal_prefix_cases() {
+    int failures = 0;
+    for (bool normalize : {false, true}) {
+        for (int tokens : {64, 128}) {
+            const auto in = make_inputs({"causal prefix", 16, 48, tokens, normalize}, 19000 + tokens);
+            failures += causal_pair(in, tokens - 5, normalize);
+        }
+    }
+    return failures;
+}
+
+int represented_prefix_case(const std::string& directory) {
+    const auto read = [&](const char* name, auto& values, std::size_t count) {
+        using Value = typename std::decay_t<decltype(values)>::value_type;
+        values.resize(count);
+        std::ifstream file(directory + "/call3-" + name + ".bin", std::ios::binary);
+        if (!file.read(reinterpret_cast<char*>(values.data()), count * sizeof(Value)) ||
+            file.peek() != std::char_traits<char>::eof()) {
+            throw std::runtime_error("invalid represented GDN input " + std::string(name));
+        }
+    };
+    gdn_ref::Inputs in;
+    in.head_dim = 128; in.qk_heads = 16; in.value_heads = 48; in.tokens = 1024;
+    std::vector<std::uint16_t> bits;
+    const auto read_bf16 = [&](const char* name, auto& values, int heads) {
+        read(name, bits, std::size_t(1024) * heads * 128);
+        values.resize(bits.size());
+        for (std::size_t i = 0; i < bits.size(); ++i) { values[i] = bf16_to_f32(bits[i]); }
+    };
+    read_bf16("conv-q", in.q, 16); read_bf16("conv-k", in.k, 16);
+    read_bf16("conv-v", in.v, 48);
+    read("g", in.g, 48 * 1024); read("beta", in.beta, 48 * 1024);
+    read("recurrent-before", in.state, 48 * 128 * 128);
+    return causal_pair(in, 1019, true, true);
+}
+
+int unaligned_input_cases() {
+    const auto in = make_inputs({"shifted contiguous inputs", 16, 48, 64, true}, 23064U);
+    const auto aligned = causal_run(in, true, true);
+    const auto shifted = causal_run(in, true, false, 0, 8, 8);
+    // Q/K's existing eight-byte packed load requires eight-byte alignment. The public value
+    // path loads BF16 scalars, so its two-byte alignment remains sufficient.
+    const auto scalar_value = causal_run(in, true, true, 0, 8, 2);
+    int failures = aligned.failures + shifted.failures + scalar_value.failures;
+    failures += verify_exact("GDN offset8 output", shifted.out, aligned.out);
+    failures += verify_exact("GDN offset8 final FP32 state", shifted.state, aligned.state);
+    failures += verify_exact("GDN value offset2 output", scalar_value.out, aligned.out);
+    failures += verify_exact("GDN value offset2 final FP32 state", scalar_value.state, aligned.state);
+    const auto ref = gdn_ref::evaluate(in, double(1.0f / std::sqrt(float(kStateDim))), true);
+    for (const auto* run : {&shifted, &scalar_value}) {
+        std::vector<double> output;
+        for (auto bits : run->out) { output.push_back(bf16_to_f32(bits)); }
+        failures += verify_recurrence("GDN shifted independent output", output, ref.out,
+                                      gated_delta_net_output_bf16_criterion());
+        failures += verify_recurrence("GDN shifted independent state",
+            std::vector<double>(run->state.begin(), run->state.end()), ref.final_state,
+            gated_delta_net_state_fp32_criterion());
+    }
+    return failures;
+}
+
+int state_cast_cases() {
+    int failures = 0;
+    for (bool source_half : {false, true}) {
+        for (bool destination_half : {false, true}) {
+            for (int tokens : {7, 64}) {
+                auto in = make_inputs({"state casts", 16, 48, tokens, true}, 21000 + tokens);
+                const auto encode = [](float x) { return quantized_weight::detail::f32_to_f16(x); };
+                const auto decode = [](std::uint16_t x) {
+                    return quantized_weight::detail::f16_to_f32(x);
+                };
+                std::vector<std::uint8_t> source_bits(in.state.size() * (source_half ? 2 : 4));
+                for (std::size_t i = 0; i < in.state.size(); ++i) {
+                    if (source_half) {
+                        const auto bits = encode(in.state[i]);
+                        std::memcpy(source_bits.data() + i * 2, &bits, 2);
+                        in.state[i] = decode(bits);
+                    } else {
+                        std::memcpy(source_bits.data() + i * 4, &in.state[i], 4);
+                    }
+                }
+                const float scale = 1.0f / std::sqrt(float(kStateDim));
+                const auto ref = gdn_ref::evaluate(in, double(scale), true);
+                DeviceInputs device(in);
+                GuardedDeviceBuffer source(source_bits.size());
+                GuardedDeviceBuffer state(in.state.size() * (destination_half ? 2 : 4));
+                GuardedDeviceBuffer output(in.v.size() * 2);
+                source.copy_from_host(source_bits.data(), source_bits.size());
+                Tensor q(device.q.p, DType::BF16, {128, 16, tokens});
+                Tensor k(device.k.p, DType::BF16, {128, 16, tokens});
+                Tensor v(device.v.p, DType::BF16, {128, 48, tokens});
+                Tensor g(device.g.p, DType::FP32, {48, tokens});
+                Tensor beta(device.beta.p, DType::FP32, {48, tokens});
+                Tensor s0(source.data(), source_half ? DType::FP16 : DType::FP32, {128, 128, 48});
+                Tensor s1(state.data(), destination_half ? DType::FP16 : DType::FP32, {128, 128, 48});
+                Tensor out(output.data(), DType::BF16, {128, 48, tokens});
+                WorkspaceArena workspace(std::max<std::size_t>(256,
+                    ops::gated_delta_net_workspace_capacity_bytes(16, 48, true, tokens, tokens)));
+                ops::gated_delta_net(q, k, v, g, beta, scale, true, workspace, s0, s1, out, nullptr);
+                cuda_synchronize();
+                std::vector<double> actual_state;
+                if (destination_half) {
+                    const auto bits = from_device<std::uint16_t>(state.data(), in.state.size());
+                    for (auto x : bits) { actual_state.push_back(decode(x)); }
+                } else {
+                    actual_state = read_f32(state.data(), in.state.size());
+                }
+                const auto label = std::string("GDN casts ") + (source_half ? "f16" : "f32") +
+                                   "->" + (destination_half ? "f16" : "f32") +
+                                   " T=" + std::to_string(tokens);
+                failures += verify_recurrence(label + " out", from_device_bf16(output.data(),
+                    in.v.size()), ref.out, gated_delta_net_output_bf16_criterion());
+                failures += verify_recurrence(label + " state", actual_state, ref.final_state,
+                                               gated_delta_net_state_fp32_criterion());
+                failures += verify_exact(label + " source immutable",
+                    from_device<std::uint8_t>(source.data(), source_bits.size()), source_bits);
+                failures += source.verify_guards(label + " source guards");
+                failures += state.verify_guards(label + " state guards");
+                failures += output.verify_guards(label + " output guards");
+            }
+        }
+    }
+    return failures;
+}
 
 int inplace_case(const Case& test_case, std::uint32_t seed) {
     const gdn_ref::Inputs in = make_inputs(test_case, seed);
@@ -450,7 +767,7 @@ int contract_rejection_cases() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
@@ -479,6 +796,28 @@ int main() {
         ++failures;
     } catch (const std::invalid_argument&) {}
     failures += contract_rejection_cases();
+
+    if (argc == 2 && std::string(argv[1]) == "--causal-prefix-only") {
+        failures += causal_prefix_cases();
+        std::cout << (failures == 0 ? "OK" : "FAIL") << " GDN causal prefix\n";
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--represented-prefix-only") {
+        failures += represented_prefix_case(argv[2]);
+        std::cout << (failures == 0 ? "OK" : "FAIL") << " GDN represented prefix\n";
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--state-casts-only") {
+        failures += state_cast_cases();
+        std::cout << (failures == 0 ? "OK" : "FAIL") << " GDN state casts\n";
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--unaligned-inputs-only") {
+        failures += unaligned_input_cases();
+        std::cout << (failures == 0 ? "OK" : "FAIL") << " GDN shifted inputs\n";
+        return failures == 0 ? 0 : 1;
+    }
+    failures += causal_prefix_cases() + state_cast_cases() + unaligned_input_cases();
 
     // Registered 27B/35B-A3B geometries, public state forms, and the recurrent/chunk/tail route
     // boundary are all qualified directly against the same complete FP64 recurrence.

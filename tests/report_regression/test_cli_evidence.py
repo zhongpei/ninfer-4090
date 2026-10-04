@@ -168,5 +168,25 @@ class SerializerTests(unittest.TestCase):
             self.assertEqual(errors,[]); self.assertEqual(source_tag,"machine-v1")
             self.assertEqual(data["token_ids"],[10,20,30])
             self.assertEqual(data["decode_seconds"],0.00123456789)
+            self.assertEqual(data["routing_counters_scope"], "published_engine_snapshot")
+            for name, expected in (
+                ("calibrated_target_only_rounds", 11), ("calibrated_k7_rounds", 12),
+                ("calibrated_k11_rounds", 13), ("calibrated_k15_rounds", 14),
+                ("calibrated_route_switches", 15), ("calibrated_fixed_fallback_rounds", 16)):
+                self.assertEqual(data.get(name), expected, name)
+            for mode in ("fixed", "stair"):
+                human=subprocess.run([str(exe),mode],capture_output=True,text=True,check=True)
+                self.assertEqual(human.stderr,"",mode)
+                machine=json.loads(human.stdout.split(v.PREFIX,1)[1])
+                self.assertEqual(machine["calibrated_target_only_rounds"],11)
+            enabled=subprocess.run([str(exe),"calibrated"],capture_output=True,text=True,check=True)
+            self.assertEqual(len(enabled.stderr.splitlines()),6)
+            zero=subprocess.run([str(exe),"calibrated","zero"],capture_output=True,text=True,check=True)
+            self.assertEqual(len(zero.stderr.splitlines()),6)
+            self.assertTrue(all(line.endswith("=0") for line in zero.stderr.splitlines()))
+            fixed_zero=subprocess.run([str(exe),"fixed","zero"],capture_output=True,text=True,check=True)
+            machine=json.loads(fixed_zero.stdout.split(v.PREFIX,1)[1])
+            self.assertEqual(machine["calibrated_target_only_rounds"],0)
+            self.assertEqual(fixed_zero.stderr,"")
 
 if __name__=="__main__": unittest.main()

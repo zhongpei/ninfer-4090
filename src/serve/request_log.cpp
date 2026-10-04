@@ -903,6 +903,15 @@ std::string format_throughput_json(const std::string& server_instance_id, std::u
     const ninfer::RuntimeHostWorkStats host =
         host_work_delta(previous.host_work, current.host_work);
     const std::uint64_t active_host = host_active_ns(host);
+    // These are cumulative published Engine snapshots, not interval deltas.
+    record["speculative_routing"] = Json{
+        {"calibrated_target_only_rounds", current.calibrated_target_only_rounds},
+        {"calibrated_k7_rounds", current.calibrated_k7_rounds},
+        {"calibrated_k11_rounds", current.calibrated_k11_rounds},
+        {"calibrated_k15_rounds", current.calibrated_k15_rounds},
+        {"calibrated_route_switches", current.calibrated_route_switches},
+        {"calibrated_fixed_fallback_rounds", current.calibrated_fixed_fallback_rounds},
+    };
     record["interval_seconds"]      = report.interval_seconds;
     record["tokens"]                = Json{{"computed_prefill", report.computed_prefill_tokens},
                                            {"committed_decode", report.committed_decode_tokens}};

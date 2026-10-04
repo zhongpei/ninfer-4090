@@ -17,6 +17,8 @@ ninfer::RequestOptions request(std::uint32_t outputs, bool reuse = false) {
     ninfer::RequestOptions options;
     options.execution.requested_output_tokens = outputs;
     options.execution.sampling.temperature    = 0.0F;
+    options.execution.sampling.presence_penalty = 0.0F;
+    options.execution.sampling.frequency_penalty = 0.0F;
     options.execution.allow_prefix_reuse      = reuse;
     options.stop.include_model_defaults       = false;
     return options;
@@ -195,10 +197,10 @@ int main(int argc, char** argv) {
         const std::string scenario = argc > 8 ? argv[8] : "chain";
         const bool stair = scenario == "tree-stair";
         unsigned tree_nodes = 0;
-        if (scenario != "chain" && !stair) {
+        if (scenario != "chain" && scenario != "consistency" && !stair) {
             require(scenario == "tree-3" || scenario == "tree-7" ||
                         scenario == "tree-11" || scenario == "tree-15",
-                    "scenario must be chain, tree-3/tree-7/tree-11/tree-15 or tree-stair");
+                    "scenario must be chain, consistency, tree-3/tree-7/tree-11/tree-15 or tree-stair");
             tree_nodes = static_cast<unsigned>(std::stoul(scenario.substr(5)));
         }
         const auto k         = argc > 1 ? static_cast<unsigned>(std::stoul(argv[1])) : 15U;
@@ -209,9 +211,9 @@ int main(int argc, char** argv) {
         require(tree_nodes <= k, "tree node budget exceeds startup draft K");
         ninfer::EngineOptions options;
         options.artifact_path   = artifact;
-        options.max_context     = 2304;
-        options.kv_capacity     = ninfer::KvCapacityPolicy::explicit_capacity(2304 * batch);
-        options.prefill_chunk   = 2304;
+        options.max_context     = scenario == "consistency" ? 8192 : 2304;
+        options.kv_capacity     = ninfer::KvCapacityPolicy::explicit_capacity(options.max_context * batch);
+        options.prefill_chunk   = scenario == "consistency" ? 1024 : 2304;
         options.max_concurrency = batch;
         options.context_cache.device_state_slots     = argc > 7 ? std::stoul(argv[7]) : 3U;
         options.use_cuda_graph                       = graph;
@@ -234,7 +236,51 @@ int main(int argc, char** argv) {
                                                        : ninfer::SpeculativeRoutingMode::Fixed;
             options.speculative.routing.scope = ninfer::SpeculativeRouterScope::Engine;
         }
+        ninfer::GenerationResult baseline_result;
+        ninfer::PromptInput consistency_input;
+        if (scenario == "consistency") {
+            ninfer::ChatMessage user;
+            user.role = ninfer::ChatRole::User;
+            user.parts.push_back({.kind = ninfer::MessagePartKind::Text,
+                .text = "A user says: 'My API becomes unstable only when I raise traffic above the configured rate limit.' Reply as a systems engineer: explain retry storms, exponential backoff, jitter, and per-client rate distribution.",
+                .media = {}});
+            consistency_input.messages.push_back(std::move(user));
+            consistency_input.options.enable_thinking = false;
+            auto baseline_options = options;
+            baseline_options.speculative = {};
+            ninfer::Engine baseline(baseline_options);
+            baseline_result = baseline.generate(baseline.prepare(consistency_input), request(512));
+        }
         ninfer::Engine engine(options);
+        if (scenario == "consistency") {
+            const auto compare_baseline = [&](const ninfer::GenerationResult& result, const char* label) {
+                valid(result, 512);
+                require(result.finish_reason == baseline_result.finish_reason &&
+                            result.generated_token_ids.size() == baseline_result.generated_token_ids.size(),
+                        "DFlash2 and baseline returned different output budgets or finish reasons");
+                for (std::size_t i = 0; i < baseline_result.generated_token_ids.size(); ++i) {
+                    if (baseline_result.generated_token_ids[i] != result.generated_token_ids[i]) {
+                        throw std::runtime_error(std::string(label) + " DFlash2 baseline mismatch at generated index " +
+                            std::to_string(i) + ": baseline=" + std::to_string(baseline_result.generated_token_ids[i]) +
+                            " speculative=" + std::to_string(result.generated_token_ids[i]));
+                    }
+                }
+            };
+            const auto result = engine.generate(engine.prepare(consistency_input), request(512));
+            compare_baseline(result, "first fresh");
+            const auto retained = engine.generate(engine.prepare(consistency_input), request(512, true));
+            const auto reused = engine.generate(engine.prepare(consistency_input), request(512, true));
+            const auto fresh = engine.generate(engine.prepare(consistency_input), request(512));
+            require(retained.prefix_reuse_path == ninfer::PrefixReusePath::Root &&
+                        reused.prefix_reuse_path == ninfer::PrefixReusePath::PrivateTurnClosure &&
+                        reused.reused_prompt_tokens != 0 && fresh.reused_prompt_tokens == 0,
+                    "consistency fixture did not exercise Root -> PrivateTurnClosure");
+            compare_baseline(retained, "retained root");
+            compare_baseline(reused, "reused private closure");
+            compare_baseline(fresh, "final fresh");
+            std::cout << "ok consistency K=" << k << " capacity B=" << batch << " actual C1 graph=" << graph << '\n';
+            return 0;
+        }
         const auto prompt = engine.tokenize_text("Count from one to twenty: one, two, three,");
         if (tree_nodes) {
             tree_scenario(engine, prompt, tree_nodes, batch, stair);
@@ -284,6 +330,9 @@ int main(int argc, char** argv) {
         valid(fresh, 8);
         require(reused.reused_prompt_tokens != 0 && fresh.reused_prompt_tokens == 0,
                 "DFlash2 prefix restore did not reuse its retained frontier");
+        require(reused.generated_token_ids == fresh.generated_token_ids &&
+                    reused.finish_reason == fresh.finish_reason,
+                "DFlash2 restored continuation differs from full prefill");
 
         if (k >= 7) {
             bool checked_partial = false;
@@ -317,6 +366,9 @@ int main(int argc, char** argv) {
                                 prompt.size() + stopped.generated_token_ids.size() &&
                             fresh_stop.reused_prompt_tokens == 0,
                         "partial terminal exposed an uncommitted prefix");
+                require(reused_stop.generated_token_ids == fresh_stop.generated_token_ids &&
+                            reused_stop.finish_reason == fresh_stop.finish_reason,
+                        "DFlash2 continuation after partial stop differs from full prefill");
                 checked_partial = true;
                 break;
             }
@@ -357,6 +409,9 @@ int main(int argc, char** argv) {
             valid(long_fresh, 6);
             require(long_reuse.reused_prompt_tokens > 2048 && long_fresh.reused_prompt_tokens == 0,
                     "DFlash2 ring wrap lost its retained frontier");
+            require(long_reuse.generated_token_ids == long_fresh.generated_token_ids &&
+                        long_reuse.finish_reason == long_fresh.finish_reason,
+                    "DFlash2 ring-wrap continuation differs from full prefill");
         }
         if (k == 15) {
             auto tail_prompt   = std::vector<ninfer::TokenId>(options.max_context - 4, 198);

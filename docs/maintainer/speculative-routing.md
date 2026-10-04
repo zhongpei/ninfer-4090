@@ -1,7 +1,102 @@
-# Adaptive speculative routing (Stair)
+# Speculative routing
+
+Routing defaults to `fixed`. `calibrated` uses an offline measured action table;
+`stair` learns acceptance-based licensed extents. The modes have separate
+contracts and cannot be combined.
+
+## Calibrated DFlash2 chain
+
+Enable a profile explicitly on either CLI or server:
+
+```bash
+ninfer-serve MODEL.ninfer \
+  --spec dflash2 --draft-tokens 15 \
+  --spec-router calibrated --spec-router-profile PATH \
+  --greedy --presence-penalty 0 --frequency-penalty 0
+```
+
+The initial calibrated route supports DFlash2 chain with a startup K15 drafter,
+greedy sampling and zero presence/frequency penalties. If any active request
+uses other sampling settings, the entire compact batch uses existing fixed K15
+behavior for that round. Tree, lookup and Stair options cannot be combined with
+calibrated routing. A profile path is required only for this mode.
+
+Set penalties explicitly when selecting this route: `--greedy` overrides only
+temperature, and non-thinking chat can otherwise inherit presence penalty 1.5.
+For HTTP requests, specify `temperature: 0`, `presence_penalty: 0` and
+`frequency_penalty: 0` or use the corresponding process overrides. Eligibility
+uses resolved sampling values.
+
+After the previous round has completely committed, Program selects one action
+for the actual compact batch. The table key is active batch 1–8 and the maximum
+execution frontier across its lanes: ≤1024, 1025–8192 or 8193–32768. Client
+concurrency is not the table key. Missing cells and out-of-domain frontiers
+select target-only.
+
+Actions are target-only or K7/K11/K15 with physical target widths 1/8/12/16.
+The maximum drafter remains resident. Target-only skips its neural proposal;
+speculative actions retain the maximum proposal width. Committed target
+features and DFlash context must be caught up before returning to speculation.
+Pending replay, KV and recurrent state use the preceding round's actual width,
+including when the next action is narrower. Cache restore, terminal commits
+and later continuation preserve the same committed prefix.
+
+### Profile contract
+
+Profiles are local JSON artifacts with `schema_version: 1`,
+`artifact_type: "ninfer_spec_router_profile"`, `identity`, `cells` and optional
+`provenance`. Each cell contains `active_batch`, `frontier_upper`
+(1024/8192/32768) and `draft_tokens` (0/7/11/15). Repeated or invalid cells,
+unknown fields and malformed JSON are errors.
+
+Identity binds the model artifact ID and prefill signature, hardware class,
+backend, KV format, proposal head, startup draft count, CUDA Graph mode,
+concurrency, context, prefill chunk, resolved KV capacity, context-cache budgets
+and effective execution options. Startup rejects a missing profile or any
+identity mismatch. Copying a profile from another artifact or startup
+configuration is not a fallback mechanism.
+
+Performance qualification must measure actual resident-K15 control actions,
+including target-only's feature/context maintenance. Standalone fixed K7/K11
+measurements and Stair masking do not establish these costs. Retain AB/BA pairs
+with exact greedy outputs and complete responses. Every retained pair must
+beat target-only throughput; median improvement must be at least 2%, and each
+pair's request p95 regression must not exceed 5%. Select the highest qualified
+end-to-end throughput; actions within 1% of the highest throughput prefer the
+smaller K. No qualified benefit or coverage selects target-only.
+
+The profile generator attributes an end-to-end comparison to an actual cell
+only when that same cell accounts for at least 95% of full round elapsed time
+in every arm. It records minority join/drain cells without declaring coverage
+for them. Candidates must cover all represented workloads in the cell; neither
+client concurrency nor a minority observed round can fabricate coverage.
+Measurement controls may use a forced action profile, but are not qualified
+performance profiles.
+
+Graph resource evidence includes prepared definition/executable counts and
+`cuda_graph_prepare_peak_device_delta_bytes` / `cuda_graph_prepare_device_delta_bytes`
+from `MemorySummary`. These are startup device-wide free-memory deltas, measured
+through preparation and first launches, rather than exact Program-owned allocations.
+Compare the peak with `cuda_graph_allowance_bytes`; record other device users when
+interpreting it. Graph-disabled execution reports zero for these preparation fields.
+
+### Counters
+
+Calibrated logs expose `calibrated_target_only_rounds`, `calibrated_k7_rounds`,
+`calibrated_k11_rounds`, `calibrated_k15_rounds`, `calibrated_route_switches`
+and `calibrated_fixed_fallback_rounds`. Actions count successfully settled
+rounds; fallback rounds also count as K15 actions. Switches compare successive
+settled actions, excluding the first; request/cache boundaries do not reset
+that history. Engine snapshots are cumulative, not request or interval deltas.
+The CLI machine summary labels its scope `published_engine_snapshot`.
+
+## Stair
 
 NInfer can keep a DFlash/DFlash2 drafter at one startup maximum width while choosing a smaller
-target-verification extent for each round. This is an opt-in A/B feature:
+target-verification extent for each round. Stair changes licensed extent while
+retaining the startup physical proposal and target frame widths; it does not skip
+the neural drafter or provide the physical target-only route required by calibrated
+routing. This is an opt-in A/B feature:
 
 ```bash
 ninfer-serve MODEL.ninfer \
@@ -14,8 +109,7 @@ ninfer-serve MODEL.ninfer \
   --spec-router-state profiles/qwen38-4090.state
 ```
 
-Without `--spec-router stair`, routing is `fixed` and the previous maximum-K behavior is
-unchanged.
+Omitting `--spec-router` selects `fixed` and retains maximum-K behavior.
 
 ## Lifetime and persistence
 
@@ -80,7 +174,8 @@ oscillation from short-window noise.
 
 | CLI flag | Meaning | Default |
 |---|---|---:|
-| `--spec-router fixed\|stair` | routing mode | `fixed` |
+| `--spec-router fixed\|stair\|calibrated` | routing mode | `fixed` |
+| `--spec-router-profile PATH` | calibrated identity-bound profile | unset |
 | `--spec-router-scope request\|engine` | statistics lifetime | `request` |
 | `--spec-router-state PATH` | optional engine-state snapshot | unset |
 | `--spec-stair-widths A,B,C,D` | four strictly increasing target draft extents | `3,7,11,15` |
@@ -95,7 +190,7 @@ oscillation from short-window noise.
 Stair mode currently applies only to DFlash/DFlash2. Every configured width must be at or below
 `--draft-tokens`.
 
-## RTX 4090 calibration
+## Stair cost calibration on RTX 4090
 
 Do not copy a DGX Spark or RTX 3090 cost table. Measure the actual sm_89 path at the target context
 depths and KV format. The supplied `scripts/sweeps/dflash2-stair-router-realtext.ps1` compares the
@@ -103,7 +198,8 @@ fixed baseline with the adaptive policy on model-generated text and records outp
 acceptance, tokens/round and decode throughput.
 
 For each intended context class, measure at least the configured rungs and convert the median target
-verify times to one common relative scale. A/B comparisons should hold model artifact, prompt, KV
+round times to one common relative scale. A masked Stair extent is not evidence of a smaller
+physical target width. A/B comparisons should hold model artifact, prompt, KV
 format, sampling and CUDA Graph mode constant.
 
 For the K15/24 GB path, `scripts/sweeps/dflash2-stair-cost-calibration.ps1` holds the neural

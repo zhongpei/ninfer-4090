@@ -98,7 +98,7 @@ Fp8GdnConvPlan fp8_gdn_snapshot_resolve_plan(LinearPolicy policy, std::int32_t w
 Fp8GdnConvPlan fp8_gdn_record_resolve_plan(LinearPolicy policy, std::int32_t width,
                                            std::int32_t batch_size) {
     require_policy(policy, "fp8 GDN record");
-    if (width < 2 || width > 16 || batch_size <= 0 || batch_size > 8) {
+    if (width < 1 || width > 16 || batch_size <= 0 || batch_size > 8) {
         throw std::invalid_argument("fp8 GDN record: invalid B/W domain");
     }
     // Record and snapshot must choose the same arithmetic for the same physical block.
@@ -132,7 +132,7 @@ std::size_t fp8_gdn_snapshot_workspace_capacity_bytes(LinearPolicy policy, std::
 std::size_t fp8_gdn_record_workspace_capacity_bytes(LinearPolicy policy, std::int32_t batch_size,
                                                     std::int32_t min_width,
                                                     std::int32_t max_width) {
-    if (min_width < 2 || max_width < min_width) {
+    if (min_width < 1 || max_width < min_width) {
         throw std::invalid_argument("fp8 GDN record workspace: invalid width interval");
     }
     (void)fp8_gdn_record_resolve_plan(policy, min_width, batch_size);

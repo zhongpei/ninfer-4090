@@ -4,6 +4,7 @@
 #include "core/layout.h"
 #include "core/paged_kv_storage.h"
 #include "ops/kv_cache/d256_profile.h"
+#include "ops/kv_cache/append/launch.h"
 #include "ops/softmax_attention/dense/causal_cache/launch.h"
 
 #include <algorithm>
@@ -26,6 +27,7 @@ constexpr std::uint32_t kThreeChunkPromptVisibleKeys = 1024;
 std::int32_t causal_attention_chunk_tokens(std::int32_t q_heads, std::int32_t width,
                                            std::int32_t batch_size, KvCacheStorage storage,
                                            CausalAttentionExecutionEnvelope envelope) {
+    if (kv_storage_is_int8_family(storage)) return 128;
     if (q_heads == 16) return 6;
     // Balance the two narrow BF16 chunks; INT8 benefits from 5+4/5 at long contexts.
     if (batch_size == 1 && ((storage == KvCacheStorage::BFloat16 && width >= 9 && width <= 12) ||
@@ -336,6 +338,9 @@ namespace detail {
 CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::int32_t width,
                                                     std::int32_t batch_size, KvCacheStorage storage,
                                                     CausalAttentionExecutionEnvelope envelope) {
+    if (kv_storage_is_int8_family(storage)) {
+        return width <= 8 ? CausalAttentionRoute::SmallT : CausalAttentionRoute::ChunkedSmallT;
+    }
     if (q_heads == 24 && width <= kMaximumVerifyTokens) {
         if (batch_size == 1) {
             std::uint32_t prompt_limit = 0;
@@ -437,6 +442,9 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
             maximum = std::max(maximum, exact_capacity(width));
         }
     }
+    if (max_width > kMaximumVerifyTokens && kv_storage_is_int8_family(cache_storage)) {
+        maximum = std::max(maximum, exact_capacity(max_width));
+    }
     return maximum;
 }
 
@@ -461,6 +469,19 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     require_contiguous_nonnull(v, op, "v");
 
     auto scope = workspace.scope();
+    if (kv_storage_is_int8_family(cache.storage)) {
+        // Publish every live represented KV row before independent query CTAs read it.
+        // A fused per-query append would race with later queries reading earlier new rows.
+        for (std::int32_t row = 0; row < batch; ++row) {
+            const auto row_k = k.slice(3, row, 1);
+            const auto row_v = v.slice(3, row, 1);
+            const auto row_positions = positions.slice(1, row, 1);
+            const auto row_valid = valid_columns.data == nullptr ? Tensor{} : valid_columns.slice(0, row, 1);
+            const auto row_table = kv_table_rows.slice(0, row, 1);
+            detail::kv_cache_append_batch_launch(row_k, row_v, row_positions, row_valid, row_table,
+                                                 cache, stream);
+        }
+    }
     const detail::CausalAttentionRoute route =
         detail::causal_attention_resolve_route(q.ne[1], width, batch, cache.storage, envelope);
     if (route == detail::CausalAttentionRoute::ChunkedSmallT) {

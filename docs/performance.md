@@ -1,10 +1,11 @@
 # Single-GPU serving performance
 
 > **Read the hardware label before the numbers.** This index and the per-model pages it links to
-> carry measurements from two different GPUs, and they must not be read against each other:
+> carry measurements from different GPUs, and they must not be read against each other:
 >
 > | section | hardware | measured by |
 > |---|---|---|
+> | [RTX 4090 (`sm_89`) chain qualification](#rtx-4090-sm_89-chain-qualification) below | RTX 4090, `sm_89`, CUDA 12.8 | this fork |
 > | [RTX 3090 (`sm_86`) findings](#rtx-3090-sm_86-findings-this-fork) below | RTX 3090, `sm_86`, CUDA 12.8 | this fork |
 > | [Vision residency on RTX 3090](performance/qwen3.8-27b.md#vision-residency-on-rtx-3090-groupwise-int-sm_86) | RTX 3090, `sm_86` | this fork |
 > | Every per-model page under `performance/` | **RTX 5090, `sm_120a`, CUDA 13.1** | upstream |
@@ -16,6 +17,159 @@
 > characterise `sm_86` kernel behaviour — where upstream's inherited route boundaries were wrong by
 > 12–41%.
 
+## RTX 4090 (`sm_89`) chain qualification
+
+The final 2026-10-04 fixed-route campaign passes all 84 correctness
+comparisons and qualifies 71 performance comparisons across seven workloads,
+C1/C2/C4/C8 and K7/K11/K15. Resident-drafter calibration and final automatic
+performance comparisons remain in progress. Earlier server measurements below
+are historical evidence and do not qualify the final routing profile.
+
+The 2026-10-03 campaign uses the explicit local
+`Ternary-Bonsai-2-27B-ninfer-v3.ninfer` artifact, INT8 KV, greedy zero-penalty
+sampling, cache on and CUDA Graphs on. The original K15 chat CLI case now
+matches all 512 target-only token IDs at context 8192. Public Engine checks also
+match fresh and restored continuation, including `Root → PrivateTurnClosure`.
+Seven-workload server AB/BA comparisons pass complete responses and repeated
+output for K7/K11/K15 at C1/C2/C4/C8. HTTP does not expose token IDs; the
+native actual-batch measurement matrix additionally compares exact token IDs.
+See the [current qualification scope](maintainer/speculative-ab-testing.md#current-rtx-4090-qualification).
+
+Two retained fresh-process server pairs measure K15 C1 at 2.567× and 2.601×
+target-only end-to-end throughput. HTTP request p95 changes from 6.840 to 4.274
+seconds and from 6.887 to 4.238 seconds. Server startup context and KV capacity
+are 32768, engine concurrency is eight, and requests have a 512-token output
+budget with thinking disabled. C1 denotes client concurrency. These reports
+lack actual per-round batch/frontier measurements and do not qualify a routing
+profile. K15 C8's diagnostic median throughput ratio is approximately 0.920×,
+so the C1 result must not be generalized to all concurrent workloads.
+
+The final native public-Engine campaign uses the repaired persistent GDN
+transition, the explicit artifact above, INT8 KV, cache and graphs enabled,
+greedy zero-penalty sampling, a 512-token output budget, context/KV capacity
+32768 and startup concurrency eight. Two AB/BA pairs per comparison yield
+336 fresh-process measurements. All 84 comparisons match exact token IDs,
+complete responses and repeated output. Of these, 71 satisfy every paired
+throughput gain, median gain of at least 2%, and paired request-p95 regression
+of no more than 5%.
+
+| Fixed action | C1 | C2 | C4 | C8 |
+|---|---:|---:|---:|---:|
+| K7 | 7/7 | 7/7 | 7/7 | 6/7 |
+| K11 | 7/7 | 7/7 | 6/7 | 3/7 |
+| K15 | 7/7 | 7/7 | 4/7 | 3/7 |
+
+Fractions count qualified workloads, not actual batch coverage. Observer events
+cover actual batches 1–8 and the ≤1024 and 1025–8192 frontier bands; no
+8193–32768 cell occurs in the original seven workloads. Each action loads its
+own fixed-width drafter. These results therefore cannot select an action whose
+startup K15 drafter remains resident.
+
+Across the seven workloads, median aggregate end-to-end throughput is:
+
+| Requested concurrency | Target-only | Fixed K7 | Fixed K11 | Fixed K15 |
+|---|---:|---:|---:|---:|
+| C1 | 96.9 | 254.0 | 248.4 | 255.0 |
+| C2 | 183.2 | 448.5 | 367.7 | 339.2 |
+| C4 | 338.1 | 596.1 | 448.7 | 417.5 |
+| C8 | 573.1 | 683.9 | 546.5 | 456.0 |
+
+Units are generated tokens/s across concurrent requests. Candidate columns
+are medians of each workload's two retained measurements; target-only is the
+median across the paired baseline arms. These descriptive medians include
+performance failures and do not replace per-comparison paired ratios. K7's
+median paired gains across workloads are approximately 163%, 144%, 76% and
+18% at C1/C2/C4/C8. Chat C1 measures 97.04 → 247.45 tokens/s with K7,
+and request p95 falls from 5.313 to 2.083 seconds. Chat C8 K15 instead
+loses 37% throughput; long-context C8 K7 loses 4%. The final policy must
+retain target-only where no action qualifies. Evidence, actual round times,
+commits, request p50/p95 and memory samples are retained in
+`profiles/bench/consistency-2026-10-04/perf/fixed-final/`.
+
+| C1 workload | Target-only tokens/s | K7 tokens/s | Paired gain | Request p95, target → K7 (s) |
+|---|---:|---:|---:|---:|
+| prose | 96.63 | 253.97 | +162.8% | 5.331 → 2.031 |
+| chat | 97.04 | 247.45 | +155.0% | 5.313 → 2.083 |
+| reasoning | 97.34 | 445.42 | +357.6% | 5.291 → 1.178 |
+| code | 97.64 | 349.83 | +258.3% | 5.267 → 1.472 |
+| structured | 97.96 | 219.86 | +124.4% | 2.988 → 1.346 |
+| lookup-repeat | 88.99 | 384.62 | +332.2% | 6.126 → 1.699 |
+| long-context | 83.14 | 160.44 | +93.0% | 6.848 → 3.884 |
+
+These gains compare correct fixed DFlash2 against true target-only. They do
+not establish a final automatic-route gain. The retained 2026-10-03 fixed
+reports describe an earlier binary and are excluded from final calibration.
+
+Numerical repairs have nonuniform Op costs. Fixed attention partitions and
+high/residual query quantization, fixed-MMA GDN norm/control arithmetic, and
+canonical group-64 T2A8 accumulation pass their independent mathematical
+oracles and width regressions. Some short-width operations are slower than the
+old inconsistent routes. Op microbenchmarks do not establish an end-to-end
+policy improvement. Actual-batch calibration, resident maximum-drafter action
+costs and automatic-route performance remain separate qualification gates.
+Local commands, outputs and hardware records are retained under
+`profiles/bench/consistency-2026-10-03/`.
+
+Final long-context integration subsequently exposed an additional GDN
+counterexample: a T1019 prefill uses a 59-token recurrent tail after 960
+chunked tokens, while T1024 uses only 64-token chunks. Identical represented
+inputs and initial states produce different common-prefix BF16 outputs;
+target-only endpoint continuation then diverges at generated index two.
+The repair uses the same FP32 recurrent transition at every positive width,
+within one persistent kernel with tiled operand loading. Independent final
+integration now passes endpoint continuation, context-boundary switching,
+membership changes, stop/cancellation and zero-commit state release. Native
+C4/C8 checks match every token and complete response against true target-only,
+observe actual batches 1–8 and all four actions, and record 12 route switches
+with no fixed fallback. Evidence is in
+`profiles/bench/consistency-2026-10-03/integration-final-gnp/` and
+`profiles/bench/consistency-2026-10-04/integration-final-native/`.
+The final fixed measurements above include this repair. The current K15/C1
+ring-wrap and context-tail continuation regression also passes. Resident-K15
+calibration is running; no final automatic-route gain is claimed.
+
+The final calibrated startup at concurrency eight, context 32768 and KV
+capacity 131072 prepares and first-launches all 160 graph definitions and
+executables for actual widths 1/8/12/16 and batches 1–8. Its observed graph
+preparation device-memory increase is 1,684,013,056 bytes, within the 3 GiB
+allowance. Runtime reservation is 11,341,939,456 bytes and logical workspace
+peak is 185,393,152 bytes. These allocation measurements establish capacity;
+throughput and sampled whole-device memory are recorded separately per arm.
+
+Long-context resident-K15 action calibration additionally observes an actual
+10,301-token input. All pairs pass complete token/response and repeat checks.
+With a 768-token budget, K7 qualifies for actual B1–B6; its paired gains are
+133% at B1 and 50% at B4. B7/B8 initially lack ≥95% common-cell elapsed
+attribution, despite observed rounds at those batches. A focused 1536-token
+budget supplement ends naturally at 1527 generated tokens and qualifies K7
+at B7/B8 with gains of 20.2%/19.8%, while K11/K15 fail performance gates.
+All eight high-context cells now have eligible K7 evidence. These gains compare
+actions against resident-K15 action0, which skips the drafter; they are not
+Auto-versus-true-None gains. The sampled device-wide peak in every tail arm is
+17,949 MiB. Evidence is in
+`profiles/bench/consistency-2026-10-04/perf/resident-long-final/` and
+`profiles/bench/consistency-2026-10-04/perf/resident-long-tail-final/`.
+
+The A16 compound Conv repair passes its independent FP64 oracle, reducing
+the original B2/T1 relative-L2 counterexample from 0.003274 to 0.001694
+against the unchanged 0.00315 limit. Whole-Op timings remain mixed: T1 and
+T1024 are about 14% slower than the old BF16 staging path.
+
+The `prefill_a8=false` checks exposed two additional public T2 A16 width
+counterexamples: K15 diverged at generated index 16, and target-only Root
+prefill segmentation diverged at index 177. Canonical KW4 accumulation now
+passes independent FP64 qualification and exact width/segmentation checks,
+including the actual Root projection subweights. None, fixed K15 and
+calibrated target-only each pass four complete 512-token responses with
+explicit zero penalties, cache and graphs enabled: 6144 token IDs match,
+with Root, PrivateTurnClosure and reuse-off checks. Calibrated target-only
+actually uses width one and skips the drafter without fixed fallback.
+Cold-cache public Linear timings at N34816/K5120 change by +21.6% at T1,
++2.1% at T16 and −15.8% at T50. These are Op costs, not end-to-end gains;
+the default campaign uses the unchanged T2 A8 route. Final automatic-switching
+correctness passes; resident-drafter calibration and end-to-end automatic-route
+performance remain pending.
+
 ## RTX 3090 (`sm_86`) findings — this fork
 
 **DFlash2 measured on this fork (RTX 3090, Qwen3.8-27B groupwise-int, `--kv-dtype int8`,
@@ -25,8 +179,8 @@ and byte-identical output to the non-speculative vision run. These are single-pr
 numbers, not a campaign; the [Vision residency](performance/qwen3.8-27b.md#vision-residency-on-rtx-3090-groupwise-int-sm_86)
 and per-model pages remain the measured corpus results.
 
-**Speculative decoding is not bit-identical to non-speculative decoding here, it is not required
-to be, and every configuration is nonetheless deterministic in itself.** Measured 2026-09-09 by
+**Historical RTX 3090 measurements found deterministic output within each configuration,
+but different output across execution routes.** Measured 2026-09-09 by
 hashing the generated text of 23 configurations x 3 repetitions
 (`scripts/sweeps/dflash2-draft-tokens-realtext.ps1`, `content_sha256`):
 
@@ -35,13 +189,16 @@ hashing the generated text of 23 configurations x 3 repetitions
 - **DFlash2 and MTP do not match each other**, and DFlash2's output varies with the draft count —
   eight distinct outputs across k = 1..12.
 
-Verification evaluates k+1 columns in one pass while plain decode evaluates one, so the reductions
-run in a different order and a near-tie argmax can flip; a different draft count is a different
-width and so a different order again. That is why bit-identity to greedy is not a target here: it
-would require computing the accepted column with the width-1 kernel on every round, which is the
-work speculation exists to avoid. It costs nothing in quality — swapping an MMA tile for a
-different reduction order leaves perplexity bit-identical to twelve significant figures — so what
-is guaranteed is per-configuration determinism, not cross-configuration equality.
+Verification evaluates k+1 columns in one pass while plain decode evaluates one. Different
+arithmetic routes can change a near-tie argmax, but the output hashes alone do not locate the
+first differing operation or state transition. These historical measurements do not establish
+cross-route equivalence or qualify the current RTX 4090 implementation.
+
+The RTX 4090 DFlash2 release gate requires exact greedy output against target-only execution,
+including prefix reuse, before performance selection. It does not require every private
+floating-point intermediate to be bit-identical. See the [target consistency
+contract](maintainer/dflash.md#greedy-target-consistency) and [A/B qualification
+status](maintainer/speculative-ab-testing.md#current-rtx-4090-qualification).
 
 *An earlier version of this section claimed DFlash2 and MTP "produce the same output as each other".
 That was inferred from one prompt and is wrong; the hashes above are the measurement.*

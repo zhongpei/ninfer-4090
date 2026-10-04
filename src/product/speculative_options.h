@@ -57,6 +57,7 @@ parse_speculative_router_scope(std::string_view value) {
 parse_speculative_routing_mode(std::string_view value) {
     if (value == "fixed") { return SpeculativeRoutingMode::Fixed; }
     if (value == "stair") { return SpeculativeRoutingMode::Stair; }
+    if (value == "calibrated") { return SpeculativeRoutingMode::Calibrated; }
     throw std::invalid_argument("invalid speculative router: " + std::string(value));
 }
 
@@ -143,6 +144,33 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
     const auto& router = options.routing;
     const auto& tree = options.tree;
     const auto& lookup = options.lookup;
+    if (router.mode != SpeculativeRoutingMode::Calibrated && !router.profile_path.empty()) {
+        throw std::invalid_argument("--spec-router-profile requires --spec-router calibrated");
+    }
+    if (router.mode == SpeculativeRoutingMode::Calibrated) {
+        if (options.backend != SpeculativeBackend::DFlash2 || options.draft_tokens != 15) {
+            throw std::invalid_argument("--spec-router calibrated requires --spec dflash2 --draft-tokens 15");
+        }
+        if (router.profile_path.empty()) {
+            throw std::invalid_argument("--spec-router calibrated requires --spec-router-profile PATH");
+        }
+        if (tree.mode != SpeculativeTreeMode::Off || options.lookup_ngram != 0 ||
+            lookup.dflash_mode != LookupDFlashMode::Off || lookup.persistent_tokens != 0 ||
+            !lookup.persistent_path.empty() || !lookup.corpus_prefix.empty()) {
+            throw std::invalid_argument("--spec-router calibrated cannot combine with tree or lookup");
+        }
+        const SpeculativeRoutingOptions defaults;
+        if (router.scope != defaults.scope || !router.state_path.empty() ||
+            router.widths != defaults.widths || router.verify_costs != defaults.verify_costs ||
+            router.draft_cost != defaults.draft_cost ||
+            router.prior_acceptance != defaults.prior_acceptance ||
+            router.prior_weight != defaults.prior_weight ||
+            router.warmup_rounds != defaults.warmup_rounds ||
+            router.probe_period != defaults.probe_period ||
+            router.switch_margin != defaults.switch_margin) {
+            throw std::invalid_argument("--spec-router calibrated cannot combine with Stair parameters");
+        }
+    }
     if (tree.nodes == 0 || tree.nodes > 15 || tree.spine == 0 || tree.spine > 15) {
         throw std::invalid_argument("invalid speculative tree node/spine policy");
     }

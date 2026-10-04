@@ -121,14 +121,13 @@ void small_gemm(const T2A8Activations& x, SmallColumns span, const SmallParent<E
     CUDA_CHECK(cudaGetLastError());
 }
 
-// Measured on the RTX 3090 (ninfer_linear_bench, cold L2, 350 W): two code words per lane (256
-// contiguous code bytes per row and slab) beat one by 3-15% on the wide shapes at every width, and
-// a deeper cp.async ring or 64/128-row CTAs lose. Sixteen rows per CTA over 1024-k slabs win every
-// width up to 16 columns (the q/k + value/z pair's 12288 rows are within 5% of 32-row CTAs
-// at 9..16); four column tiles take 32 rows over 512-k slabs.
-using SmallSchedule8  = T2SmallTI8Schedule<8, 1, 1, 2, 4, 2>;
-using SmallSchedule16 = T2SmallTI8Schedule<8, 1, 2, 2, 4, 2>;
-using SmallSchedule32 = T2SmallTI8Schedule<4, 1, 4, 2, 3, 2>;
+// RTX 4090 schedules preserve the same ascending 64-element group accumulation.
+// Narrow widths parallelize bounded integer group windows; wider gate/up projections
+// use sequential groups, while the longer down projection retains an eight-group window.
+using SmallSchedule8  = T2SmallTI8Schedule<8, 2, 1, 2>;
+using SmallSchedule16 = T2SmallTI8Schedule<8, 1, 2, 2>;
+using SmallSchedule32 = T2SmallTI8Schedule<1, 4, 4, 8>;
+using SmallSchedule32Down = T2SmallTI8Schedule<8, 1, 4, 2>;
 
 // Launches of at most 32 columns each: from 33 columns the weights stream once per launch, and six
 // launches (192 columns) still beat the A16 route and the prefill GEMM's 256-column tile on the
@@ -143,7 +142,11 @@ void small_route(const T2A8Activations& x, const SmallParent<Epilogue>& first,
         } else if (span.cols <= 16) {
             small_gemm<SmallSchedule16>(x, span, first, second, stream);
         } else {
-            small_gemm<SmallSchedule32>(x, span, first, second, stream);
+            if (x.input_rows == 17408) {
+                small_gemm<SmallSchedule32Down>(x, span, first, second, stream);
+            } else {
+                small_gemm<SmallSchedule32>(x, span, first, second, stream);
+            }
         }
     }
 }

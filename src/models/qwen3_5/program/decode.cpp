@@ -385,6 +385,12 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             .tokens =
                 std::span<const TokenId>(ordinary_host_egress->sampled_tokens.data(), lanes.size()),
             .timing = timing.finish(),
+            .decode_execution = {.max_execution_frontier = maximum_frontier,
+                                 .verify_width = 1,
+                                 .draft_tokens = 0,
+                                 .backend = speculative_backend,
+                                 .proposal_width = 0,
+                                 .neural_drafter_executed = false},
         };
     } catch (...) {
         timing.begin_wait();
@@ -562,6 +568,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                 .base_S        = base_S,
                 .prompt_tokens = 0,
                 .produced      = static_cast<std::uint32_t>(count_i),
+                .verify_width = width,
             };
             request.lifecycle = Lifecycle::Pending;
             request.timings.decode_seconds += seconds;
@@ -573,6 +580,12 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                                         lanes.size()),
             .row_stride = width,
             .timing     = timing.finish(),
+            .decode_execution = {.max_execution_frontier = maximum_frontier,
+                                 .verify_width = width,
+                                 .draft_tokens = draft_window,
+                                 .backend = speculative_backend,
+                                 .proposal_width = 1,
+                                 .neural_drafter_executed = true},
         };
     } catch (...) {
         timing.begin_wait();
@@ -601,7 +614,11 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         throw std::invalid_argument("DFlash batch membership is invalid");
     }
 
-    const std::uint32_t width           = draft_window + 1U;
+    const std::uint32_t proposal_width = draft_window + 1U;
+    std::uint32_t width = proposal_width;
+    std::uint32_t selected_drafts = draft_window;
+    const bool calibrated = speculative_routing.mode == SpeculativeRoutingMode::Calibrated;
+    bool calibrated_fixed_fallback = false;
     std::array<std::uint32_t, kMaximumConcurrency> normal_extents{};
     std::array<::ninfer::qwen3_5::LookupDraftProposal, kMaximumConcurrency> lookup_proposals{};
     const bool lookup_enabled =
@@ -666,6 +683,21 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
     }
 
+    if (calibrated) {
+        if (!calibrated_routing) { throw std::logic_error("calibrated Program has no routing table"); }
+        for (const auto lane : lanes) {
+            const auto& sampling = requests[lane].sampling_host;
+            calibrated_fixed_fallback = calibrated_fixed_fallback || sampling.temperature != 0.0F ||
+                sampling.presence_penalty != 0.0F || sampling.frequency_penalty != 0.0F;
+        }
+        selected_drafts = calibrated_fixed_fallback ? draft_window :
+            calibrated_routing->select(static_cast<std::uint32_t>(lanes.size()), maximum_frontier);
+        width = selected_drafts + 1U;
+        for (std::size_t row = 0; row < lanes.size(); ++row) {
+            normal_extents[row] = std::min(normal_extents[row], selected_drafts);
+        }
+    }
+
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const SequenceState& sequence = active_sequence(lanes[row]);
         const std::uint32_t extent =
@@ -673,6 +705,9 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         maximum_target_tokens =
             std::max(maximum_target_tokens, sequence.execution_frontier + extent + 1U);
     }
+
+    const bool run_neural_drafter =
+        selected_drafts != 0 && (!lookup_batch || lookup_options.dflash_mode == LookupDFlashMode::Replace);
 
     const bool tree_requested = speculative_tree.mode == SpeculativeTreeMode::Lattice;
     const bool tree_sampling_ok =
@@ -721,16 +756,20 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         execution::DFlashEnvelopes envelopes = dflash_envelopes(0, maximum_frontier, draft_window);
         ops::CausalAttentionExecutionEnvelope target_envelope{1, maximum_target_tokens};
         if (use_cuda_graph && !lookup_batch && !tree_active) {
+            const auto action_index = static_cast<std::size_t>(std::find(
+                runtime::kCalibratedDraftActions.begin(), runtime::kCalibratedDraftActions.end(),
+                selected_drafts) - runtime::kCalibratedDraftActions.begin());
+            DecodeGraphFamily& graphs = calibrated ? calibrated_dflash_graphs.at(action_index) : dflash_graphs;
             DecodeGraphProfile& profile =
-                select_graph_profile(dflash_graphs, static_cast<std::uint32_t>(lanes.size()),
+                select_graph_profile(graphs, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "DFlash batch");
-            executable      = &install_graph_profile(dflash_graphs, profile, "DFlash batch");
+            executable = &install_graph_profile(graphs, profile, "DFlash batch");
             envelopes       = dflash_envelopes(profile.min_execution_frontier,
                                                profile.max_execution_frontier, draft_window);
             target_envelope = {
                 1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
                        capacity, static_cast<std::uint64_t>(profile.max_execution_frontier) +
-                                     draft_window + 1ULL))};
+                                     selected_drafts + 1ULL))};
         }
 
         for (std::size_t row = 0; row < lanes.size(); ++row) {
@@ -745,7 +784,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 checked_i32(frontier, "DFlash batch frontier");
             dflash_host_ingress->context_frontiers[row] =
                 checked_i32(sequence.dflash_context_frontier, "DFlash context frontier");
-            dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(width);
+            dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(proposal_width);
             dflash_host_ingress->proposal_extents[row]       = static_cast<std::int32_t>(extent);
             dflash_host_ingress->target_valid_columns[row] = static_cast<std::int32_t>(extent + 1U);
             for (std::uint32_t column = 0; column < width; ++column) {
@@ -774,7 +813,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
 
         execution::DFlashBatchContext schedule_state{
             {device, parameters, work, state_images->linear(),
-             replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
+             replay_records_for_width(width), io, prefill_hidden, prefill_chunk,
              proposal_head, rope_scaling_factor, rope_scaling_original_context},
             decoder->text_kv,
             *dflash,
@@ -793,16 +832,16 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                             lookup_host.begin() +
                                 static_cast<std::ptrdiff_t>(row * draft_window));
             }
-            const bool run_drafter = lookup_options.dflash_mode == LookupDFlashMode::Replace;
             execution::dflash_lookup_decode_batch(
                 schedule_state, static_cast<std::int32_t>(lanes.size()), draft_window, envelopes,
-                target_envelope, std::span<const TokenId>(lookup_host), run_drafter);
+                target_envelope, std::span<const TokenId>(lookup_host), run_neural_drafter);
         } else if (tree_active) {
             execution::dflash_tree_decode(schedule_state, draft_window, envelopes, target_envelope,
                                           tree_round_options);
         } else {
             execution::dflash_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
-                                           draft_window, envelopes, target_envelope, executable);
+                                           draft_window, envelopes, target_envelope, executable,
+                                           calibrated ? std::optional(selected_drafts) : std::nullopt);
         }
         submit_range.reset();
         timing.begin_wait();
@@ -892,6 +931,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                  .base_S        = base_S,
                                  .prompt_tokens = 0,
                                  .produced      = static_cast<std::uint32_t>(count_i),
+                                 .verify_width = width,
                                  .tree_verify   = tree_active,
             };
             request.lifecycle = Lifecycle::Pending;
@@ -904,6 +944,14 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                                         lanes.size()),
             .row_stride = width,
             .timing     = timing.finish(),
+            .decode_execution = {.max_execution_frontier = maximum_frontier,
+                                 .verify_width = width,
+                                 .draft_tokens = selected_drafts,
+                                 .backend = speculative_backend,
+                                 .proposal_width = run_neural_drafter ? proposal_width : 0U,
+                                 .neural_drafter_executed = run_neural_drafter,
+                                 .calibrated = calibrated,
+                                 .calibrated_fixed_fallback = calibrated_fixed_fallback},
         };
     } catch (...) {
         timing.begin_wait();

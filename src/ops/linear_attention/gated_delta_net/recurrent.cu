@@ -19,7 +19,7 @@ static_assert(sizeof(GdnReplayFoldKernelRows) == 128);
 static_assert(alignof(GdnReplayFoldKernelRows) == 16);
 static_assert(std::is_trivially_copyable_v<GdnReplayFoldKernelRows>);
 
-template <bool NormalizeQK, class StateT>
+template <bool NormalizeQK, class ReadStateT, class WriteStateT>
 void launch_recurrent_direct_typed(const Tensor& q, const Tensor& k, const Tensor& v,
                                    const Tensor& g, const Tensor& beta, float scale,
                                    const Tensor& state_read, Tensor& state_write, Tensor& out,
@@ -27,12 +27,24 @@ void launch_recurrent_direct_typed(const Tensor& q, const Tensor& k, const Tenso
     const auto heads = head_map::of(q.ne[1], v.ne[1]);
     const dim3 grid(static_cast<unsigned>(v.ne[1]), 1, static_cast<unsigned>(kStateDim / kBlockDv));
     const dim3 block(kWarpSize, kNumWarps, 1);
-    recurrent_bf16_direct_kernel<NormalizeQK, StateT><<<grid, block, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(q.data), static_cast<const __nv_bfloat16*>(k.data),
-        static_cast<const __nv_bfloat16*>(v.data), static_cast<const float*>(g.data),
-        static_cast<const float*>(beta.data), static_cast<const StateT*>(state_read.data),
-        static_cast<StateT*>(state_write.data), static_cast<__nv_bfloat16*>(out.data), q.ne[2],
-        heads, scale);
+    const auto addresses = reinterpret_cast<std::uintptr_t>(q.data) |
+                           reinterpret_cast<std::uintptr_t>(k.data) |
+                           reinterpret_cast<std::uintptr_t>(v.data);
+    if (q.ne[2] > 1 && (addresses & 15u) == 0) {
+        recurrent_staged_direct_kernel<NormalizeQK, ReadStateT, WriteStateT><<<grid, block, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(q.data), static_cast<const __nv_bfloat16*>(k.data),
+            static_cast<const __nv_bfloat16*>(v.data), static_cast<const float*>(g.data),
+            static_cast<const float*>(beta.data), static_cast<const ReadStateT*>(state_read.data),
+            static_cast<WriteStateT*>(state_write.data), static_cast<__nv_bfloat16*>(out.data), q.ne[2],
+            heads, scale);
+    } else {
+        recurrent_bf16_direct_kernel<NormalizeQK, ReadStateT, WriteStateT><<<grid, block, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(q.data), static_cast<const __nv_bfloat16*>(k.data),
+            static_cast<const __nv_bfloat16*>(v.data), static_cast<const float*>(g.data),
+            static_cast<const float*>(beta.data), static_cast<const ReadStateT*>(state_read.data),
+            static_cast<WriteStateT*>(state_write.data), static_cast<__nv_bfloat16*>(out.data), q.ne[2],
+            heads, scale);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -41,15 +53,20 @@ void launch_recurrent_direct_fixed(const Tensor& q, const Tensor& k, const Tenso
                                    const Tensor& g, const Tensor& beta, float scale,
                                    const Tensor& state_read, Tensor& state_write, Tensor& out,
                                    cudaStream_t stream) {
-    if (state_read.dtype != state_write.dtype) {
-        throw std::invalid_argument("GDN recurrent: state read/write dtypes differ");
-    }
     if (state_read.dtype == DType::FP16) {
-        launch_recurrent_direct_typed<NormalizeQK, __half>(q, k, v, g, beta, scale, state_read,
-                                                            state_write, out, stream);
+        if (state_write.dtype == DType::FP16) {
+            launch_recurrent_direct_typed<NormalizeQK, __half, __half>(
+                q, k, v, g, beta, scale, state_read, state_write, out, stream);
+        } else {
+            launch_recurrent_direct_typed<NormalizeQK, __half, float>(
+                q, k, v, g, beta, scale, state_read, state_write, out, stream);
+        }
+    } else if (state_write.dtype == DType::FP16) {
+        launch_recurrent_direct_typed<NormalizeQK, float, __half>(
+            q, k, v, g, beta, scale, state_read, state_write, out, stream);
     } else {
-        launch_recurrent_direct_typed<NormalizeQK, float>(q, k, v, g, beta, scale, state_read,
-                                                           state_write, out, stream);
+        launch_recurrent_direct_typed<NormalizeQK, float, float>(
+            q, k, v, g, beta, scale, state_read, state_write, out, stream);
     }
 }
 

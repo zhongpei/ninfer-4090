@@ -61,6 +61,7 @@ enum class CacheState : std::uint8_t {
 
 enum class Format : std::uint8_t {
     Q4Q5,
+    T2,
     Nvfp4,
     Fp8,
     Q8,
@@ -191,11 +192,12 @@ CacheMode parse_cache(std::string_view value) {
 
 Format parse_format(std::string_view value) {
     if (value == "q4q5") return Format::Q4Q5;
+    if (value == "t2") return Format::T2;
     if (value == "nvfp4") return Format::Nvfp4;
     if (value == "fp8") return Format::Fp8;
     if (value == "q8") return Format::Q8;
     if (value == "all") return Format::All;
-    throw std::invalid_argument("--format must be q4q5, nvfp4, fp8, q8, or all");
+    throw std::invalid_argument("--format must be q4q5, t2, nvfp4, fp8, q8, or all");
 }
 
 Form parse_form(std::string_view value) {
@@ -232,7 +234,7 @@ void usage(const char* argv0) {
     std::fprintf(stderr,
                  "Usage: %s [options]\n\n"
                  "Public workload:\n"
-                 "  --format q4q5|nvfp4|fp8|q8|all  Default q4q5.\n"
+                 "  --format q4q5|t2|nvfp4|fp8|q8|all  Default q4q5.\n"
                  "  --form snapshot|record|both  Default snapshot.\n"
                  "  --nvfp4-policy a16|a4        Default a4.\n"
                  "  --fp8-policy a16|a8          Default a8.\n"
@@ -341,10 +343,10 @@ std::vector<Execution> selected_executions(Execution execution) {
 std::vector<Form> selected_forms(Form form, std::int32_t tokens) {
     if (form == Form::Snapshot) return {Form::Snapshot};
     if (form == Form::Record) {
-        if (tokens < 2) { throw std::invalid_argument("ReplaySSM Record requires T>=2"); }
+        if (tokens > 16) { throw std::invalid_argument("ReplaySSM Record requires T<=16"); }
         return {Form::Record};
     }
-    if (tokens == 1) return {Form::Snapshot};
+    if (tokens > 16) return {Form::Snapshot};
     return {Form::Snapshot, Form::Record};
 }
 
@@ -385,12 +387,13 @@ const char* policy_name(ops::LinearPolicy policy) {
     return "a16";
 }
 
+template <bool Ternary = false>
 class Q4Q5Fixture {
 public:
     explicit Q4Q5Fixture(std::size_t flush_bytes)
-        : qk_(bench::make_row_split_weight(QType::Q4_G64_FP16, kQkRows, kHidden, kHidden,
+        : qk_(bench::make_row_split_weight(Ternary ? QType::T2_G128_FP16 : QType::Q4_G64_FP16, kQkRows, kHidden, kHidden,
                                            {0x53, 0x00, 0x3400})),
-          value_z_(bench::make_row_split_weight(QType::Q5_G64_FP16, kValueZRows, kHidden, kHidden,
+          value_z_(bench::make_row_split_weight(Ternary ? QType::T2_G128_FP16 : QType::Q5_G64_FP16, kValueZRows, kHidden, kHidden,
                                                 {0x53, 0x55, 0x3400})),
           conv_weight_(bench::make_bf16(static_cast<std::size_t>(kChannels) * 4)),
           flush_(flush_bytes) {
@@ -402,7 +405,7 @@ public:
         return Tensor(conv_weight_.p, DType::BF16, {kChannels, 4});
     }
 
-    [[nodiscard]] const char* profile() const noexcept { return "q4-q5"; }
+    [[nodiscard]] const char* profile() const noexcept { return Ternary ? "t2-a16" : "q4-q5"; }
 
     [[nodiscard]] GdnGeometry geometry() const noexcept {
         return {kHidden, kQueryRows, kKeyRows, kValueRows, kZRows};
@@ -410,6 +413,14 @@ public:
 
     [[nodiscard]] std::size_t workspace_capacity(Form form, std::int32_t batch,
                                                  std::int32_t tokens) const {
+        if constexpr (Ternary) {
+            if (form == Form::Record) {
+                return ops::gdn_input_proj_split_conv_record_workspace_capacity_bytes(
+                    QType::T2_G128_FP16, QType::T2_G128_FP16, batch, tokens, tokens);
+            }
+            return ops::gdn_input_proj_split_conv_snapshot_workspace_capacity_bytes(
+                QType::T2_G128_FP16, QType::T2_G128_FP16, batch, tokens, tokens);
+        }
         if (form == Form::Record) {
             return ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
                 kQueryRows, kKeyRows, kValueRows, batch, tokens, tokens);
@@ -911,6 +922,7 @@ int main(int argc, char** argv) {
         const Options options = parse_options(argc, argv);
         DeviceContext context;
         const char* configured_format = options.format == Format::Q4Q5    ? "q4q5"
+                                        : options.format == Format::T2    ? "t2"
                                         : options.format == Format::Nvfp4 ? "nvfp4"
                                         : options.format == Format::Fp8   ? "fp8"
                                         : options.format == Format::Q8    ? "q8"
@@ -927,7 +939,11 @@ int main(int argc, char** argv) {
 
         std::vector<Result> results;
         if (options.format == Format::Q4Q5 || options.format == Format::All) {
-            Q4Q5Fixture fixture(static_cast<std::size_t>(options.flush_bytes));
+            Q4Q5Fixture<> fixture(static_cast<std::size_t>(options.flush_bytes));
+            run_fixture(fixture, options, context.stream, results);
+        }
+        if (options.format == Format::T2 || options.format == Format::All) {
+            Q4Q5Fixture<true> fixture(static_cast<std::size_t>(options.flush_bytes));
             run_fixture(fixture, options, context.stream, results);
         }
         if (options.format == Format::Nvfp4 || options.format == Format::All) {

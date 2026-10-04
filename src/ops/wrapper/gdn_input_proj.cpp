@@ -83,7 +83,7 @@ ConvGeometry require_snapshot_input(const Tensor& x, std::int32_t hidden) {
 
 ConvGeometry require_record_input(const Tensor& x, std::int32_t hidden) {
     constexpr std::int32_t kMaximumBatch = 8;
-    constexpr std::int32_t kMinimumWidth = 2;
+    constexpr std::int32_t kMinimumWidth = 1;
     constexpr std::int32_t kMaximumWidth = 16;
     const std::int32_t width             = x.ne[1];
     const std::int32_t batch             = x.ne[2];
@@ -247,7 +247,7 @@ void require_snapshot_capacity_domain(std::int32_t batch_size, std::int32_t min_
 void require_record_capacity_domain(std::int32_t batch_size, std::int32_t min_width,
                                     std::int32_t max_width) {
     constexpr std::int32_t kMaximumBatch = 8;
-    constexpr std::int32_t kMinimumWidth = 2;
+    constexpr std::int32_t kMinimumWidth = 1;
     constexpr std::int32_t kMaximumWidth = 16;
     if (batch_size <= 0 || batch_size > kMaximumBatch || min_width < kMinimumWidth ||
         max_width < min_width || max_width > kMaximumWidth) {
@@ -637,6 +637,12 @@ void dispatch_single_parent_record(const Tensor& x, const Weight& weight, const 
                            });
             return;
         }
+        if (plan.schedule == detail::Nvfp4GdnConvScheduleId::DecodeFusedA16) {
+            detail::nvfp4_gdn_record_decode_launch(x, weight, conv_weight, conv_states,
+                                                  valid_columns, initial_state_slots, conv_record,
+                                                  query, key, value, z, stream);
+            return;
+        }
         if (plan.schedule == detail::Nvfp4GdnConvScheduleId::SmallTFusedA16) {
             detail::nvfp4_gdn_record_small_t_launch(x, weight, conv_weight, conv_states,
                                                     valid_columns, initial_state_slots, conv_record,
@@ -720,6 +726,12 @@ void dispatch_single_parent_record(const Tensor& x, const Weight& weight, const 
         return;
     }
     const detail::Q8GdnInputConvPlan plan = resolve_q8_conv_plan(geometry.width, geometry.batch);
+    if (plan.schedule == detail::Q8GdnInputConvScheduleId::DecodeFused) {
+        detail::q8_gdn_input_decode_conv_record_launch(x, weight, conv_weight, conv_states,
+                                                       valid_columns, initial_state_slots,
+                                                       conv_record, query, key, value, z, stream);
+        return;
+    }
     if (plan.schedule != detail::Q8GdnInputConvScheduleId::SplitKMmaFused) {
         throw std::logic_error("Q8 ReplaySSM record domain selected a non-record schedule");
     }
@@ -817,6 +829,61 @@ std::size_t t2_two_parent_projection_bytes(std::int32_t min_columns, std::int32_
         bytes = std::max(bytes, layout.peak_bytes(1));
     }
     return bytes;
+}
+
+// Preserve the established A8 allocation when every width is covered; FP32 current-p
+// storage is needed only by the A16 arithmetic branch.
+std::size_t t2_conv_capacity(std::int32_t batch, std::int32_t min_width,
+                             std::int32_t max_width, LinearPolicy policy, bool snapshot) {
+    const int min_columns = batch * min_width;
+    const int max_columns = batch * max_width;
+    const auto projection_bytes =
+        t2_two_parent_projection_bytes(min_columns, max_columns, policy);
+    std::size_t bytes = snapshot
+                            ? composed_snapshot_capacity(10240, max_columns, projection_bytes)
+                            : projection_bytes;
+    for (int columns = min_columns; columns <= max_columns; ++columns) {
+        WorkspaceLayoutBuilder layout;
+        if (!detail::t2_a8_admits(policy) ||
+            !detail::t2_a8_layout_activations(layout, 5120, columns)) {
+            WorkspaceLayoutBuilder current;
+            (void)current.alloc(DType::FP32, {10240, columns});
+            bytes = std::max(bytes, current.peak_bytes(1));
+        }
+    }
+    return bytes;
+}
+
+bool t2_uses_current_fp32(const Weight& qk, const Weight& value_z, int columns,
+                          LinearPolicy policy) {
+    return !detail::t2_a8_admits(policy) || !detail::t2_a8_supported(qk, columns) ||
+           !detail::t2_a8_supported(value_z, columns);
+}
+
+void compose_t2_current(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                         const Tensor& conv_weight, const Tensor& conv_states,
+                         const Tensor& valid_columns, const Tensor& initial,
+                         const Tensor* snapshot_base, Tensor* record, Tensor& query, Tensor& key,
+                         Tensor& value, Tensor& z, ConvGeometry geometry,
+                         WorkspaceArena& workspace, cudaStream_t stream) {
+    auto scope = workspace.scope();
+    Tensor projected = workspace.alloc(DType::FP32, {10240, geometry.aggregate_columns});
+    Tensor x_flat = flatten_columns(x, x.ne[0], geometry);
+    Tensor z_flat = flatten_columns(z, z.ne[0], geometry);
+    Tensor record_flat;
+    if (record != nullptr) { record_flat = flatten_columns(*record, 10240, geometry); }
+    detail::gdn_t2_current_projection_launch(x_flat, qk_weight, value_z_weight, projected, z_flat,
+                                             record == nullptr ? nullptr : &record_flat, stream);
+    Tensor current(projected.data, DType::FP32, {10240, geometry.width, geometry.batch});
+    if (snapshot_base != nullptr) {
+        Tensor snapshot_states = conv_states;
+        detail::gdn_projected_conv_snapshot_launch(current, conv_weight, snapshot_states, valid_columns,
+                                                   initial, *snapshot_base, query, key, value,
+                                                   stream);
+    } else {
+        detail::gdn_projected_conv_record_launch(current, conv_weight, conv_states, valid_columns,
+                                                 initial, query, key, value, stream);
+    }
 }
 
 } // namespace
@@ -1033,10 +1100,7 @@ std::size_t gdn_input_proj_split_conv_snapshot_workspace_capacity_bytes(
     std::int32_t min_width, std::int32_t max_width) {
     if (qk_qtype == QType::T2_G128_FP16 && value_z_qtype == QType::T2_G128_FP16) {
         require_snapshot_capacity_domain(batch_size, min_width, max_width);
-        const std::int32_t columns = std::max(batch_size, 1) * max_width;
-        return composed_snapshot_capacity(
-            2048 + 2048 + 6144, columns,
-            t2_two_parent_projection_bytes(std::max(batch_size, 1) * min_width, columns, policy));
+        return t2_conv_capacity(batch_size, min_width, max_width, policy, true);
     }
     if (qk_qtype == QType::Q4_G64_FP16 && value_z_qtype == QType::Q5_G64_FP16) {
         return gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 6144, batch_size,
@@ -1059,8 +1123,7 @@ std::size_t gdn_input_proj_split_conv_record_workspace_capacity_bytes(
     std::int32_t min_width, std::int32_t max_width) {
     if (qk_qtype == QType::T2_G128_FP16 && value_z_qtype == QType::T2_G128_FP16) {
         require_record_capacity_domain(batch_size, min_width, max_width);
-        return t2_two_parent_projection_bytes(std::max(batch_size, 1) * min_width,
-                                              std::max(batch_size, 1) * max_width, policy);
+        return t2_conv_capacity(batch_size, min_width, max_width, policy, false);
     }
     if (qk_qtype == QType::Q4_G64_FP16 && value_z_qtype == QType::Q5_G64_FP16) {
         return gdn_input_proj_conv_record_workspace_capacity_bytes(2048, 2048, 6144, batch_size,
@@ -1104,15 +1167,12 @@ std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
         throw std::invalid_argument(
             "gdn_input_proj_conv_record workspace: unsupported single-parent profile");
     }
-    const detail::Nvfp4GdnConvPlan minimum_plan =
-        detail::nvfp4_gdn_conv_resolve_plan(policy, min_width, batch_size);
+    (void)detail::nvfp4_gdn_conv_resolve_plan(policy, min_width, batch_size);
     const detail::Nvfp4GdnConvPlan maximum_plan =
         detail::nvfp4_gdn_conv_resolve_plan(policy, max_width, batch_size);
     if (batch_size == 1) {
-        if (minimum_plan.schedule == detail::Nvfp4GdnConvScheduleId::DecodeFusedA16) {
-            throw std::logic_error("ReplaySSM record planner admitted NVFP4 decode");
-        }
-        if (maximum_plan.schedule == detail::Nvfp4GdnConvScheduleId::SmallTFusedA16) { return 0; }
+        if (maximum_plan.schedule == detail::Nvfp4GdnConvScheduleId::DecodeFusedA16 ||
+            maximum_plan.schedule == detail::Nvfp4GdnConvScheduleId::SmallTFusedA16) { return 0; }
         return detail::nvfp4_gdn_input_workspace_capacity_bytes(LinearPolicy::AllowA4,
                                                                 std::max(min_width, 4), max_width);
     }
@@ -1163,6 +1223,14 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
                         "gdn_input_proj_conv_snapshot", "value");
     require_conv_tensor(z, kZRows, geometry.width, geometry.batch, "gdn_input_proj_conv_snapshot",
                         "z");
+
+    if (ternary && t2_uses_current_fp32(qk_weight, value_z_weight,
+                                         geometry.aggregate_columns, policy)) {
+        compose_t2_current(x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+                           initial_state_slots, &snapshot_base_slots, nullptr, query, key, value,
+                           z, geometry, ws, stream);
+        return;
+    }
 
     if (geometry.batch > 1) {
         compose_batched_snapshot(
@@ -1240,6 +1308,13 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
     require_record_nonoverlap(x, conv_weight, conv_states, valid_columns, initial_state_slots,
                               conv_record, query, key, value, z, workspace);
 
+    if (ternary && t2_uses_current_fp32(qk_weight, value_z_weight,
+                                         geometry.aggregate_columns, policy)) {
+        compose_t2_current(x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+                           initial_state_slots, nullptr, &conv_record, query, key, value, z,
+                           geometry, workspace, stream);
+        return;
+    }
     if (!ternary) { require_q4_q5_conv_admitted(geometry.width, geometry.batch); }
     compose_record(x, conv_weight, conv_states, valid_columns, initial_state_slots, conv_record,
                    query, key, value, z, geometry, workspace, stream,

@@ -40,7 +40,7 @@ PendingBatch ProgramImpl::wrap_pending(std::span<const std::uint32_t> lanes,
     pending_transaction_ = transaction;
     return ContractAccess::make_pending(
         this, transaction.id, std::span<const SequenceHandle>(handles.data(), lanes.size()),
-        round.tokens, round.row_counts, round.row_stride, round.timing);
+        round.tokens, round.row_counts, round.row_stride, round.timing, round.decode_execution);
 }
 
 PrefillProgress ProgramImpl::wrap_prefill(std::uint32_t lane, runtime::PrefillStepResult step) {
@@ -433,6 +433,7 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
     const std::size_t row_count = input_rows.size();
     for (std::size_t row = 0; row < row_count; ++row) { members[row] = input_rows[row]; }
     const bool valid = valid_pending(pending);
+    const auto decode_execution = pending.decode_execution();
     ContractAccess::consume(pending);
 
     std::array<std::uint32_t, kMaximumConcurrency> lanes{};
@@ -550,6 +551,14 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
                 prefill.pending_capture_offer));
         }
         if (released_resource) { advance_resource_revision(); }
+        if (decode_execution.calibrated) {
+            const auto action = decode_execution.draft_tokens;
+            const bool switched = last_settled_calibrated_draft_tokens &&
+                *last_settled_calibrated_draft_tokens != action;
+            out.calibrated_routing = runtime::CalibratedRoutingCommit{
+                action, switched, decode_execution.calibrated_fixed_fallback};
+            last_settled_calibrated_draft_tokens = action;
+        }
         out.timing = timing.finish();
         return out;
     } catch (...) {

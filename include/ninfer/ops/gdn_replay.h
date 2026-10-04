@@ -50,6 +50,7 @@ void gated_delta_net_tree_replay_record(
  * copies row descriptors by value; replay consumes record/state contents at the bound addresses,
  * while changing host row descriptors requires a new capture.
  *
+ * Physical records are dense with T in [1,16]; every row and layer uses that bound width.
  * The Op admits the two registered all-layer geometries only, owns no workspace or device
  * allocation, and does not read query or generate token output. The four record planes are
  * read-only, disjoint, and do not overlap either state region.

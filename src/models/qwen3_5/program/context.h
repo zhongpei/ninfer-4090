@@ -210,11 +210,13 @@ void dflash_append_context(PrefillContext& state, const Tensor& features, const 
 void capture_dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size,
                                  std::uint32_t k, DFlashEnvelopes envelopes,
                                  ops::CausalAttentionExecutionEnvelope target_envelope,
-                                 DecodeGraphDefinition& definition);
+                                 DecodeGraphDefinition& definition,
+                                 std::optional<std::uint32_t> selected_drafts = std::nullopt);
 void dflash_decode_batch(DFlashBatchContext& state, std::int32_t batch_size, std::uint32_t k,
                          DFlashEnvelopes envelopes,
                          ops::CausalAttentionExecutionEnvelope target_envelope,
-                         DecodeGraphExecutable* executable);
+                         DecodeGraphExecutable* executable,
+                         std::optional<std::uint32_t> selected_drafts = std::nullopt);
 // Runtime tree verification is deliberately C1/greedy in its first version and bypasses CUDA
 // Graph capture because lattice->tree construction is data dependent.
 void dflash_tree_decode(DFlashBatchContext& state, std::uint32_t k,

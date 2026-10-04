@@ -14,6 +14,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace ninfer;
@@ -320,7 +321,8 @@ int run_projection_case(const Geometry& geometry, std::int32_t tokens, std::uint
 }
 
 int run_norm_projection_case(const Geometry& geometry, std::int32_t tokens, std::uint32_t seed,
-                             DeviceExecutionView execution, bool replay = false, int mode = 0) {
+                             DeviceExecutionView execution, bool replay = false, int mode = 0,
+                             bool compare_width_one = false) {
     constexpr float kEps               = 1.0e-6f;
     const std::size_t h_elements       = std::size_t(geometry.hidden) * tokens;
     const std::size_t control_elements = std::size_t(geometry.heads) * tokens;
@@ -430,6 +432,39 @@ int run_norm_projection_case(const Geometry& geometry, std::int32_t tokens, std:
         failures +=
             verify_normwise(label + " beta", read_fp32(device_beta.data(), control_elements), rb,
                             kGdnNormControlFp32);
+        if (compare_width_one) {
+            DeviceBuffer one_h(geometry.hidden * 2), one_g(geometry.heads * 4), one_beta(geometry.heads * 4);
+            Tensor single_h(one_h.p, DType::BF16, {geometry.hidden, 1});
+            Tensor single_g(one_g.p, DType::FP32, {geometry.heads, 1});
+            Tensor single_beta(one_beta.p, DType::FP32, {geometry.heads, 1});
+            const auto one_capacity = ops::gdn_norm_gating_proj_workspace_capacity_bytes(
+                geometry.heads, geometry.hidden, 1, 1);
+            DeviceBuffer one_scratch(std::max<std::size_t>(one_capacity, 256));
+            WorkspaceArena one_workspace(DeviceSpan{one_scratch.p, std::max<std::size_t>(one_capacity, 256)});
+            const auto wide_h = from_device<std::uint16_t>(device_h.data(), h_elements);
+            const auto wide_g = from_device<std::uint32_t>(device_g.data(), control_elements);
+            const auto wide_beta = from_device<std::uint32_t>(device_beta.data(), control_elements);
+            for (int column = 0; column < tokens; ++column) {
+                const auto single_x = tx.slice(1, column, 1);
+                if (geometry.parent_weight)
+                    ops::gdn_norm_gating_proj(single_x, tn, kEps, wa, ta, td, one_workspace,
+                                              single_h, single_g, single_beta, execution);
+                else
+                    ops::gdn_norm_gating_proj(single_x, tn, kEps, wa, wb, ta, td, one_workspace,
+                                              single_h, single_g, single_beta, execution);
+                cuda_synchronize(execution.stream);
+                const auto h_bits = from_device<std::uint16_t>(one_h, geometry.hidden);
+                const auto g_bits = from_device<std::uint32_t>(one_g, geometry.heads);
+                const auto beta_bits = from_device<std::uint32_t>(one_beta, geometry.heads);
+                if (!std::equal(h_bits.begin(), h_bits.end(), wide_h.begin() + column * geometry.hidden) ||
+                    !std::equal(g_bits.begin(), g_bits.end(), wide_g.begin() + column * geometry.heads) ||
+                    !std::equal(beta_bits.begin(), beta_bits.end(), wide_beta.begin() + column * geometry.heads)) {
+                    std::cerr << label << ": width-one mismatch at column " << column << '\n';
+                    ++failures;
+                    break;
+                }
+            }
+        }
         failures += device_h.verify_guards((label + " h").c_str());
         failures += device_g.verify_guards((label + " g").c_str());
         failures += device_beta.verify_guards((label + " beta").c_str());
@@ -560,7 +595,7 @@ int run_rotated_norm_case(std::int32_t tokens, std::uint32_t seed, DeviceExecuti
     return failures;
 }
 
-int main() {
+int main(int argc, char** argv) {
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
@@ -570,6 +605,35 @@ int main() {
     const DeviceExecutionView execution{nullptr, device.multiprocessor_count()};
     const DeviceExecutionView norm_execution{device.stream, device.multiprocessor_count()};
     int failures = 0;
+    if (argc == 2 && std::string_view(argv[1]) == "--decode-width-consistency-only") {
+        for (int tokens : {1, 7, 16, 17}) {
+            failures += run_norm_projection_case(kQwen27, tokens, 0xA000u, norm_execution,
+                                                 true, 0, true);
+            failures += run_rotated_norm_case(tokens, 0xA000u, norm_execution);
+        }
+        std::cout << (failures == 0 ? "PASS" : "FAIL")
+                  << " GDN decode norm/control width consistency\n";
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--prefill-width-consistency-only") {
+        for (int tokens : {128, 129, 1024}) {
+            failures += run_norm_projection_case(kQwen27, tokens, 0xA000u, norm_execution,
+                                                 true, 0, true);
+            failures += run_rotated_norm_case(tokens, 0xA000u, norm_execution);
+        }
+        std::cout << (failures == 0 ? "PASS" : "FAIL")
+                  << " GDN prefill norm/control width consistency\n";
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--width-consistency-only") {
+        for (int tokens : {1, 7, 16, 17, 43, 50, 128, 129, 1024}) {
+            failures += run_norm_projection_case(kQwen27, tokens, 0xA000u, norm_execution,
+                                                 true, 0, true);
+            failures += run_rotated_norm_case(tokens, 0xA000u, norm_execution);
+        }
+        std::cout << (failures == 0 ? "PASS" : "FAIL") << " GDN norm/control width consistency\n";
+        return failures == 0 ? 0 : 1;
+    }
     failures +=
         verify_workspace_capacity_contract(kQwen27, {1, 8, 768, 769, 1664, 1665, 3456, 3457});
     failures += verify_workspace_capacity_contract(kQwen35, {1, 127, 960, 1920, 3904, 3905});
@@ -597,9 +661,10 @@ int main() {
     for (int tokens = 1; tokens <= 128; ++tokens)
         failures +=
             run_norm_projection_case(kQwen38Parent, tokens, 0x3800u + tokens, norm_execution);
-    for (int tokens : {1, 2, 3, 8, 9, 14, 15, 16, 28, 29, 32, 42, 43, 64, 96, 128, 129, 256})
+    for (int tokens : {1, 2, 3, 8, 9, 14, 15, 16, 17, 28, 29, 32, 42, 43, 64, 96, 128, 129, 256})
         failures +=
-            run_norm_projection_case(kQwen38Parent, tokens, 0x4800u + tokens, norm_execution, true);
+            run_norm_projection_case(kQwen38Parent, tokens, 0x4800u + tokens, norm_execution,
+                                      true, 0, tokens == 16 || tokens == 17 || tokens == 128 || tokens == 129);
     for (int mode : {1, 2, 3, 4})
         failures +=
             run_norm_projection_case(kQwen38Parent, 16, 0x5800u + mode, norm_execution, true, mode);
@@ -616,7 +681,7 @@ int main() {
         failures += run_norm_projection_case(kQwen35, tokens, 0x7800u + tokens, norm_execution,
                                              tokens == 15);
 
-    for (int tokens : {1, 2, 3, 8, 14, 15, 28, 29, 64, 200, 1024})
+    for (int tokens : {1, 2, 3, 8, 14, 15, 16, 17, 28, 29, 64, 200, 1024})
         failures += run_rotated_norm_case(tokens, 0x9000u + tokens, norm_execution);
 
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_gating_proj correctness\n";

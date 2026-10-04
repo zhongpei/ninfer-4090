@@ -76,6 +76,13 @@ set_tests_properties(
   ninfer_qwen3_5_dflash2_real_test
   PROPERTIES SKIP_RETURN_CODE 77)
 
+# Preserve the original greedy K15/C1 chat regression, including retained-prefix reuse.
+add_test(NAME ninfer_qwen3_5_dflash2_consistency_real_test
+  COMMAND ninfer_qwen3_5_dflash2_real_test 15 1 1 1 int8 0 3 consistency)
+set_tests_properties(
+  ninfer_qwen3_5_dflash2_consistency_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
 ninfer_add_test(ninfer_qwen3_5_moe_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_moe_real.cpp"
   LIBRARIES ninfer_engine)
@@ -130,3 +137,45 @@ ninfer_add_test(ninfer_qwen3_5_tree_plan_test
 ninfer_add_test(ninfer_qwen3_5_lookup_vote_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_lookup_vote.cpp"
   LIBRARIES ninfer_core)
+
+# Public Engine decode observation covers target-only and a resident neural drafter.
+ninfer_add_test(ninfer_qwen3_5_decode_round_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_decode_round_real.cpp"
+  LIBRARIES ninfer_engine
+  TEST_ARGS 0)
+add_test(NAME ninfer_qwen3_5_decode_round_spec_real_test
+  COMMAND ninfer_qwen3_5_decode_round_real_test 7)
+set_tests_properties(ninfer_qwen3_5_decode_round_real_test
+  ninfer_qwen3_5_decode_round_spec_real_test PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(NAME ninfer_qwen3_5_decode_round_lookup_replace_real_test
+  COMMAND ninfer_qwen3_5_decode_round_real_test 7 lookup-replace)
+add_test(NAME ninfer_qwen3_5_decode_round_lookup_head_skip_real_test
+  COMMAND ninfer_qwen3_5_decode_round_real_test 7 lookup-head-skip)
+set_tests_properties(ninfer_qwen3_5_decode_round_lookup_replace_real_test
+  ninfer_qwen3_5_decode_round_lookup_head_skip_real_test PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_qwen3_5_calibrated_routing_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_calibrated_routing_real.cpp"
+  LIBRARIES ninfer_engine ninfer_runtime_support ninfer::json)
+set_tests_properties(ninfer_qwen3_5_calibrated_routing_real_test PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME ninfer_qwen3_5_calibrated_program_zero_commit_real_test
+  COMMAND ninfer_qwen3_5_calibrated_routing_real_test --program-zero-commit)
+set_tests_properties(ninfer_qwen3_5_calibrated_program_zero_commit_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME ninfer_qwen3_5_calibrated_routing_a16_consistency_real_test
+  COMMAND ninfer_qwen3_5_calibrated_routing_real_test --a16-consistency)
+set_tests_properties(ninfer_qwen3_5_calibrated_routing_a16_consistency_real_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+foreach(action IN ITEMS 7 11 15)
+  add_test(NAME ninfer_qwen3_5_calibrated_routing_k${action}_real_test
+    COMMAND ninfer_qwen3_5_calibrated_routing_real_test --action ${action})
+  set_tests_properties(ninfer_qwen3_5_calibrated_routing_k${action}_real_test
+    PROPERTIES SKIP_RETURN_CODE 77)
+endforeach()
+foreach(scenario IN ITEMS membership boundaries terminal)
+  add_test(NAME ninfer_qwen3_5_calibrated_routing_${scenario}_real_test
+    COMMAND ninfer_qwen3_5_calibrated_routing_real_test --switching ${scenario})
+  set_tests_properties(ninfer_qwen3_5_calibrated_routing_${scenario}_real_test
+    PROPERTIES SKIP_RETURN_CODE 77)
+endforeach()

@@ -3,6 +3,7 @@
 #include "ninfer/types.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
+#include "runtime/contract/speculative_routing.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 
 #include <cstddef>
@@ -153,6 +154,7 @@ public:
     [[nodiscard]] std::uint32_t max_concurrency() const noexcept;
     [[nodiscard]] std::size_t device_reservation_bytes() const noexcept;
     [[nodiscard]] std::size_t workspace_capacity_bytes() const noexcept;
+    void set_calibrated_routing(runtime::CalibratedRoutingTable table);
 
 public:
     // Family-private construction/storage seam; exact packages expose only the completed alias.
@@ -668,11 +670,13 @@ public:
         : owner_(std::exchange(other.owner_, nullptr)),
           transaction_(std::exchange(other.transaction_, 0)), rows_(other.rows_),
           row_count_(std::exchange(other.row_count_, 0)), tokens_(other.tokens_),
-          row_counts_(other.row_counts_), row_stride_(other.row_stride_), timing_(other.timing_) {
+          row_counts_(other.row_counts_), row_stride_(other.row_stride_), timing_(other.timing_),
+          decode_execution_(other.decode_execution_) {
         other.tokens_     = {};
         other.row_counts_ = {};
         other.row_stride_ = 0;
         other.timing_     = {};
+        other.decode_execution_ = {};
     }
 
     PendingBatch& operator=(PendingBatch&&)      = delete;
@@ -689,6 +693,10 @@ public:
 
     [[nodiscard]] runtime::ExecutionTiming execution_timing() const noexcept { return timing_; }
 
+    [[nodiscard]] runtime::DecodeRoundExecution decode_execution() const noexcept {
+        return decode_execution_;
+    }
+
 private:
     const void* owner_         = nullptr;
     std::uint64_t transaction_ = 0;
@@ -698,6 +706,7 @@ private:
     std::span<const std::int32_t> row_counts_;
     std::uint32_t row_stride_ = 0;
     runtime::ExecutionTiming timing_;
+    runtime::DecodeRoundExecution decode_execution_;
 
     friend struct detail::RuntimeContractAccess;
 };
@@ -805,6 +814,7 @@ struct CommitRowResult {
 };
 
 struct CommitResult {
+    std::optional<runtime::CalibratedRoutingCommit> calibrated_routing;
     std::array<CommitRowResult, kMaximumConcurrency> rows{};
     // A prompt-frontier capture becomes valid only after the generated Begin token is committed.
     // Keeping the move-only capability row-aligned avoids exposing provisional prompt state.
@@ -1061,7 +1071,8 @@ struct RuntimeContractAccess {
     [[nodiscard]] static PendingBatch
     make_pending(const void* owner, std::uint64_t transaction, std::span<const SequenceHandle> rows,
                  std::span<const TokenId> tokens, std::span<const std::int32_t> row_counts,
-                 std::uint32_t row_stride, runtime::ExecutionTiming timing) {
+                 std::uint32_t row_stride, runtime::ExecutionTiming timing,
+                 runtime::DecodeRoundExecution decode_execution = {}) {
         PendingBatch out;
         out.owner_       = owner;
         out.transaction_ = transaction;
@@ -1071,6 +1082,7 @@ struct RuntimeContractAccess {
         out.row_counts_ = row_counts;
         out.row_stride_ = row_stride;
         out.timing_     = timing;
+        out.decode_execution_ = decode_execution;
         return out;
     }
 

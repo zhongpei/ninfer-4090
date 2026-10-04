@@ -1,10 +1,5 @@
 #include "ninfer/ops/gated_delta_net.h"
 
-#include "ninfer/ops/l2norm.h"
-
-#include "core/device.h"
-#include "core/layout.h"
-#include "ops/common/math.h"
 #include "ops/linear_attention/gated_delta_net/common.h"
 #include "ops/linear_attention/gated_delta_net/launch.h"
 
@@ -163,7 +158,7 @@ Geometry validate_recurrent_batch_update(const Tensor& q, const Tensor& k, const
     return geometry;
 }
 
-void validate_chunked(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
+void validate_distinct_state(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                       const Tensor& beta, float scale, const Tensor& ssm_state_in,
                       const Tensor& ssm_state_out, const Tensor& out) {
     // ssm_state_out carries the running-state contract validated by validate_recurrent;
@@ -173,35 +168,6 @@ void validate_chunked(const Tensor& q, const Tensor& k, const Tensor& v, const T
     require_shape(ssm_state_in, detail::gated_delta_net::kStateDim,
                   detail::gated_delta_net::kStateDim, geometry.value_heads, 1, "ssm_state_in");
     require_contiguous_nonnull(ssm_state_in, "ssm_state_in");
-}
-
-struct ChunkedWorkspace {
-    Tensor normalized_q;
-    Tensor normalized_k;
-    DeviceSpan stage;
-    // FP32 running state for the chunked kernels when the stored state is FP16.
-    Tensor state_fp32;
-};
-
-template <class Allocator>
-ChunkedWorkspace allocate_chunked_workspace(Allocator& allocator, std::int32_t qk_heads,
-                                            std::int32_t value_heads, std::int32_t tokens,
-                                            bool normalize_qk) {
-    ChunkedWorkspace out;
-    const std::int32_t full =
-        (tokens / detail::gated_delta_net::kChunkSize) * detail::gated_delta_net::kChunkSize;
-    if (full == 0) { return out; }
-    if (normalize_qk) {
-        out.normalized_q =
-            allocator.alloc(DType::BF16, {detail::gated_delta_net::kStateDim, qk_heads, tokens});
-        out.normalized_k =
-            allocator.alloc(DType::BF16, {detail::gated_delta_net::kStateDim, qk_heads, tokens});
-    }
-    out.stage =
-        allocator.alloc_bytes(detail::gated_delta_net::chunked_workspace_bytes(value_heads, full));
-    out.state_fp32 = allocator.alloc(DType::FP32, {detail::gated_delta_net::kStateDim,
-                                                   detail::gated_delta_net::kStateDim, value_heads});
-    return out;
 }
 
 } // namespace
@@ -214,9 +180,8 @@ std::size_t gated_delta_net_workspace_capacity_bytes(std::int32_t qk_heads,
         max_tokens < min_tokens) {
         throw std::invalid_argument("gated_delta_net workspace: invalid profile or interval");
     }
-    WorkspaceLayoutBuilder layout;
-    (void)allocate_chunked_workspace(layout, qk_heads, value_heads, max_tokens, normalize_qk);
-    return layout.peak_bytes(1);
+    (void)normalize_qk;
+    return 0;
 }
 
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
@@ -252,69 +217,13 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
                      const Tensor& beta, float scale, bool normalize_qk, WorkspaceArena& ws,
                      const Tensor& ssm_state_in, Tensor& ssm_state_out, Tensor& out,
                      cudaStream_t stream) {
-    validate_chunked(q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out);
+    validate_distinct_state(q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out);
 
-    auto scratch_scope   = ws.scope();
-    const std::int32_t T = q.ne[2];
-    const std::int32_t T_full =
-        (T / detail::gated_delta_net::kChunkSize) * detail::gated_delta_net::kChunkSize;
-    ChunkedWorkspace scratch = allocate_chunked_workspace(ws, q.ne[1], v.ne[1], T, normalize_qk);
-    Tensor q_compute         = q;
-    Tensor k_compute         = k;
-    bool recurrent_normalize = normalize_qk;
-    if (normalize_qk && T_full > 0) {
-        q_compute = scratch.normalized_q;
-        k_compute = scratch.normalized_k;
-        l2norm(q, 1.0e-6f, q_compute, stream);
-        l2norm(k, 1.0e-6f, k_compute, stream);
-        recurrent_normalize = false;
-    }
-    if (T_full > 0) {
-        Tensor q_full    = q_compute.slice(2, 0, T_full);
-        Tensor k_full    = k_compute.slice(2, 0, T_full);
-        Tensor v_full    = v.slice(2, 0, T_full);
-        Tensor g_full    = g.slice(1, 0, T_full);
-        Tensor beta_full = beta.slice(1, 0, T_full);
-        Tensor out_full  = out.slice(2, 0, T_full);
-        if (ssm_state_out.dtype == DType::FP16) {
-            // The chunked kernels read and write FP32 state; stage it through the workspace.
-            if (ssm_state_in.dtype == DType::FP16) {
-                detail::gated_delta_net::widen_state_fp16_to_fp32(ssm_state_in, scratch.state_fp32,
-                                                                  stream);
-            } else {
-                CUDA_CHECK(cudaMemcpyAsync(scratch.state_fp32.data, ssm_state_in.data,
-                                           ssm_state_in.bytes(), cudaMemcpyDeviceToDevice, stream));
-            }
-            detail::gated_delta_net::launch_chunked(q_full, k_full, v_full, g_full, beta_full,
-                                                    scale, scratch.state_fp32, scratch.state_fp32,
-                                                    out_full, scratch.stage.data,
-                                                    scratch.stage.bytes, stream);
-            detail::gated_delta_net::narrow_state_fp32_to_fp16(scratch.state_fp32, ssm_state_out,
-                                                               stream);
-        } else {
-            detail::gated_delta_net::launch_chunked(q_full, k_full, v_full, g_full, beta_full,
-                                                    scale, ssm_state_in, ssm_state_out, out_full,
-                                                    scratch.stage.data, scratch.stage.bytes,
-                                                    stream);
-        }
-    }
-
-    const std::int32_t tail = T - T_full;
-    if (tail > 0) {
-        Tensor q_tail    = q_compute.slice(2, T_full, tail);
-        Tensor k_tail    = k_compute.slice(2, T_full, tail);
-        Tensor v_tail    = v.slice(2, T_full, tail);
-        Tensor g_tail    = g.slice(1, T_full, tail);
-        Tensor beta_tail = beta.slice(1, T_full, tail);
-        Tensor out_tail  = out.slice(2, T_full, tail);
-        // After full chunks the running state lives in ssm_state_out; a tail-only run (no full
-        // chunks) reads the caller-provided ssm_state_in. Either way the tail publishes to
-        // ssm_state_out.
-        const Tensor& tail_in = (T_full > 0) ? ssm_state_out : ssm_state_in;
-        detail::gated_delta_net::launch_recurrent_inout(q_tail, k_tail, v_tail, g_tail, beta_tail,
-                                                        scale, recurrent_normalize, tail_in,
-                                                        ssm_state_out, out_tail, stream);
-    }
+    // One closed Op keeps the public FP32 transition and normalization arithmetic identical
+    // for every token, independently of call width or the position of a call boundary.
+    (void)ws;
+    detail::gated_delta_net::launch_recurrent_inout(q, k, v, g, beta, scale, normalize_qk,
+                                                  ssm_state_in, ssm_state_out, out, stream);
 }
 
 } // namespace ninfer::ops

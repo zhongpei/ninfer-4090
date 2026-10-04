@@ -36,6 +36,18 @@ artifacts with DFlash2 companion weights also support `--spec dflash2 --draft-to
 concurrency, prefix reuse, and image/video request surfaces. It may remain combined with
 `--vision`.
 
+Optional [calibrated routing](maintainer/speculative-routing.md#calibrated-dflash2-chain)
+uses `--spec dflash2 --draft-tokens 15 --spec-router calibrated
+--spec-router-profile PATH`. The startup-bound profile selects physical
+target-only/K7/K11/K15 for the actual compact batch and maximum execution
+frontier. Greedy zero-penalty requests are eligible; a batch containing other
+sampling settings uses fixed K15. Missing or mismatched profiles fail startup.
+Set temperature and both penalties explicitly to zero in eligible requests;
+`--greedy` alone leaves model presence-penalty defaults in effect. Process
+`--presence-penalty 0 --frequency-penalty 0` supplies defaults for clients.
+Tree, lookup and Stair options cannot be combined with this mode. The default
+remains fixed.
+
 When `--model-id` is omitted, the server advertises and accepts the artifact's `metadata.name`,
 falling back to its architecture name when no name is stored. An explicit `--model-id` is a public
 HTTP alias override and does not select or alter model execution.
@@ -790,6 +802,8 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--kv-dtype bf16\|int8\|fp8\|rk8v4\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant; all six are accepted on this fork's sm_86/sm_89 targets | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
+| `--spec-router fixed\|stair\|calibrated` | speculative routing mode | `fixed` |
+| `--spec-router-profile PATH` | required identity-bound calibrated DFlash2 profile | unset |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--lookup-ngram N` | context-lookup drafting alongside `--spec`: the last `N` tokens are matched against the sequence so far and what followed is proposed; exact, since verification rejects a wrong guess | `0` (off) |
 | `--prefill-cublas` | hand wide prefill GEMMs to cuBLAS: a large prefill speedup for a small perplexity cost, and it wants a larger `--prefill-chunk` to pay (see [performance](performance.md)) | off |
@@ -932,6 +946,9 @@ same interval. The
 owner degradation and eviction, checkpoint drop, pressure search, budget exhaustion, maximal fallback, and historical-fork
 counters as interval deltas; `occupancy` and `last_selection` are end-of-interval gauges. Materialization predictions are
 request-owned and appear only on the corresponding `request_done` event.
+The `throughput.speculative_routing` object contains cumulative published
+Engine action, switch and fixed-fallback counters for calibrated routing; these
+are not interval deltas. See the [counter definitions](maintainer/speculative-routing.md#counters).
 `pressure.searches` counts plans accepted into Program resource transactions, including a transaction that later ends in
 request-local abort; committed victim counters likewise report the resulting stable cache changes.
 
