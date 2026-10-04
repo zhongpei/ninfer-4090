@@ -220,7 +220,7 @@ def analyse_record(record, identity, action, proposal_compute="full"):
         for key in ("content", "reasoning"):
             text(request[key], key)
         if request["matched_stop_string"] is not None:
-            text(request[key], key)
+            text(request["matched_stop_string"], "matched_stop_string")
         if not isinstance(request["tool_calls"], list):
             raise ValueError("tool_calls must be an array")
         for call in request["tool_calls"]:
