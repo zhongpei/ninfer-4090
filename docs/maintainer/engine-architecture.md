@@ -220,6 +220,22 @@ GenerationCore 或 CausalScoreCore 在实例准备完成后使用它。
 workspace 和 Graph。销毁时先结束 Engine core 和未决设备工作，再销毁实例的 Program、
 Frontend 和 Parameters，最后释放 Model backing。Reader 与上传 staging 属于加载生命周期。
 
+原生基准和回归测试可以使用内部 `ResidentModelSession`。该会话只支持单 GPU、Generation、
+无 Vision 和 Full proposal head 的 DFlash2 常驻模型。会话只加载一次权重。每次测试创建新的
+ModelInstance、Parameters、Program 和 EngineCore。请求仍走公共 `Engine` 路径。
+
+会话最多允许一个存活的执行实例。实例独占 State/KV、缓存、workspace 和 CUDA Graph。
+实例结束后，会话保留模型权重。借用者保留模型及其加载 DeviceContext 的生命周期。
+最后一个借用者释放后，才可以释放 Model backing 和加载 DeviceContext。
+
+该会话允许固定 K、校准表、并发容量、KV 容量和 Graph 配置随测试实例变化。
+`prefill_a8` 可以作为 Parameters 的准备选项变化。规划和执行必须检查该实例实际准备的选项。
+其他存储表示和算术选项必须与常驻模型相同。
+
+该会话还允许 DFlash2 Full 模型数据执行 backend None。此路径不执行 drafter，但仍保留
+DFlash2 权重。基准必须报告共享权重的驻留范围。它不能把此路径的显存占用当作独立 None
+加载的显存基线。普通 Engine 构造仍只加载启动选项选择的资源。
+
 权重、State/KV backing、block-table matrices、workspace 与 CUDA Graph resources 在 Engine 开始接受请求前
 建立。运行期改变 ownership、mapping、frontier 与 replica placement，但不重建这些大块 Device allocations。
 

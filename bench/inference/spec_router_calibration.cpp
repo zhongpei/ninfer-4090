@@ -2,8 +2,14 @@
 #include "ninfer/engine.h"
 #include "ninfer_bench_support.h"
 #include "runtime/engine/speculative_routing_profile.h"
+#include "runtime/engine/resident_model.h"
+#ifdef NINFER_CALIBRATED_SUITE_LIBRARY
+#include "models/qwen3_5/calibrated_resident_suite.h"
+#include "models/qwen3_5/resident_model_checks.h"
+#endif
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +18,8 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <memory>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -73,9 +81,34 @@ Json rounds_json(const std::vector<ninfer::DecodeRoundEvent>& rounds) {
     }
     return result;
 }
+Json timings_json(const std::vector<Measurement>& measurements) {
+    Json requests = Json::array();
+    for (const auto& measured : measurements) {
+        const auto& result = measured.result;
+        const auto& timing = result.timings;
+        for (const double seconds : {timing.first_token_seconds, timing.generation_wall_seconds,
+                                    timing.decode_seconds, timing.prompt_wall_seconds,
+                                    result.engine_timing.queue_wait_seconds}) {
+            if (!std::isfinite(seconds) || seconds < 0.0) {
+                throw std::runtime_error("generation timing must be finite and nonnegative");
+            }
+        }
+        requests.push_back({
+            {"repeat", measured.repeat}, {"slot", measured.slot},
+            {"generated_tokens", result.generated_token_ids.size()}, {"latency_ns", measured.latency_ns},
+            {"first_token_seconds", timing.first_token_seconds},
+            {"generation_wall_seconds", timing.generation_wall_seconds},
+            {"decode_seconds", timing.decode_seconds}, {"prompt_wall_seconds", timing.prompt_wall_seconds},
+            {"queue_wait_seconds", result.engine_timing.queue_wait_seconds},
+            {"reused_prompt_tokens", result.reused_prompt_tokens}, {"prompt_tokens", result.prompt.prompt_tokens},
+        });
+    }
+    return {{"schema_version", 1}, {"artifact_type", "ninfer_generation_timings"},
+            {"requests", std::move(requests)}};
+}
 }
 
-int main(int argc, char** argv) try {
+int measure(int argc, char** argv, ninfer::runtime::ResidentModelSession* resident_session = nullptr) {
     std::map<std::string, std::string> args;
     for (int i = 1; i < argc; ++i) {
         const std::string key = argv[i];
@@ -83,13 +116,18 @@ int main(int argc, char** argv) try {
             std::cout << "ninfer_spec_router_calibration_bench --model PATH --prompt-file PATH --output PATH "
                          "[--draft-tokens 0|7|11|15] [--client-concurrency 1..8] "
                          "[--engine-concurrency 1..8] [--repeats 2] [--max-tokens 512] "
-                         "[--max-context 32768] [--kv-capacity 32768] [--device 0]\n"
+                         "[--max-context 32768] [--kv-capacity 32768] [--device 0] [--timing-output PATH]\n"
                          "INT8 KV, greedy zero penalties, thinking off, cache on, graph on. "
                          "Client concurrency controls submissions; events report actual batches.\n"
                          "--identity-only loads Fixed DFlash2 K15 and exports the public identity without generation.\n"
                          "--spec-router-profile PATH measures calibrated resident K15; --draft-tokens is the expected action.\n"
                          "--prime-prefix explicitly runs a separate 16-token prefix primer before measurement.\n"
-                         "--allow-route-switching with a profile measures actual table-selected actions; omit --draft-tokens.\n";
+                         "--allow-route-switching with a profile measures actual table-selected actions; omit --draft-tokens.\n"
+                         "--timing-output writes public GenerationResult timings to a separate JSON sidecar.\n"
+                         "--session --model PATH [--device 0] [--max-context 32768] [--kv-capacity 32768] serves JSON-line jobs.\n"
+                         "Session uploads weights once; each job owns a fresh EngineCore and Program. KV, cache and graphs are not shared.\n"
+                         "Wave and request latency exclude Engine startup and prompt preparation. Public first-token time\n"
+                         "includes prompt preparation plus submission through the first accepted output token.\n";
             return 0;
         }
         if (key == "--identity-only" || key == "--prime-prefix" || key == "--allow-route-switching") {
@@ -98,7 +136,7 @@ int main(int argc, char** argv) try {
         }
         const std::vector<std::string> allowed = {"--model", "--prompt-file", "--output",
             "--draft-tokens", "--client-concurrency", "--engine-concurrency", "--repeats",
-            "--max-tokens", "--max-context", "--kv-capacity", "--device", "--spec-router-profile"};
+            "--max-tokens", "--max-context", "--kv-capacity", "--device", "--spec-router-profile", "--timing-output"};
         if (std::find(allowed.begin(), allowed.end(), key) == allowed.end() || i + 1 == argc
             || !args.emplace(key, argv[++i]).second)
             throw std::invalid_argument("unknown, duplicate or incomplete option: " + key);
@@ -111,6 +149,10 @@ int main(int argc, char** argv) try {
     const bool resident = args.contains("--spec-router-profile");
     const bool prime_prefix = args.contains("--prime-prefix");
     const bool route_switching = args.contains("--allow-route-switching");
+    const bool timing_output = args.contains("--timing-output");
+    if (identity_only && timing_output) {
+        throw std::invalid_argument("identity-only excludes timing-output");
+    }
     if (route_switching && (!resident || identity_only || args.contains("--draft-tokens"))) {
         throw std::invalid_argument("route switching requires a profile, excludes identity-only and explicit draft tokens");
     }
@@ -121,6 +163,19 @@ int main(int argc, char** argv) try {
         if (!args.contains(key)) throw std::invalid_argument(std::string("required: ") + key);
     if (!identity_only && !args.contains("--prompt-file")) {
         throw std::invalid_argument("required: --prompt-file");
+    }
+    if (timing_output) {
+        const auto path = std::filesystem::path(args.at("--timing-output"));
+        if (path.empty() || !std::filesystem::is_directory(std::filesystem::absolute(path).parent_path())) {
+            throw std::invalid_argument("timing-output requires an existing parent directory");
+        }
+        if (std::filesystem::weakly_canonical(path) ==
+            std::filesystem::weakly_canonical(args.at("--output"))) {
+            throw std::invalid_argument("output and timing-output must be separate paths");
+        }
+        if (std::filesystem::exists(path)) {
+            throw std::invalid_argument("timing-output already exists");
+        }
     }
     const auto clients = number(get("--client-concurrency", "1"), 1, 8);
     const auto concurrency = number(get("--engine-concurrency", "8"), clients, 8);
@@ -189,7 +244,7 @@ int main(int argc, char** argv) try {
                 round_settled.notify_all();
             }
         };
-        ninfer::Engine engine(std::move(options));
+        auto engine = resident_session ? resident_session->make_engine(options) : ninfer::Engine(std::move(options));
         const auto load = engine.load_summary();
         model_name = load.model_name;
         if (identity_only || resident) {
@@ -272,7 +327,10 @@ int main(int argc, char** argv) try {
             const auto wave_start = Clock::now();
             for (unsigned slot = 0; slot < clients; ++slot) {
                 const auto start = Clock::now();
-                auto handle = engine.submit(std::move(prepared[slot]), request);
+                ninfer::GenerationObservationOptions observation;
+                observation.phase_timings = timing_output;
+                auto handle = engine.submit(std::move(prepared[slot]), request,
+                                            ninfer::OutputConsumerMode::Aggregate, observation);
                 futures.push_back(std::async(std::launch::async,
                     [handle = std::move(handle), start, rep, slot]() mutable {
                         auto result = handle.wait();
@@ -383,6 +441,8 @@ int main(int argc, char** argv) try {
         destination << output.str();
     }
     if (!destination) throw std::runtime_error("report write failed");
+    destination.close();
+    if (!destination) throw std::runtime_error("report close failed");
     if (resident) for (const auto& event : rounds) {
         const auto action = route_switching ? routing_table.select(event.active_batch, event.max_execution_frontier) : k;
         if (event.active_batch == 0 || event.active_batch > clients ||
@@ -395,7 +455,147 @@ int main(int argc, char** argv) try {
         }
     }
     if (rounds.empty()) throw std::runtime_error("no decode events; no batch calibration evidence");
+    if (timing_output) {
+        const auto timings = timings_json(requests);
+        std::ofstream sidecar(args.at("--timing-output"), std::ios::binary);
+        if (!sidecar) throw std::runtime_error("cannot create timing-output");
+        sidecar << timings.dump() << '\n';
+        sidecar.close();
+        if (!sidecar) throw std::runtime_error("timing-output write failed");
+    }
     return 0;
+}
+
+namespace {
+struct RedirectOutput {
+    std::streambuf* previous = std::cout.rdbuf(std::cerr.rdbuf());
+    ~RedirectOutput() { std::cout.rdbuf(previous); }
+};
+int session(int argc, char** argv) {
+    std::map<std::string, std::string> args;
+    for (int index = 1; index < argc; ++index) {
+        const std::string key = argv[index];
+        if (key == "--session") {
+            if (!args.emplace(key, "1").second) throw std::invalid_argument("duplicate session flag");
+            continue;
+        }
+        if ((key != "--model" && key != "--device" && key != "--max-context" && key != "--kv-capacity") ||
+            index + 1 == argc || !args.emplace(key, argv[++index]).second) {
+            throw std::invalid_argument("session startup accepts only model, device, max-context and kv-capacity");
+        }
+    }
+    if (!args.contains("--model") || !std::filesystem::is_regular_file(args.at("--model"))) {
+        throw std::invalid_argument("session model must be an explicit existing artifact");
+    }
+    const auto get = [&](const std::string& key, const std::string& fallback) {
+        return args.contains(key) ? args.at(key) : fallback;
+    };
+    ninfer::EngineOptions options;
+    options.artifact_path = args.at("--model");
+    options.device = static_cast<int>(number(get("--device", "0"), 0, 255));
+    options.max_context = number(get("--max-context", "32768"), 2, 32768);
+    options.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(number(get("--kv-capacity", "32768"), 2, 262144));
+    options.max_concurrency = 8;
+    options.kv_cache = ninfer::KvCacheStorage::Int8Group64;
+    options.use_cuda_graph = true;
+    options.context_cache.enabled = true;
+    options.speculative.backend = ninfer::SpeculativeBackend::DFlash2;
+    options.speculative.draft_tokens = 15;
+    std::unique_ptr<ninfer::runtime::ResidentModelSession> resident;
+    {
+        RedirectOutput redirect;
+        resident = std::make_unique<ninfer::runtime::ResidentModelSession>(options);
+    }
+    const auto status = [&] {
+        return Json{{"model_load_count", resident->model_load_count()},
+                    {"resident_weight_bytes", resident->resident_weight_bytes()}};
+    };
+    auto ready = status();
+    ready["event"] = "ready";
+    ready["scope"] = "common_weight_residency";
+    std::cout << ready.dump() << std::endl;
+    std::set<std::string> ids;
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        Json id = nullptr;
+        try {
+            const auto packet = Json::parse(line);
+            if (!packet.is_object() || !packet.contains("id") || !packet.at("id").is_string() ||
+                packet.at("id").get<std::string>().empty()) {
+                throw std::invalid_argument("session request requires a nonempty string id");
+            }
+            id = packet.at("id");
+            if (!ids.insert(id.get<std::string>()).second) throw std::invalid_argument("duplicate session request id");
+            auto response = status();
+            response["id"] = id;
+            response["ok"] = true;
+            if (packet.contains("stop")) {
+                if (packet.size() != 2 || !packet.at("stop").is_boolean() || !packet.at("stop").get<bool>()) {
+                    throw std::invalid_argument("session shutdown requires exactly id and stop:true");
+                }
+#ifdef NINFER_CALIBRATED_SUITE_LIBRARY
+                {
+                    RedirectOutput redirect;
+                    response["teardown_checks"] = ninfer::test::resident_model_teardown_checks(resident, options);
+                }
+#endif
+                response["event"] = "bye";
+                std::cout << response.dump() << std::endl;
+                return 0;
+            }
+            if (packet.contains("suite")) {
+                if (packet.size() != 2 || !packet.at("suite").is_boolean() || !packet.at("suite").get<bool>()) {
+                    throw std::invalid_argument("session correctness requires exactly id and suite:true");
+                }
+#ifdef NINFER_CALIBRATED_SUITE_LIBRARY
+                {
+                    RedirectOutput redirect;
+                    response = ninfer::test::run_calibrated_resident_suite(*resident, options.artifact_path.c_str());
+                }
+                response["id"] = id;
+                response["ok"] = true;
+                std::cout << response.dump() << std::endl;
+                continue;
+#else
+                throw std::invalid_argument("session correctness suite requires BUILD_TESTING=ON");
+#endif
+            }
+            if (packet.size() != 2 || !packet.contains("arguments") || !packet.at("arguments").is_array()) {
+                throw std::invalid_argument("session job requires exactly id and arguments");
+            }
+            std::vector<std::string> arguments{"ninfer_spec_router_calibration_bench"};
+            for (const auto& argument : packet.at("arguments")) {
+                if (!argument.is_string()) throw std::invalid_argument("session arguments must be strings");
+                const auto value = argument.get<std::string>();
+                if (value == "--help") throw std::invalid_argument("session jobs must measure or export identity");
+                arguments.push_back(value);
+            }
+            std::vector<char*> pointers;
+            for (auto& argument : arguments) pointers.push_back(argument.data());
+            {
+                RedirectOutput redirect;
+                measure(static_cast<int>(pointers.size()), pointers.data(), resident.get());
+            }
+            response = status();
+            response["id"] = id;
+            response["ok"] = true;
+            std::cout << response.dump() << std::endl;
+        } catch (const std::exception& error) {
+            Json response{{"id", id}, {"ok", false}, {"error", error.what()}};
+            std::cout << response.dump() << std::endl;
+            std::cerr << "calibration session: " << error.what() << '\n';
+            return 1;
+        }
+    }
+    if (std::cin.bad()) throw std::runtime_error("session input read failed");
+    return 0;
+}
+}
+int main(int argc, char** argv) try {
+    for (int index = 1; index < argc; ++index) {
+        if (std::string_view(argv[index]) == "--session") return session(argc, argv);
+    }
+    return measure(argc, argv);
 } catch (const std::exception& error) {
     std::cerr << "calibration benchmark: " << error.what() << '\n';
     return 1;

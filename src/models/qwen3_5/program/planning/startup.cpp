@@ -835,7 +835,7 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         parameters.model.config().text.full_attention_layers == 0) {
         throw std::invalid_argument("Qwen3.5 Program requires at least one full-attention layer");
     }
-    if (parameters.model.options() != models::load_options(options)) {
+    if (!parameters.supports_execution(models::load_options(options))) {
         throw std::invalid_argument(
             "loaded components do not match the requested execution options");
     }

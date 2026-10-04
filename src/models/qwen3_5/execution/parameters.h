@@ -148,12 +148,15 @@ struct ProposalParameters {
 class Parameters {
 public:
     explicit Parameters(const Model& source);
+    Parameters(const Model& source, bool prefill_a8);
+    [[nodiscard]] bool supports_execution(const LoadOptions& requested) const noexcept;
     Parameters(const Parameters&)            = delete;
     Parameters& operator=(const Parameters&) = delete;
     Parameters(Parameters&&)                 = delete;
     Parameters& operator=(Parameters&&)      = delete;
 
     const Model& model;
+    const bool prefill_a8;
     TextParameters text;
     std::optional<MtpParameters> mtp;
     std::optional<VisionParameters> vision;

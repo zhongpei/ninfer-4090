@@ -54,26 +54,68 @@ A selected Auto profile must come from selected-mode measurements. Profile const
 
 ## Local build and regression
 
-No commands in this section were executed as part of the implementation delivery. Use the existing local build configuration and existing model artifact. Build after reconfiguring to register the two new targets:
+Use the existing local build configuration and existing model artifact. CMake regenerates the existing build tree when the test registrations change:
 
 ```bash
 export MODEL=/absolute/path/to/model.ninfer
-cmake -S . -B build
 cmake --build build -j --target \
   ninfer_spec_router_calibration_bench \
-  test_speculative_routing_profile \
-  test_dflash_proposal_view \
-  test_engine_calibrated_routing_real \
-  test_engine_calibrated_routing_compact_real
+  ninfer_speculative_routing_profile_test \
+  ninfer_qwen3_5_dflash_proposal_view_test \
+  ninfer_qwen3_5_resident_model_options_test \
+  ninfer_qwen3_5_calibrated_routing_real_test
 
 python -m unittest discover -s tests/report_regression -p 'test_*.py'
 ctest --test-dir build --output-on-failure \
-  -R '^(test_speculative_routing_profile|test_dflash_proposal_view)$'
+  -R '^(ninfer_speculative_routing_profile_test|ninfer_qwen3_5_dflash_proposal_view_test|ninfer_qwen3_5_resident_model_options_test)$'
+
+# Run separately when the GPU is available; this executes real-model selected mode.
+NINFER_TEST_ARTIFACT="$MODEL" CUDA_VISIBLE_DEVICES=0 \
+  ctest --test-dir build --output-on-failure \
+  -R '^ninfer_qwen3_5_calibrated_.*selected_real_test$'
 ```
 
-The real-model targets use the project's existing real-model artifact resolution. They can also receive the artifact path explicitly; locate the executable in your configured build tree and pass `"$MODEL"` as its first argument. The compact target compiles the **same** real-model regression source with `NINFER_TEST_COMPACT_DFLASH=1`; it is not a weakened replacement oracle.
+The real-model executable resolves the artifact through `NINFER_TEST_ARTIFACT`. It accepts `--proposal-compute full|selected` with any existing scenario; the default is `full`. The nine selected CTest cases run the same executable and assertions with `--proposal-compute selected`, producing schema-2 selected profiles. For example:
+
+```bash
+NINFER_TEST_ARTIFACT="$MODEL" CUDA_VISIBLE_DEVICES=0 \
+  ./build/tests/ninfer_qwen3_5_calibrated_routing_real_test \
+  --proposal-compute selected --switching boundaries
+```
 
 Coverage includes K0/7/11/15 against backend None, a within-request frontier switch, exact-B routing during queue drain, cancellation survivor/continuation, small terminal budgets/prefix reuse, non-greedy/penalty K15 fallback, graph-on/off parity and identity rejection. The host proposal-view target checks packed B1/B2/B4/B8 strides and direct output aliases while preserving append storage. Keep running the pre-existing math, rollback and end-to-end output gates as well.
+
+## One-command GPU qualification
+
+The [2026-10-04 completed RTX 4090 report](../performance/dflash2-4090-2026-10-04.md)
+records the full matrix, correctness reuse, profile coverage and resource accounting.
+Fixed K7 is the tested default recommendation; Auto Selected remains opt-in.
+
+The campaign runner builds the affected targets, runs the CPU checks and real-model correctness gates, calibrates both proposal modes, and validates the resulting Auto profiles on separate prompts. Run the complete campaign with Python 3.11 and an explicit artifact:
+
+```bash
+python3.11 -m tools.bench.run_dflash_gpu_campaign \
+  --model /absolute/path/to/model.ninfer --build-dir build \
+  --out profiles/bench/dflash-gpu-campaign --gpus 0,1 \
+  --concurrency 1,2,4,8 --pairs 2 --repeats 2 \
+  --max-tokens 512 --max-context 32768 --kv-capacity 131072
+```
+
+Each GPU uses one native `--session` process. That process loads the immutable DFlash2 Full model once. It retains the model across correctness checks, calibration, profile construction and validation. Each job creates a fresh EngineCore and Program. Jobs share no mutable KV, cache, workspace or CUDA Graph resources. The report records the model load count and resident weight bytes.
+
+Each comparison keeps all candidates on the same physical GPU. Client concurrency one uses an Engine with capacity one. Other client counts use an Engine with capacity eight. The runner records the startup identity for each capacity. It does not reuse a profile across different startup identities.
+
+The runner caps the requested KV capacity at `max_context * Engine capacity`. With the command above, capacity one uses 32768 KV tokens and capacity eight uses 131072. Every candidate within a comparison uses the same capacity.
+
+After a tooling-only repair, `--reuse-correctness /absolute/path/to/prior/summary.json` can reuse a completed 18-case and five-ownership-check suite from the same model and build directory. The native binary must remain unchanged. The runner validates the saved suite and records its origin. It still runs the final session teardown check. Omit this option for a complete fresh qualification.
+
+The validation candidates are backend None, Fixed K7/K11/K15, full Auto and selected Auto. All candidates retain the same model weights. Backend None skips the drafter through its normal execution path. Its memory observations do not describe an independently loaded target-only model. Calibration and validation prompts are separate. Actual round observations determine batch/frontier coverage. Unqualified calibration cells remain K0.
+
+The native benchmark's optional `--timing-output PATH` writes a separate `ninfer_generation_timings` JSON sidecar. Every campaign measurement requests these timings. Public first-token time includes prompt preparation and submission through the first accepted token. Generation wall time spans the first through last accepted tokens. Request latency and generation-wave wall time exclude Engine startup and prompt preparation. These scopes must remain distinct in the report.
+
+The report separates single-request generation rate from concurrent generation-wave throughput. It also records request latency, first-token time, prefix reuse and Engine resource accounting. Device memory samples are observed lower bounds. The first unprimed wave can contain prefix reuse between requests; the report must use the observed reuse fields when describing cache behavior.
+
+Two retained pairs are a screening campaign. Small request counts do not establish a stable p95 tail estimate. A candidate requires complete-response correctness before it can enter a performance ranking. A speed difference below the paired qualification threshold remains unresolved. Report winners by tested concurrency and context when no candidate wins across every condition.
 
 ## Experiment A: same-K full vs selected
 

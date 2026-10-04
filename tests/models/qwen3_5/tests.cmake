@@ -179,3 +179,33 @@ foreach(scenario IN ITEMS membership boundaries terminal)
   set_tests_properties(ninfer_qwen3_5_calibrated_routing_${scenario}_real_test
     PROPERTIES SKIP_RETURN_CODE 77)
 endforeach()
+
+# Host storage/view checks require no device execution.
+ninfer_add_test(ninfer_qwen3_5_dflash_proposal_view_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_dflash_proposal_view.cpp"
+  LIBRARIES ninfer_model_runtime ninfer_core)
+
+add_test(NAME ninfer_qwen3_5_calibrated_routing_selected_real_test
+  COMMAND ninfer_qwen3_5_calibrated_routing_real_test --proposal-compute selected)
+add_test(NAME ninfer_qwen3_5_calibrated_program_zero_commit_selected_real_test
+  COMMAND ninfer_qwen3_5_calibrated_routing_real_test --program-zero-commit --proposal-compute selected)
+add_test(NAME ninfer_qwen3_5_calibrated_routing_a16_consistency_selected_real_test
+  COMMAND ninfer_qwen3_5_calibrated_routing_real_test --a16-consistency --proposal-compute selected)
+set_tests_properties(ninfer_qwen3_5_calibrated_routing_selected_real_test
+  ninfer_qwen3_5_calibrated_program_zero_commit_selected_real_test
+  ninfer_qwen3_5_calibrated_routing_a16_consistency_selected_real_test PROPERTIES SKIP_RETURN_CODE 77)
+foreach(action IN ITEMS 7 11 15)
+  add_test(NAME ninfer_qwen3_5_calibrated_routing_k${action}_selected_real_test
+    COMMAND ninfer_qwen3_5_calibrated_routing_real_test --action ${action} --proposal-compute selected)
+  set_tests_properties(ninfer_qwen3_5_calibrated_routing_k${action}_selected_real_test PROPERTIES SKIP_RETURN_CODE 77)
+endforeach()
+foreach(scenario IN ITEMS membership boundaries terminal)
+  add_test(NAME ninfer_qwen3_5_calibrated_routing_${scenario}_selected_real_test
+    COMMAND ninfer_qwen3_5_calibrated_routing_real_test --switching ${scenario} --proposal-compute selected)
+  set_tests_properties(ninfer_qwen3_5_calibrated_routing_${scenario}_selected_real_test PROPERTIES SKIP_RETURN_CODE 77)
+endforeach()
+
+
+ninfer_add_test(ninfer_qwen3_5_resident_model_options_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_resident_model_options.cpp"
+  LIBRARIES ninfer_model_loading)

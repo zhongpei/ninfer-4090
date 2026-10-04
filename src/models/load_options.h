@@ -87,6 +87,37 @@ struct LoadOptions {
     }
 };
 
+// A resident DFlash2 Full model may execute the target-only route. The target operands and
+// arithmetic stay identical; this does not admit any other component or representation change.
+[[nodiscard]] inline bool execution_load_options_compatible(const LoadOptions& loaded,
+                                                           LoadOptions requested) noexcept {
+    if (loaded == requested) return true;
+    if (loaded.purpose != EnginePurpose::Generation || loaded.vision || loaded.ranks != 1 ||
+        loaded.speculative != SpeculativeBackend::DFlash2 ||
+        loaded.proposal_head != ProposalHead::Full ||
+        requested.speculative != SpeculativeBackend::None) return false;
+    requested.speculative = SpeculativeBackend::DFlash2;
+    return loaded == requested;
+}
+
+// Physical resident compatibility additionally permits re-preparing the native prefill policy.
+// No other operand or arithmetic choice may vary between borrowed Programs.
+[[nodiscard]] inline bool resident_load_options_compatible(LoadOptions loaded,
+                                                          const LoadOptions& requested) noexcept {
+    if (loaded.purpose != EnginePurpose::Generation || loaded.vision || loaded.ranks != 1 ||
+        loaded.speculative != SpeculativeBackend::DFlash2 ||
+        loaded.proposal_head != ProposalHead::Full) return false;
+    loaded.prefill_a8 = requested.prefill_a8;
+    return execution_load_options_compatible(loaded, requested);
+}
+
+[[nodiscard]] inline bool prepared_execution_options_compatible(LoadOptions loaded,
+    bool prepared_prefill_a8, const LoadOptions& requested) noexcept {
+    if (requested.prefill_a8 != prepared_prefill_a8) return false;
+    loaded.prefill_a8 = prepared_prefill_a8;
+    return execution_load_options_compatible(loaded, requested);
+}
+
 [[nodiscard]] constexpr bool is_masked_draft_backend(SpeculativeBackend backend) noexcept {
     return backend == SpeculativeBackend::DFlash || backend == SpeculativeBackend::DFlash2;
 }

@@ -8,6 +8,7 @@
 #include <vector>
 
 namespace ninfer {
+namespace runtime { class ResidentModelSession; }
 
 class PreparedPrompt {
 public:
@@ -111,7 +112,9 @@ public:
     void reset_memory_peaks() noexcept;
 
 private:
+    friend class runtime::ResidentModelSession;
     class Impl;
+    explicit Engine(std::shared_ptr<Impl> impl) noexcept;
     std::shared_ptr<Impl> impl_;
 };
 

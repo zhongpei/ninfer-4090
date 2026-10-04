@@ -22,7 +22,7 @@ auto with_context(const std::string& context, Function&& function) {
 
 class Prepare {
 public:
-    explicit Prepare(const Model& model) : model_(model) {}
+    Prepare(const Model& model, bool prefill_a8) : model_(model), prefill_a8_(prefill_a8) {}
 
     // The integer-activation route is an sm_86 addition: it feeds groupwise-int weights to the s8
     // tensor cores, which Ampere has and which no A16 route uses. It is registered per exact shape
@@ -30,7 +30,7 @@ public:
     // written for; any other projection keeps what its Use permits.
     void integer_route(LinearParameters& p, QType format, std::int32_t n, std::int32_t k) const {
 #if defined(NINFER_SM8X_COMPAT)
-        if (!model_.options().prefill_a8) { return; }
+        if (!prefill_a8_) { return; }
         if (p.policy == ops::LinearPolicy::A16Only && p.weight.qtype == format &&
             p.weight.n == n && p.weight.k == k) {
             // The cuBLAS route is a superset: it admits everything AllowA8Int does and adds the
@@ -50,7 +50,7 @@ public:
                             std::int32_t first_rows, QType second_format, std::int32_t second_rows,
                             std::int32_t input_rows) const {
 #if defined(NINFER_SM8X_COMPAT)
-        if (!model_.options().prefill_a8) { return; }
+        if (!prefill_a8_) { return; }
         auto* pair = std::get_if<ops::PairedProjectionWeights>(&projection);
         if (pair == nullptr || pair->policy != ops::LinearPolicy::A16Only) { return; }
         if (pair->first.qtype == first_format && pair->first.n == first_rows &&
@@ -357,12 +357,20 @@ public:
 
 private:
     const Model& model_;
+    const bool prefill_a8_;
 };
 
 } // namespace
 
-Parameters::Parameters(const Model& source) : model(source) {
-    const Prepare prepare(model);
+Parameters::Parameters(const Model& source) : Parameters(source, source.options().prefill_a8) {}
+
+bool Parameters::supports_execution(const LoadOptions& requested) const noexcept {
+    return models::prepared_execution_options_compatible(model.options(), prefill_a8, requested);
+}
+
+Parameters::Parameters(const Model& source, bool requested_prefill_a8)
+    : model(source), prefill_a8(requested_prefill_a8) {
+    const Prepare prepare(model, prefill_a8);
     const auto& w        = model.weights();
     text.token_embedding = native_weight(model.weight(w.text.token_embedding).view);
     text.output_head     = prepare.head(w.text.output_head_use);

@@ -67,6 +67,81 @@ while retaining the maximum drafter. The
 [RTX 4090 qualification record](docs/performance.md#rtx-4090-sm_89-chain-qualification)
 distinguishes fixed-route measurements from resident-drafter policy evidence.
 
+### Enable Fixed K7 or Auto Selected
+
+The [2026-10-04 RTX 4090 test report](docs/performance/dflash2-4090-2026-10-04.md)
+recommends **Fixed K7** for the tested INT8-KV, native-context configurations. Auto Selected
+passes correctness checks, but its calibrated profiles do not beat the best fixed policy.
+The measured exception is one request with a reused medium prompt: Fixed K11 is faster there.
+
+**Fixed K7** needs no calibration file. Set `--spec dflash2 --draft-tokens 7`; routing defaults
+to `fixed`. For example, this serves up to eight concurrent requests on GPU 0:
+
+```bash
+./build/apps/ninfer-serve ./Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --host 127.0.0.1 --port 8080 --device 0 \
+  --max-context 32768 --kv-capacity 131072 --max-concurrency 8 \
+  --prefill-chunk 1024 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --spec-router fixed \
+  --device-state-slots 8 --host-state-slots 8 --host-kv-mib 8192 \
+  --max-private-continuations 16 --max-shared-prefixes 8 \
+  --max-long-anchors-per-continuation 2 --max-cache-markers-per-request 4 \
+  --greedy --presence-penalty 0 --frequency-penalty 0 \
+  --no-thinking --default-max-tokens 512
+```
+
+For a single command rather than an HTTP server:
+
+```bash
+./build/apps/ninfer ./Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --prompt 'Explain speculative decoding briefly.' --device 0 \
+  --max-context 32768 --kv-capacity 32768 --prefill-chunk 1024 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --spec-router fixed \
+  --greedy --presence-penalty 0 --frequency-penalty 0 --no-thinking --max-new 512
+```
+
+**Auto Selected** needs a selected-mode calibration profile matching the artifact, hardware
+and full startup configuration. First generate it with the one-command campaign, using an
+existing configured build and a new output directory. Both GPUs must be idle; each keeps one
+model resident while the script runs all jobs:
+
+```bash
+python3.11 -m tools.bench.run_dflash_gpu_campaign \
+  --model /absolute/path/to/Ternary-Bonsai-2-27B-ninfer-v3.ninfer --build-dir build \
+  --out profiles/bench/dflash-gpu-campaign --gpus 0,1 \
+  --concurrency 1,2,4,8 --pairs 2 --repeats 2 \
+  --max-tokens 512 --max-context 32768 --kv-capacity 131072
+```
+
+The script writes `auto-E8-selected.json` for Engine capacity eight, independently of its
+capacity-one profile. Enable that profile in the server with the matching configuration:
+
+```bash
+./build/apps/ninfer-serve ./Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --host 127.0.0.1 --port 8080 --device 0 \
+  --max-context 32768 --kv-capacity 131072 --max-concurrency 8 \
+  --prefill-chunk 1024 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 15 --spec-router calibrated \
+  --spec-router-profile profiles/bench/dflash-gpu-campaign/auto-E8-selected.json \
+  --device-state-slots 8 --host-state-slots 8 --host-kv-mib 8192 \
+  --max-private-continuations 16 --max-shared-prefixes 8 \
+  --max-long-anchors-per-continuation 2 --max-cache-markers-per-request 4 \
+  --greedy --presence-penalty 0 --frequency-penalty 0 \
+  --no-thinking --default-max-tokens 512
+```
+
+Startup K15 retains the maximum drafter; the table then selects K0/K7/K11/K15 from actual
+batch and context frontier. Selected compute is enabled by the schema-2 profile's
+`"proposal_compute": "selected"`. There is no production `--proposal-compute selected`
+flag; that flag belongs to measurement tools. Unqualified or uncovered cells use K0.
+
+Keep the default A8 prefill, full proposal head and CUDA Graphs, with cache enabled and Vision
+and RoPE scaling disabled for this profile. Changing KV format, cache capacities, concurrency,
+execution options or artifact requires a matching new profile; startup rejects mismatches.
+The campaign profiles cannot be loaded directly by the single-command `ninfer` CLI, which
+disables context caching. These commands are checked against executable help and startup
+option mappings; the performance report measures the native public Engine route, not HTTP.
+
 **New in v0.11.0: prompt processing is roughly twice as fast, and the recommended profile is the fast one.**
 Qwen3.8-27B prefill reaches 2,989 tok/s at 4K (`--prefill-cublas --prefill-chunk 4096`, +0.156%
 perplexity, opt-in) and 1,649 tok/s on the default route, single-stream decode reaches 187 tok/s with

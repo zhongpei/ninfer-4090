@@ -1,6 +1,9 @@
 #include "ninfer/engine.h"
 #include "runtime/engine/speculative_routing_profile.h"
 #include "runtime/engine/model_instance.h"
+#include "runtime/engine/resident_model.h"
+#include "calibrated_resident_suite.h"
+#include "resident_model_checks.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <condition_variable>
@@ -14,11 +17,26 @@ namespace {
 void require(bool condition, const char* message) {
     if (!condition) { throw std::runtime_error(message); }
 }
+ninfer::Engine make_engine(const ninfer::EngineOptions& options,
+                           ninfer::runtime::ResidentModelSession* session) {
+    return session ? session->make_engine(options) : ninfer::Engine(options);
+}
 struct ProfileFile {
     std::filesystem::path path = std::filesystem::temp_directory_path() /
         ("ninfer-calibrated-real-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
     ~ProfileFile() { std::error_code error; std::filesystem::remove(path, error); }
 };
+nlohmann::json routing_profile(const ninfer::SpeculativeRoutingProfileIdentity& identity,
+                               const nlohmann::json& cells, bool selected_compute) {
+    nlohmann::json profile{{"schema_version", selected_compute ? 2 : 1},
+        {"artifact_type", "ninfer_spec_router_profile"},
+        {"identity", ninfer::runtime::routing_profile_identity_json(identity)}, {"cells", cells}};
+    if (selected_compute) { profile["proposal_compute"] = "selected"; }
+    return profile;
+}
+std::uint32_t proposal_width(std::uint32_t action, bool selected_compute) {
+    return action == 0 ? 0U : selected_compute ? action + 1U : 16U;
+}
 ninfer::RequestOptions request() {
     ninfer::RequestOptions result;
     result.execution.requested_output_tokens = 16;
@@ -46,7 +64,8 @@ struct GraphMemoryTelemetry {
     }
 };
 
-void resource_probe(const char* artifact, std::uint32_t kv_capacity) {
+void resource_probe(const char* artifact, std::uint32_t kv_capacity, bool selected_compute,
+                    ninfer::runtime::ResidentModelSession* session = nullptr) {
     ninfer::EngineOptions options;
     options.artifact_path = artifact;
     options.max_context = 32768;
@@ -61,7 +80,7 @@ void resource_probe(const char* artifact, std::uint32_t kv_capacity) {
     GraphMemoryTelemetry telemetry;
     options.startup_observer.callback = [&](const auto& event) { telemetry.observe(event); };
     {
-        ninfer::Engine fixed(options);
+        auto fixed = make_engine(options, session);
         const auto memory = fixed.memory_summary();
         const auto identity = fixed.load_summary().speculative_routing_identity;
         require(identity.has_value(), "resource probe has no actual identity");
@@ -86,14 +105,13 @@ void resource_probe(const char* artifact, std::uint32_t kv_capacity) {
             }
         }
         std::ofstream stream(profile.path);
-        stream << nlohmann::json{{"schema_version", 1}, {"artifact_type", "ninfer_spec_router_profile"},
-            {"identity", ninfer::runtime::routing_profile_identity_json(*identity)}, {"cells", cells}};
+        stream << routing_profile(*identity, cells, selected_compute);
     }
     telemetry = {};
     options.speculative.routing.mode = ninfer::SpeculativeRoutingMode::Calibrated;
     options.speculative.routing.profile_path = profile.path;
     try {
-        ninfer::Engine calibrated(options);
+        auto calibrated = make_engine(options, session);
         const auto memory = calibrated.memory_summary();
         require(memory.cuda_graph_prepare_peak_device_delta_bytes < memory.cuda_graph_allowance_bytes,
                 "calibrated graph device peak exceeded reserved allowance");
@@ -120,7 +138,8 @@ void resource_probe(const char* artifact, std::uint32_t kv_capacity) {
     }
 }
 
-void run(const char* artifact, std::uint32_t action = 0) {
+void run(const char* artifact, std::uint32_t action, bool selected_compute,
+         ninfer::runtime::ResidentModelSession* session = nullptr) {
     require(action == 0 || action == 7 || action == 11 || action == 15, "invalid forced action");
     ninfer::EngineOptions options;
     options.artifact_path = artifact;
@@ -136,7 +155,7 @@ void run(const char* artifact, std::uint32_t action = 0) {
     ninfer::GenerationResult reference;
     ProfileFile profile;
     {
-        ninfer::Engine fixed(options);
+        auto fixed = make_engine(options, session);
         const auto summary = fixed.load_summary();
         require(summary.speculative_routing_identity.has_value(), "fixed DFlash2 K15 omitted calibration identity");
         prompt = fixed.tokenize_text("Count from one to twenty: one, two, three,");
@@ -146,9 +165,9 @@ void run(const char* artifact, std::uint32_t action = 0) {
             cells.push_back({{"active_batch", 1}, {"frontier_upper", upper}, {"draft_tokens", action}});
         }
         std::ofstream stream(profile.path);
-        stream << nlohmann::json{{"schema_version", 1}, {"artifact_type", "ninfer_spec_router_profile"},
-            {"identity", ninfer::runtime::routing_profile_identity_json(*summary.speculative_routing_identity)},
-            {"cells", cells}, {"provenance", {{"purpose", "measurement_control"}, {"qualified", false}}}};
+        auto generated_profile = routing_profile(*summary.speculative_routing_identity, cells, selected_compute);
+        generated_profile["provenance"] = {{"purpose", "measurement_control"}, {"qualified", false}};
+        stream << generated_profile;
     }
     options.speculative.routing.mode = ninfer::SpeculativeRoutingMode::Calibrated;
     options.speculative.routing.profile_path = profile.path;
@@ -159,7 +178,7 @@ void run(const char* artifact, std::uint32_t action = 0) {
         { std::lock_guard lock(mutex); events.push_back(event); }
         ready.notify_all();
     };
-    ninfer::Engine engine(options);
+    auto engine = make_engine(options, session);
     const auto result = engine.generate(engine.prepare_tokens(prompt), request());
     require(result.generated_token_ids == reference.generated_token_ids &&
             result.finish_reason == reference.finish_reason, "calibrated target-only changed tokens or completion");
@@ -171,9 +190,9 @@ void run(const char* artifact, std::uint32_t action = 0) {
         for (const auto& event : events) {
             require(event.active_batch == 1 && event.draft_tokens == action && event.verify_width == action + 1 &&
                     event.backend == ninfer::SpeculativeBackend::DFlash2 &&
-                    event.proposal_width == (action == 0 ? 0U : 16U) &&
+                    event.proposal_width == proposal_width(action, selected_compute) &&
                     event.neural_drafter_executed == (action != 0),
-                    "forced profile did not execute its physical target and resident proposal widths");
+                    "forced profile did not execute its physical target and proposal widths");
         }
         require(ready.wait_for(lock, std::chrono::seconds(10), [&] {
             std::uint64_t committed = 0;
@@ -191,14 +210,15 @@ void run(const char* artifact, std::uint32_t action = 0) {
             "calibrated settled action counters differ");
     std::cout << "ok calibrated forced K" << action
               << ": exact output, physical width " << action + 1
-              << ", resident proposal " << (action == 0 ? 0 : 16)
+              << ", proposal " << proposal_width(action, selected_compute)
               << ", settled counters\n";
 }
 }
 #include "calibrated_routing_switching.h"
 
 namespace {
-void a16_consistency(const char* artifact, const std::string& route = "both") {
+void a16_consistency(const char* artifact, const std::string& route, bool selected_compute,
+                     ninfer::runtime::ResidentModelSession* session = nullptr) {
     require(route == "both" || route == "fixed15" || route == "cal0", "unknown A16 consistency route");
     ninfer::EngineOptions options;
     options.artifact_path = artifact;
@@ -278,7 +298,7 @@ void a16_consistency(const char* artifact, const std::string& route = "both") {
                   << std::flush;
     };
     {
-        ninfer::Engine target(options);
+        auto target = make_engine(options, session);
         exercise(target, "None");
     }
     options.speculative.backend = ninfer::SpeculativeBackend::DFlash2;
@@ -286,7 +306,7 @@ void a16_consistency(const char* artifact, const std::string& route = "both") {
     options.speculative.proposal_head = ninfer::ProposalHead::Full;
     ProfileFile profile;
     {
-        ninfer::Engine fixed(options);
+        auto fixed = make_engine(options, session);
         const auto identity = fixed.load_summary().speculative_routing_identity;
         require(identity.has_value() && !identity->execution_options.prefill_a8,
                 "A16 routing identity omitted effective prefill setting");
@@ -296,8 +316,7 @@ void a16_consistency(const char* artifact, const std::string& route = "both") {
             cells.push_back({{"active_batch", 1}, {"frontier_upper", upper}, {"draft_tokens", 0}});
         }
         std::ofstream stream(profile.path);
-        stream << nlohmann::json{{"schema_version", 1}, {"artifact_type", "ninfer_spec_router_profile"},
-            {"identity", ninfer::runtime::routing_profile_identity_json(*identity)}, {"cells", cells}};
+        stream << routing_profile(*identity, cells, selected_compute);
     }
     if (route == "fixed15") { return; }
     options.speculative.routing.mode = ninfer::SpeculativeRoutingMode::Calibrated;
@@ -322,7 +341,7 @@ void a16_consistency(const char* artifact, const std::string& route = "both") {
         committed += event.committed_tokens;
         ready.notify_all();
     };
-    ninfer::Engine calibrated(options);
+    auto calibrated = make_engine(options, session);
     observed = &calibrated;
     exercise(calibrated, "Cal forced0");
     std::unique_lock lock(mutex);
@@ -333,22 +352,86 @@ void a16_consistency(const char* artifact, const std::string& route = "both") {
 
 #include "calibrated_program_zero_commit.h"
 
+namespace ninfer::test {
+nlohmann::json run_calibrated_resident_suite(runtime::ResidentModelSession& session,
+                                           const char* artifact) {
+    EngineOptions check_options;
+    check_options.artifact_path = artifact;
+    check_options.kv_cache = KvCacheStorage::Int8Group64;
+    const auto ownership_checks = resident_model_checks(session, check_options);
+    unsigned passed = 0;
+    for (const bool selected : {false, true}) {
+        for (const unsigned action : {0U, 7U, 11U, 15U}) {
+            run(artifact, action, selected, &session);
+            ++passed;
+        }
+        program_zero_commit(artifact, selected, &session);
+        ++passed;
+        a16_consistency(artifact, "both", selected, &session);
+        ++passed;
+        for (const auto scenario : {"membership", "boundaries", "terminal"}) {
+            calibrated_switching::run(artifact, scenario, selected, &session);
+            ++passed;
+        }
+    }
+    return nlohmann::json{{"cases_passed", passed},
+        {"ownership_checks", ownership_checks},
+        {"model_load_count", session.model_load_count()},
+        {"resident_weight_bytes", session.resident_weight_bytes()},
+        {"scope", "common_weight_residency"}};
+}
+} // namespace ninfer::test
+
+#ifndef NINFER_CALIBRATED_SUITE_LIBRARY
 int main(int argc, char** argv) {
-    const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
-    if (!artifact || !*artifact) { std::cout << "skip: set NINFER_TEST_ARTIFACT\n"; return 77; }
     try {
-        if (argc == 2 && std::string(argv[1]) == "--program-zero-commit") {
-            program_zero_commit(artifact);
-        } else if ((argc == 2 || argc == 3) && std::string(argv[1]) == "--a16-consistency") {
-            a16_consistency(artifact, argc == 3 ? argv[2] : "both");
-        } else if (argc == 3 && std::string(argv[1]) == "--resource-probe") {
-            resource_probe(artifact, static_cast<std::uint32_t>(std::stoul(argv[2])));
-        } else if (argc == 3 && std::string(argv[1]) == "--action") {
-            run(artifact, static_cast<std::uint32_t>(std::stoul(argv[2])));
-        } else if (argc == 3 && std::string(argv[1]) == "--switching") {
-            calibrated_switching::run(artifact, argv[2]);
-        } else { run(artifact); }
+        bool selected_compute = false;
+        bool compute_seen = false;
+        std::vector<std::string> args;
+        for (int i = 1; i < argc; ++i) {
+            if (std::string(argv[i]) == "--proposal-compute") {
+                require(!compute_seen && i + 1 < argc, "expected one --proposal-compute full|selected");
+                compute_seen = true;
+                const std::string mode = argv[++i];
+                require(mode == "full" || mode == "selected", "proposal compute must be full or selected");
+                selected_compute = mode == "selected";
+            } else { args.emplace_back(argv[i]); }
+        }
+        const bool suite = args.size() == 1 && args[0] == "--suite";
+        const bool zero = args.size() == 1 && args[0] == "--program-zero-commit";
+        const bool a16 = (args.size() == 1 || args.size() == 2) && args[0] == "--a16-consistency";
+        const bool resource = args.size() == 2 && args[0] == "--resource-probe";
+        const bool action = args.size() == 2 && args[0] == "--action";
+        const bool switching = args.size() == 2 && args[0] == "--switching";
+        require(args.empty() || suite || zero || a16 || resource || action || switching, "invalid calibrated test arguments");
+        require(!suite || !compute_seen, "--suite covers both proposal modes; omit --proposal-compute");
+        const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
+        if (!artifact || !*artifact) { std::cout << "skip: set NINFER_TEST_ARTIFACT\n"; return 77; }
+        if (suite) {
+            ninfer::EngineOptions load_options;
+            load_options.artifact_path = artifact;
+            load_options.max_context = 9216;
+            load_options.prefill_chunk = 1024;
+            load_options.max_concurrency = 2;
+            load_options.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(18432);
+            load_options.kv_cache = ninfer::KvCacheStorage::Int8Group64;
+            load_options.speculative.backend = ninfer::SpeculativeBackend::DFlash2;
+            load_options.speculative.draft_tokens = 15;
+            load_options.speculative.proposal_head = ninfer::ProposalHead::Full;
+            auto session = std::make_unique<ninfer::runtime::ResidentModelSession>(load_options);
+            auto summary = ninfer::test::run_calibrated_resident_suite(*session, artifact);
+            summary["teardown_checks"] = ninfer::test::resident_model_teardown_checks(session, load_options);
+            std::cout << summary << std::endl;
+        }
+        else if (zero) { program_zero_commit(artifact, selected_compute); }
+        else if (a16) { a16_consistency(artifact, args.size() == 2 ? args[1] : "both", selected_compute); }
+        else if (resource) { resource_probe(artifact, static_cast<std::uint32_t>(std::stoul(args[1])), selected_compute); }
+        else if (action) { run(artifact, static_cast<std::uint32_t>(std::stoul(args[1])), selected_compute); }
+        else if (switching) { calibrated_switching::run(artifact, args[1], selected_compute); }
+        else { run(artifact, 0, selected_compute); }
         return 0;
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
+
+#endif

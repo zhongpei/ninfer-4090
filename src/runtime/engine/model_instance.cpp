@@ -1,4 +1,5 @@
 #include "runtime/engine/model_instance.h"
+#include "runtime/engine/resident_model.h"
 #include "runtime/engine/speculative_routing_profile.h"
 #include "artifact/reader.h"
 #include "artifact/formats.h"
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <set>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -178,9 +180,9 @@ EngineOptions normalize_engine_options(EngineOptions options) {
     return options;
 }
 
-ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
-                             const EngineOptions& options)
-    : model(std::move(source)), parameters(*model),
+ModelInstance::ModelInstance(std::shared_ptr<models::qwen3_5::Model> source,
+                             const EngineOptions& options, DeviceContext* execution_device)
+    : model(std::move(source)), parameters(*model, options.prefill_a8),
       frontend(models::qwen3_5::make_frontend(
           model->resources(), {.chat_template_path       = options.chat_template_path,
                                .architecture             = model->config().text.architecture,
@@ -190,24 +192,23 @@ ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
                                .media_live_bytes         = options.media_live_bytes,
                                .media_preprocess_threads = options.media_preprocess_threads,
                                .vision_max_merged_tokens = options.vision_max_merged_tokens})),
-      capacity(options.max_context) {}
+      capacity(options.max_context), execution_device_(execution_device) {}
 
-ModelInstance::~ModelInstance() = default;
+ModelInstance::~ModelInstance() {
+    if (execution_device_ != nullptr) {
+        execution_device_->bind_to_current_thread_noexcept();
+        try { execution_device_->synchronize(); } catch (...) {}
+        program.reset();
+        try { execution_device_->synchronize(); } catch (...) {}
+    }
+}
 
-ConstructedModel construct_model(const EngineOptions& options, DeviceContext& device) {
-    validate_options(options);
-    const auto start = Clock::now();
-    StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
-    artifact::Reader reader(options.artifact_path);
-    inspect.complete();
-    StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
-    auto plan = models::qwen3_5::plan_load(reader, models::load_options(options));
-    binding.complete();
-    auto model =
-        models::qwen3_5::materialize_model(std::move(plan), device, &options.startup_observer);
-    device.synchronize();
+namespace {
+ConstructedModel prepare_model(const EngineOptions& options, DeviceContext& device,
+                               std::shared_ptr<models::qwen3_5::Model> model,
+                               Clock::time_point start, DeviceContext* execution_device = nullptr) {
     StartupPhaseScope frontend(options.startup_observer, StartupPhase::FrontendInitialize);
-    auto instance = std::make_unique<ModelInstance>(std::move(model), options);
+    auto instance = std::make_unique<ModelInstance>(std::move(model), options, execution_device);
     frontend.complete();
     StartupPhaseScope planning(options.startup_observer, StartupPhase::TargetFinalize);
     const std::size_t overlay_window_bytes =
@@ -268,6 +269,121 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
     summary.host_object_count    = stats.host_object_count;
     summary.context_cost         = std::move(context_cost.summary);
     return {std::move(instance), std::move(summary), std::move(context_cost.model)};
+}
+
+} // namespace
+
+ConstructedModel construct_model(const EngineOptions& options, DeviceContext& device) {
+    validate_options(options);
+    const auto start = Clock::now();
+    StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
+    artifact::Reader reader(options.artifact_path);
+    inspect.complete();
+    StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
+    auto plan = models::qwen3_5::plan_load(reader, models::load_options(options));
+    binding.complete();
+    auto model =
+        models::qwen3_5::materialize_model(std::move(plan), device, &options.startup_observer);
+    device.synchronize();
+    return prepare_model(options, device, std::move(model), start);
+}
+
+struct ResidentModelSession::State {
+    explicit State(EngineOptions source)
+        : options(std::move(source)), device(options.devices.empty() ? options.device
+                                                                  : options.devices.front()) {
+        StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
+        artifact::Reader reader(options.artifact_path);
+        inspect.complete();
+        StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
+        auto plan = models::qwen3_5::plan_load(reader, models::load_options(options));
+        binding.complete();
+        model = models::qwen3_5::materialize_model(std::move(plan), device,
+                                                   &options.startup_observer);
+        ++materialize_count;
+        device.synchronize();
+    }
+    ~State() {
+        device.bind_to_current_thread_noexcept();
+        try { device.synchronize(); } catch (...) {}
+        model.reset();
+    }
+
+    EngineOptions options;
+    DeviceContext device;
+    std::unique_ptr<models::qwen3_5::Model> model;
+    std::size_t materialize_count = 0;
+    std::mutex mutex;
+    bool borrowed = false;
+};
+
+namespace {
+void validate_resident_load(const EngineOptions& options) {
+    validate_options(options);
+    if (options.purpose != EnginePurpose::Generation || options.enable_vision ||
+        options.devices.size() > 1 || options.speculative.backend != SpeculativeBackend::DFlash2 ||
+        options.speculative.proposal_head != ProposalHead::Full) {
+        throw std::invalid_argument(
+            "resident model requires single-GPU Generation with DFlash2 Full and no Vision");
+    }
+}
+}
+
+ResidentModelSession::ResidentModelSession(const EngineOptions& load_options) {
+    validate_resident_load(load_options);
+    state_ = std::make_shared<State>(normalize_engine_options(load_options));
+}
+
+void ResidentModelSession::validate_instance_options(const EngineOptions& options) const {
+    validate_options(options);
+    const auto& loaded = state_->options;
+    const int requested_device = options.devices.empty() ? options.device : options.devices.front();
+    if (options.purpose != EnginePurpose::Generation || options.enable_vision ||
+        options.devices.size() > 1 || requested_device != state_->device.device ||
+        std::filesystem::absolute(options.artifact_path).lexically_normal() !=
+            std::filesystem::absolute(loaded.artifact_path).lexically_normal() ||
+        !models::resident_load_options_compatible(state_->model->options(),
+                                                    models::load_options(options))) {
+        throw std::invalid_argument("resident model does not match requested artifact, GPU or load options");
+    }
+}
+
+ConstructedModel ResidentModelSession::make_instance(const EngineOptions& source,
+                                                    DeviceContext& device) {
+    validate_instance_options(source);
+    if (device.size() != 1 || device.device != state_->device.device) {
+        throw std::invalid_argument("resident Program requires the resident model GPU");
+    }
+    const auto options = normalize_engine_options(source);
+    struct Lease {
+        explicit Lease(std::shared_ptr<State> owner) : state(std::move(owner)) {
+            std::lock_guard lock(state->mutex);
+            if (state->borrowed) throw std::logic_error("resident model already has an active Program");
+            state->borrowed = true;
+        }
+        ~Lease() {
+            std::lock_guard lock(state->mutex);
+            state->borrowed = false;
+        }
+        std::shared_ptr<State> state;
+    };
+    auto lease = std::make_shared<Lease>(state_);
+    std::shared_ptr<models::qwen3_5::Model> borrowed(lease, state_->model.get());
+    auto constructed = prepare_model(options, device, std::move(borrowed), Clock::now(), &device);
+    // The session performed these transfers once. Creating a Program does not repeat them.
+    constructed.load.upload_seconds = 0;
+    constructed.load.artifact_bytes_read = 0;
+    constructed.load.host_to_device_bytes = 0;
+    constructed.load.peak_staging_bytes = 0;
+    return constructed;
+}
+
+std::size_t ResidentModelSession::model_load_count() const noexcept {
+    return state_->materialize_count;
+}
+
+std::size_t ResidentModelSession::resident_weight_bytes() const noexcept {
+    return state_->model->storage_stats().device_capacity_bytes;
 }
 
 } // namespace ninfer::runtime

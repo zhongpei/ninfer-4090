@@ -131,7 +131,7 @@ std::uint32_t selected(const ninfer::DecodeRoundEvent& event) {
 }
 
 void audit(ninfer::Engine& engine, Observations& observations,
-           const std::set<std::size_t>& fallback_events = {}) {
+           const std::set<std::size_t>& fallback_events, bool selected_compute) {
     const auto events = observations.snapshot();
     std::uint64_t counts[4]{};
     std::uint64_t switches = 0, commits = 0;
@@ -141,7 +141,7 @@ void audit(ninfer::Engine& engine, Observations& observations,
         const auto action = fallback_events.contains(i) ? 15U : selected(event);
         require(event.backend == ninfer::SpeculativeBackend::DFlash2 &&
                     event.draft_tokens == action && event.verify_width == action + 1 &&
-                    event.proposal_width == (action ? 16U : 0U) &&
+                    event.proposal_width == proposal_width(action, selected_compute) &&
                     event.neural_drafter_executed == (action != 0) && event.elapsed_ns > 0,
                 "switching fixture observed the wrong physical action or drafter execution");
         ++counts[action == 0 ? 0 : action == 7 ? 1 : action == 11 ? 2 : 3];
@@ -164,7 +164,8 @@ void barrier(ninfer::Engine& engine, const std::vector<ninfer::TokenId>& prompt)
     require(result.generated_token_ids.size() == 1, "switching FIFO barrier did not complete");
 }
 
-void run(const char* artifact, const std::string& scenario) {
+void run(const char* artifact, const std::string& scenario, bool selected_compute,
+         ninfer::runtime::ResidentModelSession* session = nullptr) {
     const bool membership = scenario == "membership";
     const bool restore_control = scenario == "restore-control";
     const bool ptc_only = scenario == "ptc-boundary";
@@ -226,7 +227,7 @@ void run(const char* artifact, const std::string& scenario) {
         return result;
     };
     {
-        ninfer::Engine fixed(options);
+        auto fixed = make_engine(options, session);
         newline = fixed.tokenize_text("\n");
         if (membership) {
             auto a = prompt_at(fixed, 63), b = prompt_at(fixed, 65, true);
@@ -302,13 +303,12 @@ void run(const char* artifact, const std::string& scenario) {
             }
         }
         std::ofstream stream(profile.path);
-        stream << nlohmann::json{{"schema_version", 1}, {"artifact_type", "ninfer_spec_router_profile"},
-            {"identity", ninfer::runtime::routing_profile_identity_json(*identity)}, {"cells", cells}};
+        stream << routing_profile(*identity, cells, selected_compute);
     }
     {
         auto baseline_options = options;
         baseline_options.speculative = {};
-        ninfer::Engine baseline(baseline_options);
+        auto baseline = make_engine(baseline_options, session);
         for (const auto& item : cases) {
             if (item.compare_none && !ptc_only) {
                 same_response(generate(baseline, item.prompt, item.options, "None prompt=" + std::to_string(item.prompt.size())), item.reference, "None vs fixed15 prompt=" + std::to_string(item.prompt.size()));
@@ -328,7 +328,7 @@ void run(const char* artifact, const std::string& scenario) {
         }
     }
     if (restore_control) {
-        ninfer::Engine fixed(options);
+        auto fixed = make_engine(options, session);
         const auto& root = cases.front();
         const auto& follow = cases.back();
         same_response(generate(fixed, root.prompt, options_for(64, true), "fixed15 retained root8187"),
@@ -341,7 +341,7 @@ void run(const char* artifact, const std::string& scenario) {
     options.speculative.routing.mode = ninfer::SpeculativeRoutingMode::Calibrated;
     options.speculative.routing.profile_path = profile.path;
     options.decode_round_observer.callback = [&](const auto& event) { observations.record(event); };
-    ninfer::Engine engine(options);
+    auto engine = make_engine(options, session);
     std::set<std::size_t> fallback_events;
     if (membership) {
         bool bonus = false;
@@ -519,7 +519,7 @@ void run(const char* artifact, const std::string& scenario) {
                 "continuation after cancellation exposed an uncommitted prefix");
         barrier(engine, root.prompt);
     }
-    audit(engine, observations, fallback_events);
+    audit(engine, observations, fallback_events, selected_compute);
     std::cout << "ok calibrated switching " << scenario << ": public frontiers, exact response, actual shapes/counters\n";
 }
 

@@ -8,6 +8,7 @@
 #include "runtime/engine/causal_score_core.h"
 #include "runtime/engine/engine_core.h"
 #include "runtime/engine/model_instance.h"
+#include "runtime/engine/resident_model.h"
 
 #include <algorithm>
 #include <limits>
@@ -165,11 +166,12 @@ public:
     using Core =
         std::variant<std::monostate, std::unique_ptr<GenerationCore>, std::unique_ptr<ScoringCore>>;
 
-    explicit Impl(EngineOptions engine_options)
+    explicit Impl(EngineOptions engine_options, runtime::ResidentModelSession* resident = nullptr)
         : options(runtime::normalize_engine_options(std::move(engine_options))),
           device(initialize_device(options)) {
         nvtx::ScopedRange load_range(nvtx::Name::EngineLoad, nvtx::Category::Runtime);
-        auto constructed  = runtime::construct_model(options, device);
+        auto constructed  = resident != nullptr ? resident->make_instance(options, device)
+                                                 : runtime::construct_model(options, device);
         active            = std::move(constructed.instance);
         load              = std::move(constructed.load);
         sampling_defaults = active->frontend.sampling_defaults();
@@ -204,6 +206,14 @@ Engine::Engine(EngineOptions options) {
     StartupPhaseScope startup_phase(startup_observer, StartupPhase::EngineStartup);
     impl_ = std::make_shared<Impl>(std::move(options));
     startup_phase.complete();
+}
+
+Engine::Engine(std::shared_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+
+Engine runtime::ResidentModelSession::make_engine(const EngineOptions& options) {
+    // Reject changes before constructing any execution resources.
+    validate_instance_options(options);
+    return Engine(std::make_shared<Engine::Impl>(options, this));
 }
 
 Engine::~Engine()                            = default;

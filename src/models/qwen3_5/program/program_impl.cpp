@@ -145,7 +145,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     if (speculative_routing.mode == SpeculativeRoutingMode::Calibrated && !calibrated_routing) {
         throw std::invalid_argument("calibrated Program requires a loaded immutable routing table");
     }
-    if (&parameters != plan.parameters || parameters.model.options() != plan.features) {
+    if (&parameters != plan.parameters || !parameters.supports_execution(plan.features)) {
         throw std::invalid_argument("Program parameters do not match the frozen sequence plan");
     }
     if (speculative_routing.scope == SpeculativeRouterScope::Engine &&

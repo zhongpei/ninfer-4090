@@ -1,7 +1,8 @@
 // Exercise the supported internal Program transaction contract, independently of Engine's
 // boundary-only public cancellation policy. All operands come from the real v3 Model loader.
 namespace {
-void program_zero_commit(const char* artifact) {
+void program_zero_commit(const char* artifact, bool selected_compute,
+                         ninfer::runtime::ResidentModelSession* session = nullptr) {
     namespace model = ninfer::models::qwen3_5;
     namespace rt = ninfer::runtime;
     ninfer::EngineOptions options;
@@ -18,14 +19,14 @@ void program_zero_commit(const char* artifact) {
     std::vector<ninfer::TokenId> prompt, follow;
     ninfer::GenerationResult reference, follow_reference;
     {
-        ninfer::Engine fixed(options);
+        auto fixed = make_engine(options, session);
         identity = *fixed.load_summary().speculative_routing_identity;
         prompt = fixed.tokenize_text("Count from one to twenty: one, two, three,");
     }
     {
         auto baseline_options = options;
         baseline_options.speculative = {};
-        ninfer::Engine baseline(baseline_options);
+        auto baseline = make_engine(baseline_options, session);
         reference = baseline.generate(baseline.prepare_tokens(prompt), request());
         require(reference.generated_token_ids.size() == 16, "zero-commit reference ended early");
         follow = prompt;
@@ -43,14 +44,13 @@ void program_zero_commit(const char* artifact) {
         }
         {
             std::ofstream out(profile.path);
-            out << nlohmann::json{{"schema_version", 1}, {"artifact_type", "ninfer_spec_router_profile"},
-                {"identity", rt::routing_profile_identity_json(identity)}, {"cells", cells}};
+            out << routing_profile(identity, cells, selected_compute);
         }
         options.speculative.routing.mode = ninfer::SpeculativeRoutingMode::Calibrated;
         options.speculative.routing.profile_path = profile.path;
         auto normalized = rt::normalize_engine_options(options);
         ninfer::DeviceContext device(0);
-        auto constructed = rt::construct_model(normalized, device);
+        auto constructed = session ? session->make_instance(normalized, device) : rt::construct_model(normalized, device);
         auto& instance = *constructed.instance;
         auto& program = *instance.program;
         rt::ResolvedExecutionOptions execution;
@@ -107,7 +107,7 @@ void program_zero_commit(const char* artifact) {
         auto pending = program.decode({&cancelled.first, 1}, {&budget, 1});
         const auto facts = pending.decode_execution();
         require(facts.draft_tokens == action && facts.verify_width == action + 1 &&
-                    facts.proposal_width == (action == 0 ? 0 : 16) &&
+                    facts.proposal_width == proposal_width(action, selected_compute) &&
                     facts.neural_drafter_executed == (action != 0),
                 "zero-commit transaction did not execute its real selected action");
         const rt::CommitDecision zero{.accepted_tokens = 0, .terminal = true, .cancelled = true};

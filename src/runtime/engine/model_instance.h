@@ -15,17 +15,22 @@ namespace ninfer::runtime {
 struct ModelInstance {
     using ModelContract = models::qwen3_5::RuntimeTypes;
 
-    std::unique_ptr<models::qwen3_5::Model> model;
+    std::shared_ptr<models::qwen3_5::Model> model;
     const models::qwen3_5::execution::Parameters parameters;
     models::qwen3_5::Frontend frontend;
     KvCapacityResolution kv_capacity_resolution;
     const std::uint32_t capacity;
     std::unique_ptr<models::qwen3_5::Program> program;
 
-    ModelInstance(std::unique_ptr<models::qwen3_5::Model> model, const EngineOptions& options);
+    ModelInstance(std::shared_ptr<models::qwen3_5::Model> model, const EngineOptions& options,
+                  DeviceContext* execution_device = nullptr);
     ~ModelInstance();
     ModelInstance(const ModelInstance&)            = delete;
     ModelInstance& operator=(const ModelInstance&) = delete;
+
+private:
+    // Borrowed resident Programs must complete before their exclusive model lease is released.
+    DeviceContext* execution_device_ = nullptr;
 };
 
 struct ConstructedModel {

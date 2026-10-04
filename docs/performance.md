@@ -21,9 +21,15 @@
 
 The final 2026-10-04 fixed-route campaign passes all 84 correctness
 comparisons and qualifies 71 performance comparisons across seven workloads,
-C1/C2/C4/C8 and K7/K11/K15. Resident-drafter calibration and final automatic
-performance comparisons remain in progress. Earlier server measurements below
-are historical evidence and do not qualify the final routing profile.
+C1/C2/C4/C8 and K7/K11/K15. The subsequent
+[resident DFlash2 qualification report](performance/dflash2-4090-2026-10-04.md)
+completes full/selected calibration and held-out automatic-route comparisons:
+18 real-model cases pass, all 720 validation requests match exact outputs, and
+each GPU loads its model once. Fixed K7 is the default recommendation for that
+matrix, with a Fixed K11 exception for single-request medium-context reuse.
+Auto Selected is correct but does not qualify as faster than the best fixed
+policy. Earlier server measurements below are historical evidence and do not
+qualify the final routing profile.
 
 The 2026-10-03 campaign uses the explicit local
 `Ternary-Bonsai-2-27B-ninfer-v3.ninfer` artifact, INT8 KV, greedy zero-penalty
