@@ -3,6 +3,7 @@
 #include <cmath>
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/program/context.h"
+#include "models/qwen3_5/program/proposal_view.h"
 #include "models/qwen3_5/program/speculative/tree_plan.h"
 #include "models/qwen3_5/execution/workspace.h"
 
@@ -237,7 +238,6 @@ void append_context_impl(Context& state, const Tensor& features, const Tensor& p
         }
     }
 }
-
 void prepare_dynamic_branch(ExecutionCore& execution, const Tensor& residual, const Tensor& norm,
                             float eps, const DynamicConvParameters& weights,
                             workspace::DFlash2BranchRoots& branch) {
@@ -594,6 +594,11 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
             k == 0 || k > kDFlashDecodeMaximumDrafts) {
             throw std::logic_error("DFlash decode batch state is incomplete");
         }
+        if (state.compact_proposal &&
+            (!selected_drafts || !lookup_tokens.empty() ||
+             !state.execution.parameters.model.config().draft->dflash2)) {
+            throw std::logic_error("compact proposal execution requires calibrated DFlash2 chain");
+        }
         qwen3_5::DFlashDecodeState& frame = state.frame;
         const std::uint32_t target_k = selected_drafts.value_or(k);
         const std::int32_t width = static_cast<std::int32_t>(target_k) + 1;
@@ -641,9 +646,16 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
         state.execution.work.reset();
 
         if (run_drafter && target_k != 0) {
-            propose_batch_impl(state, frame, batch_size, k, envelopes);
+            if (state.compact_proposal) {
+                // All draft layers, the vocabulary head and the candidate selector now execute
+                // K+1/K columns, not the maximum block followed by a logical prefix slice.
+                auto proposal_frame = qwen3_5::selected_dflash_proposal_view(frame, target_k);
+                propose_batch_impl(state, proposal_frame, batch_size, target_k, envelopes);
+            } else {
+                propose_batch_impl(state, frame, batch_size, k, envelopes);
+            }
         }
-        if (target_k != 0 && target_k != k) {
+        if (!state.compact_proposal && target_k != 0 && target_k != k) {
             const auto copy_prefix = [&](const Tensor& source, const Tensor& destination,
                                          std::size_t elements_per_draft) {
                 const auto row_bytes = elements_per_draft * target_k * dtype_size(source.dtype);
