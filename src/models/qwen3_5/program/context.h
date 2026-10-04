@@ -11,6 +11,7 @@
 #include "models/qwen3_5/program/storage/draft_context.h"
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
+#include "models/qwen3_5/program/vision_prefill.h"
 #include "models/qwen3_5/state/decoder_state.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 
