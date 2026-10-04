@@ -157,15 +157,14 @@ audited execution profile with:
 ```
 
 The generator applies the [calibrated qualification rules](../docs/maintainer/speculative-routing.md#profile-contract),
-records all retained comparisons and rejects fabricated coverage. It accepts
-resident-K15 measurements, not the standalone fixed-route summary above.
-Full Engine round time and submission-to-response wave time have different end
-boundaries and are reported separately; the final stats publication can follow
-response readiness. Uncovered or unprofitable cells explicitly select zero.
-When merging resident campaigns, use a distinct `--workload-label-prefix` for
-each prompt suite. Comparison labels include requested client concurrency to
-avoid collisions when different submissions produce the same actual batch;
-labels never establish batch or frontier coverage.
+records all retained comparisons and rejects fabricated coverage. The one-shot GPU campaign now
+emits schema-3 measurements: resident K7 is the baseline, K0/K11 are candidate overrides, and
+uncovered or unqualified cells remain K7. K15 stays in held-out standalone comparisons but is not
+an Auto override. Full Engine round time and submission-to-response wave time have different end
+boundaries and are reported separately; the final stats publication can follow response readiness.
+When merging resident campaigns, use a distinct `--workload-label-prefix` for each prompt suite.
+Comparison labels include requested client concurrency to avoid collisions when different
+submissions produce the same actual batch; labels never establish batch or frontier coverage.
 
 The resident driver exports a public startup identity with `--identity-only`,
 then measures target-only and K7/K11/K15 using constant action profiles with
