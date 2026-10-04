@@ -53,6 +53,38 @@ int main() {
         require(table.select(1, 8193) == 0 && table.select(2, 1024) == 0 &&
             table.select(8, 32769) == 0 && table.select(0, 12) == 0 && table.select(9, 12) == 0,
             "uncovered or out-of-domain must be target-only");
+        require(table.proposal_compute == ninfer::runtime::DFlashProposalCompute::Full &&
+                table.proposal_width(0) == 0 && table.proposal_width(7) == 16 &&
+                table.proposal_width(11) == 16 && table.proposal_width(15) == 16,
+                "legacy profile must retain physical full proposals");
+        for (const char* mode : {"full", "selected"}) {
+            auto versioned = fixture.document;
+            versioned["schema_version"] = 2;
+            versioned["proposal_compute"] = mode;
+            const auto loaded = fixture.load(versioned);
+            const bool selected = std::string(mode) == "selected";
+            require((loaded.proposal_compute == ninfer::runtime::DFlashProposalCompute::Selected) == selected,
+                    "v2 compute mode was not loaded");
+            for (const auto action : ninfer::runtime::kCalibratedDraftActions) {
+                require(loaded.proposal_width(action) == (action == 0 ? 0U : selected ? action + 1U : 16U),
+                        "physical proposal width differs from mode/action");
+            }
+            require(loaded.select(1, 1024) == 7 && loaded.select(1, 1025) == 11 &&
+                    loaded.select(8, 8193) == 15 && loaded.select(2, 1024) == 0,
+                    "compute mode must not mutate route selection or uncovered skips");
+        }
+        for (const Json invalid_mode : {Json("auto"), Json(""), Json(true), Json(8), Json(nullptr)}) {
+            auto versioned = fixture.document;
+            versioned["schema_version"] = 2; versioned["proposal_compute"] = invalid_mode;
+            fixture.rejects(versioned);
+        }
+        {
+            auto versioned = fixture.document;
+            versioned["proposal_compute"] = "selected"; fixture.rejects(versioned);
+            versioned["schema_version"] = 3; fixture.rejects(versioned);
+            versioned["schema_version"] = 2.0; fixture.rejects(versioned);
+            versioned["schema_version"] = 2; versioned["extra"] = true; fixture.rejects(versioned);
+        }
         for (const auto* suffix : {" trailing-garbage", " {}"}) {
             { std::ofstream stream(fixture.path); stream << fixture.document << suffix; }
             bool rejected = false;
@@ -143,7 +175,7 @@ int main() {
         changed = options; changed.routing.scope = ninfer::SpeculativeRouterScope::Engine; reject_options(changed);
         changed = options; changed.routing.widths[0] = 7; reject_options(changed);
         changed = options; changed.routing.state_path = "state"; reject_options(changed);
-        std::cout << "ok calibrated profile: interval boundaries, strict schema/identity, configuration\n";
+        std::cout << "ok calibrated profile: interval boundaries, strict schema/identity, configuration, proposal compute\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
