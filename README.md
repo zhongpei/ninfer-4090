@@ -61,9 +61,9 @@ than measurements of this 4090+YaRN merge.
 DFlash2 routing defaults to fixed K. Opt-in
 [calibrated routing](docs/maintainer/speculative-routing.md#calibrated-dflash2-chain)
 requires `--draft-tokens 15 --spec-router calibrated --spec-router-profile PATH`
-and a profile matching the actual artifact and startup configuration. It uses
-actual compact batch and execution frontier to select target-only/K7/K11/K15
-while retaining the maximum drafter. The
+and a profile matching the actual artifact and startup configuration. New
+schema-3 profiles use K7 for uncovered/unqualified cells and serialize only
+qualified K0/K11 overrides, while retaining the maximum K15 drafter. The
 [RTX 4090 qualification record](docs/performance.md#rtx-4090-sm_89-chain-qualification)
 distinguishes fixed-route measurements from resident-drafter policy evidence.
 
@@ -101,9 +101,12 @@ For a single command rather than an HTTP server:
 ```
 
 **Auto Selected** needs a selected-mode calibration profile matching the artifact, hardware
-and full startup configuration. First generate it with the one-command campaign, using an
-existing configured build and a new output directory. Both GPUs must be idle; each keeps one
-model resident while the script runs all jobs:
+and full startup configuration. The current campaign generates schema-3 Baseline + Override
+profiles: K7 is the default, and K0/K11 replace it only after paired measurements beat K7 by
+the qualification gates. K15 remains a standalone held-out comparator and is not an Auto
+override. First generate the profile with the one-command campaign, using an existing configured
+build and a new output directory. Both GPUs must be idle; each keeps one model resident while
+the script runs all jobs:
 
 ```bash
 python3.11 -m tools.bench.run_dflash_gpu_campaign \
@@ -114,7 +117,10 @@ python3.11 -m tools.bench.run_dflash_gpu_campaign \
 ```
 
 The script writes `auto-E8-selected.json` for Engine capacity eight, independently of its
-capacity-one profile. Enable that profile in the server with the matching configuration:
+capacity-one profile. Its `cells` array is intentionally sparse: an absent cell means K7,
+not K0. The 2026-10-04 qualification report predates this K7-baseline policy, so Fixed K7
+remains the production recommendation until a fresh campaign qualifies the new Auto profile.
+Enable that profile in the server with the matching configuration:
 
 ```bash
 ./build/apps/ninfer-serve ./Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
