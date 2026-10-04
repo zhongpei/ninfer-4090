@@ -1,6 +1,7 @@
 """Build an audited resident-K15 routing profile from paired public Engine measurements.
 
-Input schema1: ninfer_resident_router_measurements {identity, comparisons}.
+Input schema1 uses full-width proposals. Schema2 additionally requires proposal_compute
+(full or selected); the physical width of every raw round must match that mode.
 Each comparison is {workload, candidate_action, pairs}; each pair is
 {pair_id, order: [0,K] or [K,0], baseline, candidate}. A record contains the complete
 public identity, requested_action, configuration {prompt, max_tokens,
@@ -75,6 +76,31 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def proposal_compute_mode(document):
+    """Read the versioned execution contract without silently relabeling old costs."""
+    if not isinstance(document, dict):
+        raise ValueError("proposal compute document must be an object")
+    version = document.get("schema_version")
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("unsupported proposal compute schema")
+    if version == 1:
+        if "proposal_compute" in document:
+            raise ValueError("schema1 must not declare proposal_compute")
+        return "full"
+    mode = document.get("proposal_compute")
+    if not isinstance(mode, str) or mode not in ("full", "selected"):
+        raise ValueError("schema2 requires proposal_compute=full or selected")
+    return mode
+
+
+def physical_proposal_width(action, mode="full"):
+    if type(action) is not int or action not in ACTIONS:
+        raise ValueError("unsupported calibrated draft action")
+    if not isinstance(mode, str) or mode not in ("full", "selected"):
+        raise ValueError("unsupported proposal compute mode")
+    return (action + 1 if mode == "selected" else 16) if action else 0
+
+
 def validate_identity(identity):
     """Exact field/type mapping of runtime routing_profile_identity_json."""
     fields(identity, IDENTITY_FIELDS, "identity")
@@ -134,7 +160,8 @@ def cell_of(event):
     return (event["active_batch"], next(upper for upper in UPPERS if frontier <= upper))
 
 
-def analyse_record(record, identity, action):
+def analyse_record(record, identity, action, proposal_compute="full"):
+    expected_proposal_width = physical_proposal_width(action, proposal_compute)
     fields(record, ("identity", "requested_action", "configuration", "requests",
                     "rounds", "wave_wall_ns"), "record")
     if validate_identity(record["identity"]) != validate_identity(identity):
@@ -193,7 +220,7 @@ def analyse_record(record, identity, action):
         for key in ("content", "reasoning"):
             text(request[key], key)
         if request["matched_stop_string"] is not None:
-            text(request["matched_stop_string"], "matched_stop_string")
+            text(request[key], key)
         if not isinstance(request["tool_calls"], list):
             raise ValueError("tool_calls must be an array")
         for call in request["tool_calls"]:
@@ -224,7 +251,7 @@ def analyse_record(record, identity, action):
             integer(event[key], key)
         boolean(event["neural_drafter_executed"], "neural_drafter_executed")
         if (event["draft_tokens"] != action or event["verify_width"] != action + 1
-                or event["proposal_width"] != (16 if action else 0)
+                or event["proposal_width"] != expected_proposal_width
                 or event["backend"] != 3 or event["neural_drafter_executed"] != bool(action)):
             raise ValueError("resident-K15 physical action contract mismatch")
         commit = integer(event["committed_tokens"], "committed_tokens", 0, batch * (action + 1))
@@ -257,7 +284,7 @@ def analyse_record(record, identity, action):
             "cells": stats}
 
 
-def analyse_comparison(comparison, identity):
+def analyse_comparison(comparison, identity, proposal_compute="full"):
     fields(comparison, ("workload", "candidate_action", "pairs"), "comparison")
     text(comparison["workload"], "workload", True)
     action = integer(comparison["candidate_action"], "candidate_action")
@@ -291,7 +318,7 @@ def analyse_comparison(comparison, identity):
         arm_data = {}
         for arm, selected in (("baseline", 0), ("candidate", action)):
             try:
-                run = analyse_record(pair[arm], identity, selected)
+                run = analyse_record(pair[arm], identity, selected, proposal_compute)
                 arm_data[arm] = run
                 valid_records += 1
                 all_cells.add(run["cell"])
@@ -340,16 +367,16 @@ def analyse_comparison(comparison, identity):
 
 
 def build_profile(document, source=None):
-    fields(document, ("schema_version", "artifact_type", "identity", "comparisons"), "input")
-    if type(document["schema_version"]) is not int or document["schema_version"] != 1:
-        raise ValueError("unsupported input schema")
+    compute = proposal_compute_mode(document)
+    extra = ("proposal_compute",) if document["schema_version"] == 2 else ()
+    fields(document, ("schema_version", "artifact_type", "identity", "comparisons", *extra), "input")
     if document["artifact_type"] != "ninfer_resident_router_measurements":
         raise ValueError("resident router measurements required")
     identity = document["identity"]
     validate_identity(identity)
     if not isinstance(document["comparisons"], list):
         raise ValueError("comparisons must be an array")
-    comparisons = [analyse_comparison(c, identity) for c in document["comparisons"]]
+    comparisons = [analyse_comparison(c, identity, compute) for c in document["comparisons"]]
     groups = defaultdict(list)
     for comparison in comparisons:
         if comparison["cell"]:
@@ -413,12 +440,15 @@ def build_profile(document, source=None):
         "selection": selection_audit,
         "uncovered_action": 0,
     }
-    return {"schema_version": 1, "artifact_type": "ninfer_spec_router_profile",
-            "identity": copy.deepcopy(identity),
-            "cells": [{"active_batch": batch, "frontier_upper": upper,
-                       "draft_tokens": choices.get((batch, upper), 0)}
-                      for batch in range(1, 9) for upper in UPPERS],
-            "provenance": provenance}
+    profile = {"schema_version": document["schema_version"], "artifact_type": "ninfer_spec_router_profile",
+               "identity": copy.deepcopy(identity),
+               "cells": [{"active_batch": batch, "frontier_upper": upper,
+                          "draft_tokens": choices.get((batch, upper), 0)}
+                         for batch in range(1, 9) for upper in UPPERS],
+               "provenance": provenance}
+    if document["schema_version"] == 2:
+        profile["proposal_compute"] = compute
+    return profile
 
 
 def unique_object(pairs):
