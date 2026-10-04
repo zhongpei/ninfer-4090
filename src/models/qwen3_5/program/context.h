@@ -11,7 +11,6 @@
 #include "models/qwen3_5/program/storage/draft_context.h"
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
-#include "models/qwen3_5/program/vision_prefill.h"
 #include "models/qwen3_5/state/decoder_state.h"
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 
@@ -101,6 +100,9 @@ struct DFlashBatchContext {
     const qwen3_5::DFlashDecodeIngress& host_ingress;
     qwen3_5::DFlashDecodeEgress& host_egress;
     Tensor& continuation_hidden_store;
+    // Startup-immutable. Each calibrated action already owns a separate graph family, so
+    // compact proposal graphs never share an executable with full-compute graphs.
+    bool compact_proposal = false;
 };
 
 struct DFlashAppendContext {
