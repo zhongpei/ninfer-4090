@@ -570,7 +570,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                     {dimension(config.attention->head_dim),
                                      dimension(config.attention->num_attention_heads),
                                      dimension(config.attention->num_key_value_heads)},
-                                    plan.kv_storage, envelope, batch, width, width));
+                                    plan.kv_storage, text_envelope, batch, width, width));
                 (void)workspace::mtp_post_attention(layout, config, tokens);
                 mtp_post_mixer(layout, tokens, tokens);
             };
@@ -1054,7 +1054,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
 } // namespace
 
 std::uint32_t vision_item_token_bound(std::uint32_t capacity, const models::LoadOptions& features) {
-    // Zero means "no caller-imposed bound", the same meaning FrontendOptions gives it (its
+    // Zero means "no caller-imposed bound", the same meaning FrontendOptionsOptions gives it (its
     // bound_merged_tokens helper returns without clamping). Treating it as one token instead sized
     // the Vision workspace for a single merged token, after which request planning rejected every
     // ordinary image.
