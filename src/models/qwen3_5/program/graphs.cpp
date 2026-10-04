@@ -109,6 +109,8 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 
 void ProgramImpl::prepare_graphs() {
     if (!use_cuda_graph) { return; }
+    const bool compact_proposal = calibrated_routing &&
+        calibrated_routing->proposal_compute == runtime::DFlashProposalCompute::Selected;
     nvtx::ScopedRange prepare_range(nvtx::Name::CudaGraphPrepare, nvtx::Category::Graph);
     std::size_t graph_begin_free = 0, device_total = 0;
     CUDA_CHECK(cudaMemGetInfo(&graph_begin_free, &device_total));
@@ -245,7 +247,8 @@ void ProgramImpl::prepare_graphs() {
                     checked_i32(frontier, "graph representative DFlash frontier");
                 dflash_host_ingress->context_frontiers[row] =
                     checked_i32(frontier, "graph representative DFlash context frontier");
-                dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(draft_window + 1U);
+                dflash_host_ingress->proposal_valid_columns[row] =
+                    static_cast<std::int32_t>(compact_proposal ? width : draft_window + 1U);
                 dflash_host_ingress->proposal_extents[row] = static_cast<std::int32_t>(extent);
                 dflash_host_ingress->target_valid_columns[row] =
                     static_cast<std::int32_t>(extent + 1U);
@@ -409,7 +412,8 @@ void ProgramImpl::prepare_graphs() {
                                                        *io.dflash_decode,
                                                        *dflash_host_ingress,
                                                        *dflash_host_egress,
-                                                       state_images->continuation_hidden_store()};
+                                                       state_images->continuation_hidden_store(),
+                                                       compact_proposal};
             const GraphExecutionProfile code_warm = batch_one_profiles.front();
             const ops::CausalAttentionExecutionEnvelope code_warm_target{
                 1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
