@@ -101,6 +101,9 @@ struct DFlashBatchContext {
     const qwen3_5::DFlashDecodeIngress& host_ingress;
     qwen3_5::DFlashDecodeEgress& host_egress;
     Tensor& continuation_hidden_store;
+    // Startup-immutable. Each calibrated action already owns a separate graph family, so
+    // compact proposal graphs never share an executable with full-compute graphs.
+    bool compact_proposal = false;
 };
 
 struct DFlashAppendContext {

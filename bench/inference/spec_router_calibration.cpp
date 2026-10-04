@@ -198,9 +198,11 @@ int main(int argc, char** argv) try {
             }
             routing_identity = ninfer::runtime::routing_profile_identity_json(*load.speculative_routing_identity);
         }
-        if (route_switching) {
+        if (resident) {
             routing_table = ninfer::runtime::load_calibrated_routing_profile(
                 args.at("--spec-router-profile"), *load.speculative_routing_identity);
+        }
+        if (route_switching) {
             for (std::uint32_t batch = 1; batch <= 8; ++batch) {
                 for (const std::uint32_t upper : {1024U, 8192U, 32768U}) {
                     normalized_routing_cells.push_back({{"active_batch", batch}, {"frontier_upper", upper},
@@ -386,7 +388,7 @@ int main(int argc, char** argv) try {
         if (event.active_batch == 0 || event.active_batch > clients ||
             event.max_execution_frontier == 0 || event.max_execution_frontier > context ||
             event.backend != ninfer::SpeculativeBackend::DFlash2 || event.draft_tokens != action ||
-            event.verify_width != action + 1 || event.proposal_width != (action == 0 ? 0 : 16) ||
+            event.verify_width != action + 1 || event.proposal_width != routing_table.proposal_width(action) ||
             event.neural_drafter_executed != (action != 0)) {
             throw std::runtime_error(route_switching ? "actual auto action differs from profile/physical contract" :
                                                        "actual resident action differs from --draft-tokens expectation");

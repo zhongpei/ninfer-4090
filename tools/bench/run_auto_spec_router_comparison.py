@@ -2,6 +2,7 @@
 
 Generation-wave timing excludes model startup and prompt preparation. All arms use
 cache/graphs and natural repeat reuse; no explicit primer is run in this campaign.
+--compare-both-fixed requires Auto to beat both fixed K7 and K15, not only None.
 """
 from __future__ import annotations
 import argparse
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from tools.bench.calibrated_router_profile import (
     UPPERS, REQUEST_FIELDS, ROUND_FIELDS, boolean, canonical, fields, integer, text, validate_identity,
+    physical_proposal_width, proposal_compute_mode,
 )
 from tools.bench.run_resident_spec_router_calibration import execute_native, read_json, selections, write_json
 from tools.bench.run_spec_router_calibration import output_identity, percentile
@@ -27,10 +29,13 @@ ARMS = ('none', 'fixed', 'auto')
 
 
 def profile_table(profile):
+    proposal_compute_mode(profile)
     required = {'schema_version', 'artifact_type', 'identity', 'cells'}
-    if not isinstance(profile, dict) or set(profile) not in (required, required | {'provenance'}):
+    if profile['schema_version'] == 2:
+        required.add('proposal_compute')
+    if set(profile) not in (required, required | {'provenance'}):
         raise ValueError('invalid profile fields')
-    if type(profile['schema_version']) is not int or profile['schema_version'] != 1 or profile['artifact_type'] != 'ninfer_spec_router_profile':
+    if profile['artifact_type'] != 'ninfer_spec_router_profile':
         raise ValueError('unsupported profile schema')
     if 'provenance' in profile and not isinstance(profile['provenance'], dict):
         raise ValueError('invalid profile provenance')
@@ -60,6 +65,7 @@ def validate_memory(memory):
 def validate_measurement(raw, arm, profile, configuration, model, device, fixed_k):
     """Validate real arm-specific physics before forming paired E2E statistics."""
     table = profile_table(profile)
+    compute = proposal_compute_mode(profile)
     identity = profile['identity']
     fields(configuration, ('prompt', 'max_tokens', 'client_concurrency', 'repeats', 'sampling'), 'configuration')
     text(configuration['prompt'], 'prompt', True)
@@ -180,7 +186,8 @@ def validate_measurement(raw, arm, profile, configuration, model, device, fixed_
         for key in ('draft_tokens', 'verify_width', 'proposal_width', 'backend'):
             integer(event[key], key)
         boolean(event['neural_drafter_executed'], 'neural drafter')
-        expected_proposal = (16 if expected_action else 0) if arm == 'auto' else expected_action + 1 if expected_action else 0
+        expected_proposal = (physical_proposal_width(expected_action, compute) if arm == 'auto'
+                             else expected_action + 1 if expected_action else 0)
         if (event['draft_tokens'] != expected_action or event['verify_width'] != expected_action + 1
                 or event['proposal_width'] != expected_proposal or event['backend'] != (0 if arm == 'none' else 3)
                 or event['neural_drafter_executed'] != bool(expected_action)):
@@ -239,13 +246,44 @@ def qualify_triples(pairs):
     return summary
 
 
+def qualify_both_fixed(comparisons):
+    """A None speedup or a single fixed comparator never establishes incremental value."""
+    groups = {}
+    for comparison in comparisons:
+        key = (comparison['workload'], comparison['requested_clients'])
+        fixed = comparison['standalone_fixed_k']
+        group = groups.setdefault(key, {})
+        if fixed in group:
+            raise ValueError('duplicate workload/fixed comparison')
+        group[fixed] = comparison
+    checks = []
+    for (workload, clients), group in sorted(groups.items()):
+        complete = 7 in group and 15 in group
+        correct = complete and all(group[k]['qualification']['correct'] for k in (7, 15))
+        # Independently repeated controls must also agree across the two fixed campaigns.
+        consistent = complete and (group[7]['pairs'][0]['runs']['none']['analysis']['responses'] ==
+                                   group[15]['pairs'][0]['runs']['none']['analysis']['responses'])
+        qualified = correct and consistent and all(
+            group[k]['qualification']['vs_standalone_fixed']['qualified_performance']
+            for k in (7, 15))
+        checks.append({'workload': workload, 'requested_clients': clients,
+                       'complete_fixed_k7_and_k15': complete, 'cross_campaign_output_consistent': consistent,
+                       'qualified_incremental_value': bool(qualified)})
+    return {'qualified_incremental_value': bool(checks) and all(c['qualified_incremental_value'] for c in checks),
+            'workloads': checks,
+            'scope': 'Auto must independently beat both standalone DFlash K7 and K15 on every requested workload; None is only a control'}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for flag in ('exe', 'model', 'profile', 'out'):
         parser.add_argument('--'+flag, type=Path, required=True)
     parser.add_argument('--workloads', default='all')
+    parser.add_argument('--prompt-dir', type=Path)
     parser.add_argument('--concurrency', type=lambda v: selections(v, range(1, 9)), default=[1, 2, 4, 8])
-    parser.add_argument('--fixed-draft-tokens', type=int, choices=(7, 11, 15), required=True)
+    fixed = parser.add_mutually_exclusive_group(required=True)
+    fixed.add_argument('--fixed-draft-tokens', type=int, choices=(7, 11, 15))
+    fixed.add_argument('--compare-both-fixed', action='store_true')
     parser.add_argument('--pairs', type=int, default=2); parser.add_argument('--repeats', type=int, default=2)
     parser.add_argument('--max-tokens', type=int, default=512)
     parser.add_argument('--max-context', type=int, default=32768); parser.add_argument('--kv-capacity', type=int, default=131072)
@@ -272,7 +310,8 @@ def main(argv=None):
                 or identity['resolved_kv_capacity'] != args.kv_capacity or identity['proposal_head'] != 'full'):
             raise ValueError('profile identity differs from requested startup configuration')
         summary['profile'] = {'input_path': str(args.profile.resolve()), 'sha256': hashlib.sha256(raw_profile).hexdigest(),
-                              'identity': identity, 'normalized_expected_cells': table}
+                              'identity': identity, 'normalized_expected_cells': table,
+                              'proposal_compute': proposal_compute_mode(profile)}
         environment = {'cuda_visible_device_ordinal': args.device, 'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
                        'nvml_physical_device': args.nvml_device, 'explicit_priming': False, 'startup': 'fresh Engine per native process'}
         try:
@@ -285,40 +324,47 @@ def main(argv=None):
         base = [str(args.exe.resolve()), '--model', str(args.model.resolve()), '--engine-concurrency', str(args.engine_concurrency),
                 '--max-context', str(args.max_context), '--kv-capacity', str(args.kv_capacity), '--device', str(args.device)]
         (args.out/'prompts').mkdir()
+        fixed_actions = (7, 15) if args.compare_both_fixed else (args.fixed_draft_tokens,)
         for workload in select_workloads(args.workloads):
-            prompt_path = args.out/'prompts'/(workload.name+'.txt'); prompt_path.write_bytes(workload.prompt.encode('utf-8'))
+            prompt = ((args.prompt_dir/(workload.name+'.txt')).read_bytes().decode('utf-8')
+                      if args.prompt_dir else workload.prompt)
+            text(prompt, 'prompt', True)
+            prompt_path = args.out/'prompts'/(workload.name+'.txt'); prompt_path.write_bytes(prompt.encode('utf-8'))
             for clients in args.concurrency:
-                configuration = {'prompt': workload.prompt, 'max_tokens': args.max_tokens, 'client_concurrency': clients,
-                                 'repeats': args.repeats, 'sampling': {'temperature':0, 'presence_penalty':0, 'frequency_penalty':0}}
-                comparison = {'workload': workload.name, 'requested_clients': clients, 'standalone_fixed_k': args.fixed_draft_tokens, 'pairs': []}
-                summary['comparisons'].append(comparison)
-                analyses = []
-                for pair in range(args.pairs):
-                    order = list(ARMS if pair % 2 == 0 else reversed(ARMS))
-                    results = {}; run_audit = {}
-                    for arm in order:
-                        directory = args.out/'runs'/f'{workload.name}-C{clients}-p{pair}-{arm}'
-                        report_path = directory/'native.json'
-                        command = [*base, '--prompt-file', str(prompt_path.resolve()), '--output', str(report_path.resolve()),
-                                   '--client-concurrency', str(clients), '--repeats', str(args.repeats), '--max-tokens', str(args.max_tokens)]
-                        if arm == 'auto':
-                            command += ['--spec-router-profile', str((args.out/'profile-input.json').resolve()), '--allow-route-switching']
-                        else:
-                            command += ['--draft-tokens', str(args.fixed_draft_tokens if arm == 'fixed' else 0)]
-                        execute_native(command, directory, args.nvml_device, args.memory_sample_seconds)
-                        raw = read_json(report_path)
-                        if arm == 'auto' and raw.get('routing_profile', {}).get('path') != str((args.out/'profile-input.json').resolve()):
-                            raise ValueError('native audited a different profile path')
-                        results[arm] = validate_measurement(raw, arm, profile, configuration, str(args.model.resolve()), args.device, args.fixed_draft_tokens)
-                        write_json(directory/'analysis.json', results[arm])
-                        run_audit[arm] = {'native_report': str(report_path.resolve()), 'analysis': results[arm]}
-                        if args.cooldown: time.sleep(args.cooldown)
-                    analyses.append(results)
-                    comparison['pairs'].append({'pair_id': str(pair), 'order': order, 'runs': run_audit})
+                for fixed_k in fixed_actions:
+                    configuration = {'prompt': prompt, 'max_tokens': args.max_tokens, 'client_concurrency': clients,
+                                     'repeats': args.repeats, 'sampling': {'temperature':0, 'presence_penalty':0, 'frequency_penalty':0}}
+                    comparison = {'workload': workload.name, 'requested_clients': clients, 'standalone_fixed_k': fixed_k, 'pairs': []}
+                    summary['comparisons'].append(comparison)
+                    analyses = []
+                    for pair in range(args.pairs):
+                        order = list(ARMS if pair % 2 == 0 else reversed(ARMS))
+                        results = {}; run_audit = {}
+                        for arm in order:
+                            tag = f'K{fixed_k}-' if args.compare_both_fixed else ''
+                            directory = args.out/'runs'/f'{workload.name}-C{clients}-{tag}p{pair}-{arm}'
+                            report_path = directory/'native.json'
+                            command = [*base, '--prompt-file', str(prompt_path.resolve()), '--output', str(report_path.resolve()),
+                                       '--client-concurrency', str(clients), '--repeats', str(args.repeats), '--max-tokens', str(args.max_tokens)]
+                            if arm == 'auto':
+                                command += ['--spec-router-profile', str((args.out/'profile-input.json').resolve()), '--allow-route-switching']
+                            else:
+                                command += ['--draft-tokens', str(fixed_k if arm == 'fixed' else 0)]
+                            execute_native(command, directory, args.nvml_device, args.memory_sample_seconds)
+                            raw = read_json(report_path)
+                            if arm == 'auto' and raw.get('routing_profile', {}).get('path') != str((args.out/'profile-input.json').resolve()):
+                                raise ValueError('native audited a different profile path')
+                            results[arm] = validate_measurement(raw, arm, profile, configuration, str(args.model.resolve()), args.device, fixed_k)
+                            write_json(directory/'analysis.json', results[arm])
+                            run_audit[arm] = {'native_report': str(report_path.resolve()), 'analysis': results[arm]}
+                            if args.cooldown: time.sleep(args.cooldown)
+                        analyses.append(results)
+                        comparison['pairs'].append({'pair_id': str(pair), 'order': order, 'runs': run_audit})
+                        write_json(args.out/'comparison.json', summary)
+                    comparison['qualification'] = qualify_triples(analyses)
                     write_json(args.out/'comparison.json', summary)
-                comparison['qualification'] = qualify_triples(analyses)
-                write_json(args.out/'comparison.json', summary)
         summary['correct'] = all(c['qualification']['correct'] for c in summary['comparisons'])
+        summary['incremental_value'] = qualify_both_fixed(summary['comparisons'])
         write_json(args.out/'comparison.json', summary)
         return 0 if summary['correct'] else 1
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:

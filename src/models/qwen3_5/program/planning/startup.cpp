@@ -8,6 +8,7 @@
 #include "models/qwen3_5/program/planning/startup.h"
 #include "models/qwen3_5/execution/vision.h"
 #include "models/qwen3_5/execution/workspace.h"
+#include "runtime/contract/speculative_routing.h"
 #include "core/device.h"
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/candidate_selector.h"
@@ -623,6 +624,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             const auto dflash_proposal_capacity = [&](std::int32_t width, std::int32_t batch) {
                 WorkspaceLayoutBuilder layout;
                 const std::int32_t tokens = width * batch;
+                const std::int32_t proposal_drafts = width - 1;
                 matrix(layout, DType::BF16, dimension(config.hidden_size), tokens);
                 if (draft->dflash2.has_value()) {
                     const auto prepare = [&] {
@@ -670,7 +672,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                             ops::linear_dynamic_grouped_conv_add_workspace_capacity_bytes(
                                 dimension(draft->intermediate_size), width, width, batch, batch));
                     }
-                    const auto mask_columns = drafts * batch;
+                    const auto mask_columns = proposal_drafts * batch;
                     matrix(layout, DType::BF16, dimension(config.hidden_size), mask_columns);
                     matrix(layout, DType::FP32, dimension(draft->dflash2->selector_top_k),
                            mask_columns);
@@ -688,7 +690,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     linear_scratch(layout, parameters.draft->selector->hidden_projection,
                                    mask_columns, mask_columns);
                     scratch(layout, ops::candidate_selector_path_workspace_capacity_bytes(
-                                        drafts, drafts, batch, batch));
+                                        proposal_drafts, proposal_drafts, batch, batch));
                     return finish(layout);
                 }
                 {
@@ -725,18 +727,18 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                         add_scratch(layout, block.mlp.down, tokens, tokens);
                     }
                 }
-                matrix(layout, DType::BF16, dimension(config.hidden_size), drafts * batch);
-                matrix(layout, DType::BF16, dimension(config.hidden_size), drafts * batch);
+                matrix(layout, DType::BF16, dimension(config.hidden_size), proposal_drafts * batch);
+                matrix(layout, DType::BF16, dimension(config.hidden_size), proposal_drafts * batch);
                 if (plan.proposal_head == ProposalHead::Optimized) {
                     matrix(layout, DType::BF16, dimension(parameters.proposal->rows),
-                           drafts * batch);
+                           proposal_drafts * batch);
                 } else {
-                    matrix(layout, DType::BF16, dimension(config.vocab_size), drafts * batch);
+                    matrix(layout, DType::BF16, dimension(config.vocab_size), proposal_drafts * batch);
                 }
                 const auto& head = plan.proposal_head == ProposalHead::Optimized
                                        ? parameters.proposal->head
                                        : parameters.draft->output_head;
-                linear_scratch(layout, head, drafts * batch, drafts * batch);
+                linear_scratch(layout, head, proposal_drafts * batch, proposal_drafts * batch);
                 return finish(layout);
             };
 
@@ -760,6 +762,32 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 out.dflash_round =
                     std::max({out.dflash_round, finish(target), accept,
                               dflash_context_capacity(verify, batch, true), proposal});
+                if (plan.speculative_routing.mode == SpeculativeRoutingMode::Calibrated) {
+                    // Kernel scratch requirements can change discontinuously with the physical
+                    // width. Cover every reachable target/proposal shape, not just max K15.
+                    // The shared resident arena and the preceding-round append remain full size.
+                    for (const auto action : runtime::kCalibratedDraftActions) {
+                        if (action == plan.draft_window) { continue; }
+                        const auto active_drafts = static_cast<std::int32_t>(action);
+                        const auto active_width = active_drafts + 1;
+                        const auto active_tokens = active_width * batch;
+                        WorkspaceLayoutBuilder selected_target;
+                        matrix(selected_target, DType::BF16, dimension(config.hidden_size),
+                               active_tokens);
+                        target_body(selected_target, active_tokens, active_tokens,
+                                    qwen3_5::TextPhase::Verify, GdnWorkspacePath::ReplayRecord,
+                                    batch, active_width, active_width, text_envelope);
+                        out.dflash_round = std::max(out.dflash_round, finish(selected_target));
+                        if (action != 0) {
+                            const auto selected_accept =
+                                ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+                                    dimension(parameters.model.resources().public_token_count),
+                                    {false}, active_drafts, active_drafts, batch, batch);
+                            out.dflash_round = std::max({out.dflash_round, selected_accept,
+                                dflash_proposal_capacity(active_width, batch)});
+                        }
+                    }
+                }
                 if (plan.speculative_tree.mode != SpeculativeTreeMode::Off && batch == 1) {
                     const std::size_t tree_sampling = ops::sampling_workspace_capacity_bytes(
                         dimension(parameters.model.resources().public_token_count), 2, verify);
@@ -1026,7 +1054,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
 } // namespace
 
 std::uint32_t vision_item_token_bound(std::uint32_t capacity, const models::LoadOptions& features) {
-    // Zero means "no caller-imposed bound", the same meaning FrontendOptions gives it (its
+    // Zero means "no caller-imposed bound", the same meaning FrontendOptionsOptions gives it (its
     // bound_merged_tokens helper returns without clamping). Treating it as one token instead sized
     // the Vision workspace for a single merged token, after which request planning rejected every
     // ordinary image.

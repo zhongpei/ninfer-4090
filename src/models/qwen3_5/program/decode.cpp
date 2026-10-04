@@ -614,10 +614,12 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         throw std::invalid_argument("DFlash batch membership is invalid");
     }
 
-    const std::uint32_t proposal_width = draft_window + 1U;
+    std::uint32_t proposal_width = draft_window + 1U;
     std::uint32_t width = proposal_width;
     std::uint32_t selected_drafts = draft_window;
     const bool calibrated = speculative_routing.mode == SpeculativeRoutingMode::Calibrated;
+    const bool compact_proposal = calibrated_routing &&
+        calibrated_routing->proposal_compute == runtime::DFlashProposalCompute::Selected;
     bool calibrated_fixed_fallback = false;
     std::array<std::uint32_t, kMaximumConcurrency> normal_extents{};
     std::array<::ninfer::qwen3_5::LookupDraftProposal, kMaximumConcurrency> lookup_proposals{};
@@ -693,6 +695,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         selected_drafts = calibrated_fixed_fallback ? draft_window :
             calibrated_routing->select(static_cast<std::uint32_t>(lanes.size()), maximum_frontier);
         width = selected_drafts + 1U;
+        proposal_width = calibrated_routing->proposal_width(selected_drafts);
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             normal_extents[row] = std::min(normal_extents[row], selected_drafts);
         }
@@ -820,7 +823,8 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             *io.dflash_decode,
             *dflash_host_ingress,
             *dflash_host_egress,
-            state_images->continuation_hidden_store()};
+            state_images->continuation_hidden_store(),
+            compact_proposal};
 
         mark_workspace_usage(workspace_plan.dflash_round);
         std::vector<TokenId> lookup_host;
