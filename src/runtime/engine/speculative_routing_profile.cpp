@@ -117,25 +117,37 @@ CalibratedRoutingTable load_calibrated_routing_profile(
         !root.contains("artifact_type") || !root.contains("identity") ||
         !root.contains("cells")) { invalid("invalid top-level fields"); }
     const auto version = integer(root.at("schema_version"), "schema_version");
-    if ((version != 1 && version != 2) ||
+    if ((version != 1 && version != 2 && version != 3) ||
         root.at("artifact_type") != "ninfer_spec_router_profile") { invalid("unsupported schema"); }
-    // V1 is deliberately full-compute only. A selected-compute profile must opt into V2,
-    // so an existing measured full-width policy cannot silently change execution semantics.
-    const std::size_t required_fields = version == 2 ? 5U : 4U;
+    // V1 is full-compute K0-default. V2 adds an explicit proposal-compute mode but preserves the
+    // K0 default. V3 changes policy semantics explicitly: uncovered cells inherit default_action=7
+    // and cells are measured overrides only. Keeping this versioned prevents historical profiles
+    // from silently changing their fallback action.
+    const bool versioned_compute = version >= 2;
+    const bool baseline_profile = version == 3;
+    const std::size_t required_fields = baseline_profile ? 6U : versioned_compute ? 5U : 4U;
     const std::size_t expected_fields = required_fields + (root.contains("provenance") ? 1U : 0U);
     if (root.size() != expected_fields ||
-        (version == 2) != root.contains("proposal_compute")) { invalid("invalid top-level fields"); }
+        versioned_compute != root.contains("proposal_compute") ||
+        baseline_profile != root.contains("default_action")) { invalid("invalid top-level fields"); }
     if (root.contains("provenance") && !root.at("provenance").is_object()) {
         invalid("provenance must be an object");
     }
     CalibratedRoutingTable table;
-    if (version == 2) {
+    if (versioned_compute) {
         const auto& compute = root.at("proposal_compute");
         if (compute == "selected") {
             table.proposal_compute = DFlashProposalCompute::Selected;
         } else if (compute != "full") {
             invalid("proposal_compute must be full or selected");
         }
+    }
+    if (baseline_profile) {
+        table.default_action = integer(root.at("default_action"), "default_action");
+        if (table.default_action != 7) {
+            invalid("schema3 default_action must be K7");
+        }
+        for (auto& row : table.draft_tokens) { row.fill(table.default_action); }
     }
     same_identity(root.at("identity"), routing_profile_identity_json(identity), "identity");
     if (!root.at("cells").is_array()) { invalid("cells must be an array"); }
@@ -148,9 +160,13 @@ CalibratedRoutingTable load_calibrated_routing_profile(
         const auto batch = integer(cell.at("active_batch"), "active_batch");
         const auto frontier = integer(cell.at("frontier_upper"), "frontier_upper");
         const auto draft = integer(cell.at("draft_tokens"), "draft_tokens");
+        const bool valid_action = baseline_profile
+                                      ? (draft == 0 || draft == 11)
+                                      : (draft == 0 || draft == 7 || draft == 11 || draft == 15);
         if (batch < 1 || batch > kMaximumConcurrency ||
-            (frontier != 1024 && frontier != 8192 && frontier != 32768) ||
-            (draft != 0 && draft != 7 && draft != 11 && draft != 15)) { invalid("invalid cell value"); }
+            (frontier != 1024 && frontier != 8192 && frontier != 32768) || !valid_action) {
+            invalid("invalid cell value");
+        }
         const std::size_t column = frontier == 1024 ? 0 : frontier == 8192 ? 1 : 2;
         if (seen[batch - 1][column]) { invalid("duplicate cell"); }
         seen[batch - 1][column] = true;
