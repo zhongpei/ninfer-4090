@@ -113,18 +113,32 @@ CalibratedRoutingTable load_calibrated_routing_profile(
     Json root;
     try { root = Json::parse(stream); }
     catch (const Json::exception& error) { invalid(error.what()); }
-    if (!root.is_object() || (root.size() != 4 && root.size() != 5) ||
-        !root.contains("schema_version") || !root.contains("artifact_type") ||
-        !root.contains("identity") || !root.contains("cells") ||
-        (root.size() == 5 && !root.contains("provenance"))) { invalid("invalid top-level fields"); }
-    if (integer(root.at("schema_version"), "schema_version") != 1 ||
+    if (!root.is_object() || !root.contains("schema_version") ||
+        !root.contains("artifact_type") || !root.contains("identity") ||
+        !root.contains("cells")) { invalid("invalid top-level fields"); }
+    const auto version = integer(root.at("schema_version"), "schema_version");
+    if ((version != 1 && version != 2) ||
         root.at("artifact_type") != "ninfer_spec_router_profile") { invalid("unsupported schema"); }
+    // V1 is deliberately full-compute only. A selected-compute profile must opt into V2,
+    // so an existing measured full-width policy cannot silently change execution semantics.
+    const std::size_t required_fields = version == 2 ? 5U : 4U;
+    const std::size_t expected_fields = required_fields + (root.contains("provenance") ? 1U : 0U);
+    if (root.size() != expected_fields ||
+        (version == 2) != root.contains("proposal_compute")) { invalid("invalid top-level fields"); }
     if (root.contains("provenance") && !root.at("provenance").is_object()) {
         invalid("provenance must be an object");
     }
+    CalibratedRoutingTable table;
+    if (version == 2) {
+        const auto& compute = root.at("proposal_compute");
+        if (compute == "selected") {
+            table.proposal_compute = DFlashProposalCompute::Selected;
+        } else if (compute != "full") {
+            invalid("proposal_compute must be full or selected");
+        }
+    }
     same_identity(root.at("identity"), routing_profile_identity_json(identity), "identity");
     if (!root.at("cells").is_array()) { invalid("cells must be an array"); }
-    CalibratedRoutingTable table;
     std::array<std::array<bool, 3>, kMaximumConcurrency> seen{};
     for (const auto& cell : root.at("cells")) {
         if (!cell.is_object() || cell.size() != 3 || !cell.contains("active_batch") ||
