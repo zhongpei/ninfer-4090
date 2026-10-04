@@ -593,21 +593,23 @@ class Campaign:
         self.check_identity_capacity(identity, clients)
         self.identities[clients] = identity
         for mode in ('full', 'selected'):
-            document = {'artifact_type': 'ninfer_resident_router_measurements', 'schema_version': 1,
-                        'identity': identity, 'comparisons': []}
-            if mode == 'selected':
-                document.update(schema_version=2, proposal_compute=mode)
+            # Auto V2 is deliberately K7-centered. Training measures only whether K0 or K11
+            # earns the right to replace K7; K15 remains available as a standalone validation arm,
+            # but no longer receives an automatic routing override.
+            document = {'artifact_type': 'ninfer_resident_router_measurements', 'schema_version': 3,
+                        'identity': identity, 'proposal_compute': mode, 'comparisons': []}
             controls = {}
-            for action in (0, 7, 11, 15):
+            for action in (0, 7, 11):
                 path = self.out / f'control-C{clients}-{mode}-K{action}.json'
                 write_json(path, constant_profile(identity, action, mode))
                 controls[action] = path
             for workload in self.workloads['train']:
-                comparisons = {k: {'workload': f"{workload['name']}/C{clients}", 'candidate_action': k, 'pairs': []}
-                               for k in (7, 11, 15)}
+                comparisons = {k: {'workload': f"{workload['name']}/C{clients}",
+                                   'baseline_action': 7, 'candidate_action': k, 'pairs': []}
+                               for k in (0, 11)}
                 signatures = set()
                 for pair in range(self.args.pairs):
-                    order = (0, 7, 11, 15) if pair % 2 == 0 else (15, 11, 7, 0)
+                    order = (7, 0, 11) if pair % 2 == 0 else (11, 0, 7)
                     records = {}
                     for action in order:
                         tag = f"train/C{clients}/{workload['name']}/{mode}/p{pair}-K{action}"
@@ -623,8 +625,10 @@ class Campaign:
                     if len(signatures) != 1:
                         raise ValueError('calibration complete outputs differ across actions/pairs')
                     for action, comparison in comparisons.items():
-                        comparison['pairs'].append({'pair_id': str(pair), 'order': [0, action] if pair % 2 == 0 else [action, 0],
-                                                    'baseline': records[0], 'candidate': records[action]})
+                        comparison['pairs'].append({
+                            'pair_id': str(pair),
+                            'order': [7, action] if pair % 2 == 0 else [action, 7],
+                            'baseline': records[7], 'candidate': records[action]})
                     self.save()
                 document['comparisons'].extend(comparisons.values())
                 with self.lock:
@@ -650,7 +654,7 @@ class Campaign:
                 write_json(path, profile)
                 for clients in members:
                     self.profiles[clients, mode] = (profile, path)
-        self.summary['stages'].append('all calibration completed; profiles built before held-out validation')
+        self.summary['stages'].append('K7-baseline calibration completed; sparse K0/K11 override profiles built before held-out validation')
         self.save()
 
     def validate_group(self, clients, gpu):
