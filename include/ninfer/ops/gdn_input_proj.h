@@ -109,8 +109,9 @@ void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Ten
 
 /**
  * Two-parent snapshot capacity keyed by the parents' formats. The Q4/Q5 pair answers as the
- * row-count query above. A T2 pair (both parents T2_G128_FP16) reserves an FP32 current-projection
- * plane for its A16 convolution route at every batch size.
+ * row-count query above. A T2 pair (both parents T2_G128_FP16) requires zero transient storage
+ * for A16 B=1 intervals through W=16; wider or batched A16 intervals reserve an FP32
+ * current-projection plane.
  */
 [[nodiscard]] std::size_t gdn_input_proj_split_conv_snapshot_workspace_capacity_bytes(
     QType qk_qtype, QType value_z_qtype, std::int32_t batch_size, std::int32_t min_width,
@@ -118,8 +119,9 @@ void gdn_input_proj(const Tensor& x, const Weight& query_key_value_z_weight, Ten
 
 /**
  * Policy-bearing two-parent snapshot capacity: a T2 pair reserves BF16 projection and integer
- * activation planes on admitted A8 widths, or FP32 current projections on A16 widths. The Q4/Q5
- * pair answers as the query above.
+ * activation planes on admitted A8 widths. A16 B=1 intervals through W=16 require zero storage;
+ * wider or batched A16 intervals reserve FP32 current projections. The Q4/Q5 pair answers as
+ * the query above.
  */
 [[nodiscard]] std::size_t gdn_input_proj_split_conv_snapshot_workspace_capacity_bytes(
     QType qk_qtype, QType value_z_qtype, LinearPolicy policy, std::int32_t batch_size,
@@ -228,16 +230,16 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& query_key_value
 /**
  * Returns the transient capacity for the registered Q4/Q5 or Q8 record-producing profile.
  * `batch_size` is exact, and the inclusive T interval must lie within ReplaySSM's B=1..8,
- * T=1..16 execution domain. These profiles require no transient storage because materialized
- * projection writes directly to caller-owned conv_record.
+ * T=1..16 execution domain. These profiles require no transient storage: fused routes write
+ * records directly, while materialized routes use caller-owned conv_record as the projection plane.
  */
 [[nodiscard]] std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
     std::int32_t query_rows, std::int32_t key_rows, std::int32_t value_rows,
     std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width);
 
 /**
- * Two-parent record capacity keyed by the parents' formats: zero for the Q4/Q5 pair, the private
- * FP32 current-projection plane of every recorded column for an A16 T2 pair.
+ * Two-parent record capacity keyed by the parents' formats: zero for the Q4/Q5 pair and A16 T2
+ * B=1. Batched A16 T2 records reserve a private FP32 current-projection plane.
  */
 [[nodiscard]] std::size_t gdn_input_proj_split_conv_record_workspace_capacity_bytes(
     QType qk_qtype, QType value_z_qtype, std::int32_t batch_size, std::int32_t min_width,

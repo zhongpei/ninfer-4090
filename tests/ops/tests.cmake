@@ -70,6 +70,10 @@ ninfer_add_op_test(ninfer_sliding_window_attention_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_sliding_window_attention.cpp"
   LIBRARIES ninfer_ops)
 
+ninfer_add_op_test(ninfer_kv_nvfp4_decode_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_kv_nvfp4_decode.cu"
+  LIBRARIES ninfer_ops)
+
 ninfer_add_op_test(ninfer_kv_cache_append_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_kv_cache_append.cpp"
   LIBRARIES ninfer_ops)
