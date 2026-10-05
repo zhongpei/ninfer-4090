@@ -1010,15 +1010,14 @@ int main() {
     }
 
     int failures = 0;
-    const std::size_t q4_decode =
-        ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 6144, 1, 1, 1);
+    const std::size_t q4_fused =
+        ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 6144, 1, 1, 16);
     const std::size_t q4_interval =
-        ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 6144, 1, 1, 6);
+        ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 6144, 1, 1, 17);
     const std::size_t q4_right_endpoint =
-        ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 6144, 1, 6, 6);
-    if (q4_decode == 0 || q4_decode >= q4_interval || q4_interval != q4_right_endpoint) {
-        std::cerr << "Q4/Q5 snapshot interval did not size its materialized projection by the "
-                     "widest width\n";
+        ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 6144, 1, 17, 17);
+    if (q4_fused != 0 || q4_interval == 0 || q4_interval != q4_right_endpoint) {
+        std::cerr << "Q4/Q5 snapshot interval did not preserve its fused/materialized boundary\n";
         ++failures;
     }
     if (ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 4096, 1, 1, 16) !=

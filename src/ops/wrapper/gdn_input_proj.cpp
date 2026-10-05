@@ -362,16 +362,14 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& qkv, 
     detail::q8_gdn_input_dispatch(x, weight, qkv, z, stream);
 }
 
-// The Q4/Q5 conv forms always materialize the projection through gdn_input_proj() and run the conv
-// separately. A fused projection-epilogue conv (SIMT GEMV/GEMM, T=1..3 and 5..6) served batch 1
-// until 2026-09-11 and lost at every width it took: record form, RTX 3090, graph replay, cold L2,
-// median of 50 (gdn_input_proj_conv_snapshot_bench), us:
-//
-//   T               1      2      3      5      6
-//   fused        95.2  104.4  123.9  162.8  191.5
-//   materialized 80.9   80.9   81.9   85.0   86.0     (snapshot form at T=1)
-//
-// At T=5 that was 4.8 ms of a four-draft-token MTP round.
+// Historical note: the old Q4/Q5 fused path was a SIMT GEMV/GEMM implementation and lost to
+// materialization after the small-T MMA rewrite (for example T=5: 162.8 us fused vs 85.0 us
+// materialized on RTX 3090). That result does not apply to the current fusion. Batch-1 T<=16 now
+// stays on the production q4_ksplit_mma/q5_small_t_mma kernels and changes only their epilogue:
+// completed FP32 MMA accumulators are staged in the CTA's retired K-reduction arena and consumed
+// directly by GdnConvEpilogue. No old SIMT projection kernel is reintroduced and no global BF16
+// [channels,T] projection matrix is written/read in that domain. Wider or batched forms keep the
+// measured materialized path.
 void require_q4_q5_conv_admitted(std::int32_t tokens, std::int32_t batch_size) {
     if (!detail::q4_q5_gdn_input_admits({5120, 4096, 12288, 10240, 6144, 5120, tokens}) ||
         batch_size <= 0 || batch_size > 8) {
@@ -835,6 +833,10 @@ std::size_t t2_two_parent_projection_bytes(std::int32_t min_columns, std::int32_
 // storage is needed only by the A16 arithmetic branch.
 std::size_t t2_conv_capacity(std::int32_t batch, std::int32_t min_width,
                              std::int32_t max_width, LinearPolicy policy, bool snapshot) {
+    // Bonsai A16 batch-1 small-T now consumes the T2 FP32 accumulator inside the same CTA as
+    // causal convolution. No activation quantization, global projection plane, or conv scratch is
+    // needed for the exact T=1..16 domain.
+    if (batch == 1 && max_width <= 16 && !detail::t2_a8_admits(policy)) { return 0; }
     const int min_columns = batch * min_width;
     const int max_columns = batch * max_width;
     const auto projection_bytes =
@@ -1044,7 +1046,10 @@ std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
     if (q4_q5) {
         require_q4_q5_conv_admitted(min_width, 1);
         require_q4_q5_conv_admitted(max_width, 1);
-        largest_materialized_width = max_width;
+        // The current Q4/Q5 small-T MMA path feeds the causal convolution directly from its
+        // FP32 CTA accumulator through T=16. Only wider batch-1 intervals need the historical
+        // global BF16 [channels,T] projection scratch.
+        largest_materialized_width = max_width > 16 ? max_width : 0;
     } else {
         (void)resolve_q8_conv_plan(min_width, 1);
         (void)resolve_q8_conv_plan(max_width, 1);
@@ -1226,9 +1231,15 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
 
     if (ternary && t2_uses_current_fp32(qk_weight, value_z_weight,
                                          geometry.aggregate_columns, policy)) {
-        compose_t2_current(x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
-                           initial_state_slots, &snapshot_base_slots, nullptr, query, key, value,
-                           z, geometry, ws, stream);
+        if (geometry.batch == 1 && geometry.width <= 16) {
+            detail::gdn_t2_conv_snapshot_fused_launch(
+                x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+                initial_state_slots, snapshot_base_slots, query, key, value, z, stream);
+        } else {
+            compose_t2_current(x, qk_weight, value_z_weight, conv_weight, conv_states,
+                               valid_columns, initial_state_slots, &snapshot_base_slots, nullptr,
+                               query, key, value, z, geometry, ws, stream);
+        }
         return;
     }
 
@@ -1247,7 +1258,15 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
         return;
     }
 
-    if (!ternary) { require_q4_q5_conv_admitted(geometry.width, geometry.batch); }
+    if (!ternary) {
+        require_q4_q5_conv_admitted(geometry.width, geometry.batch);
+        if (geometry.width <= 16) {
+            detail::q4_q5_gdn_input_conv_snapshot_fused_launch(
+                x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+                initial_state_slots, snapshot_base_slots, query, key, value, z, stream);
+            return;
+        }
+    }
     auto scope                 = ws.scope();
     ProjectedWorkspace scratch = allocate_projected_workspace(ws, kChannels, geometry.width);
     if (ternary) {
@@ -1310,12 +1329,26 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
 
     if (ternary && t2_uses_current_fp32(qk_weight, value_z_weight,
                                          geometry.aggregate_columns, policy)) {
-        compose_t2_current(x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
-                           initial_state_slots, nullptr, &conv_record, query, key, value, z,
-                           geometry, workspace, stream);
+        if (geometry.batch == 1 && geometry.width <= 16) {
+            detail::gdn_t2_conv_record_fused_launch(
+                x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+                initial_state_slots, conv_record, query, key, value, z, stream);
+        } else {
+            compose_t2_current(x, qk_weight, value_z_weight, conv_weight, conv_states,
+                               valid_columns, initial_state_slots, nullptr, &conv_record, query,
+                               key, value, z, geometry, workspace, stream);
+        }
         return;
     }
-    if (!ternary) { require_q4_q5_conv_admitted(geometry.width, geometry.batch); }
+    if (!ternary) {
+        require_q4_q5_conv_admitted(geometry.width, geometry.batch);
+        if (geometry.batch == 1 && geometry.width <= 16) {
+            detail::q4_q5_gdn_input_conv_record_fused_launch(
+                x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+                initial_state_slots, conv_record, query, key, value, z, stream);
+            return;
+        }
+    }
     compose_record(x, conv_weight, conv_states, valid_columns, initial_state_slots, conv_record,
                    query, key, value, z, geometry, workspace, stream,
                    [&](const Tensor& x_flat, Tensor& record_flat, Tensor& z_flat) {

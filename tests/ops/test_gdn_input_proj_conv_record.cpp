@@ -21,6 +21,7 @@ using namespace ninfer::test::input_projection;
 
 namespace {
 
+bool fusion_only = false;
 bool t1_only = false;
 bool domain_only = false;
 bool a8_oracle_negative_control = false;
@@ -246,7 +247,7 @@ int run_case(std::string_view label, std::int32_t hidden, std::int32_t value_row
                                        width, batch, valid_columns, snapshot_bases);
     }
     if (first_weight != nullptr &&
-        (width == 1 || first_weight->weight.qtype == QType::T2_G128_FP16)) {
+        (fusion_only || width == 1 || first_weight->weight.qtype == QType::T2_G128_FP16)) {
         // Independently decode stored coefficients/scales and evaluate the complete dot in FP64.
         // BF16 record/output casts are assessed against this independent mathematical value.
         const auto record_bits = conv_record.bits();
@@ -464,8 +465,9 @@ int run_q4_q5() {
         const std::size_t snapshot_bytes =
             ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
                 kQueryRows, kKeyRows, kValueRows, batch, width, width);
-        const std::size_t record_bytes = ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
-            kQueryRows, kKeyRows, kValueRows, batch, width, width);
+        const std::size_t record_bytes = width > 16 ? 0 :
+            ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
+                kQueryRows, kKeyRows, kValueRows, batch, width, width);
         return run_case(
             "Q4/Q5 B=" + std::to_string(batch) + " T=" + std::to_string(width), kHidden, kValueRows,
             kZRows, width, batch, std::move(valid), snapshot_bytes, record_bytes,
@@ -485,6 +487,25 @@ int run_q4_q5() {
             },
             seed, &qk.host, &value_z.host);
     };
+    if (fusion_only) {
+        const auto capacity = [&](int min_width, int max_width) {
+            return ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
+                kQueryRows, kKeyRows, kValueRows, 1, min_width, max_width);
+        };
+        if (capacity(1, 16) != 0 || capacity(1, 17) == 0 ||
+            capacity(1, 17) != capacity(17, 17)) {
+            std::cerr << "Q4/Q5 snapshot capacity interval boundary mismatch\n";
+            ++failures;
+        }
+        for (int width : {1, 2, 8, 9, 15, 16, 17}) {
+            failures += run(width, 1, {}, 2000U + width);
+        }
+        failures += run(8, 1, {3}, 2028U);
+        failures += run(16, 1, {1}, 2036U);
+        failures += qk.verify_preserved("Q4 fused qk weight");
+        failures += value_z.verify_preserved("Q5 fused value/z weight");
+        return failures;
+    }
     for (int batch = 1; batch <= 8; ++batch) { failures += run(1, batch, {}, 1900U + batch); }
     if (t1_only) { return failures; }
     for (int width = 2; width <= 16; ++width) {
@@ -540,6 +561,26 @@ int run_t2() {
             seed, &qk.host, &value_z.host,
             policy == ops::LinearPolicy::AllowA8Int ? kRecordA8 : kRecordA16);
     };
+    if (fusion_only) {
+        const auto capacity = [&](int min_width, int max_width) {
+            return ops::gdn_input_proj_split_conv_snapshot_workspace_capacity_bytes(
+                QType::T2_G128_FP16, QType::T2_G128_FP16, ops::LinearPolicy::A16Only,
+                1, min_width, max_width);
+        };
+        if (capacity(1, 16) != 0 || capacity(1, 17) == 0 ||
+            capacity(1, 17) != capacity(17, 17)) {
+            std::cerr << "T2 snapshot capacity interval boundary mismatch\n";
+            ++failures;
+        }
+        for (int width : {1, 2, 8, 9, 15, 16, 17}) {
+            failures += run(ops::LinearPolicy::A16Only, width, 1, {}, 2100U + width);
+        }
+        failures += run(ops::LinearPolicy::A16Only, 8, 1, {3}, 2128U);
+        failures += run(ops::LinearPolicy::A16Only, 16, 1, {1}, 2136U);
+        failures += qk.verify_preserved("T2 fused qk weight");
+        failures += value_z.verify_preserved("T2 fused value/z weight");
+        return failures;
+    }
     for (int batch = 1; batch <= 8; ++batch) {
         if (t2_a16_b2_only && batch != 2) { continue; }
         if (!a8_oracle_negative_control && !policy_only) {
@@ -747,6 +788,7 @@ int run_fp8() {
 } // namespace
 
 int main(int argc, char** argv) {
+    fusion_only = argc == 2 && std::string_view(argv[1]) == "--fusion-only";
     a8_oracle_negative_control = argc == 2 &&
         std::string_view(argv[1]) == "--t1-a8-oracle-negative-control";
     t2_a16_b2_only = argc == 2 && std::string_view(argv[1]) == "--t1-t2-a16-b2-oracle-only";
@@ -766,10 +808,12 @@ int main(int argc, char** argv) {
         if (!a8_oracle_negative_control && !t2_a16_b2_only && !t2_math_only) {
             if (!policy_only) {
                 failures += run_q4_q5();
-                failures += run_q8();
+                if (!fusion_only) { failures += run_q8(); }
             }
-            failures += run_nvfp4();
-            failures += run_fp8();
+            if (!fusion_only) {
+                failures += run_nvfp4();
+                failures += run_fp8();
+            }
         }
     } catch (const std::exception& error) {
         std::cerr << "FAIL record oracle: " << error.what() << '\n';
