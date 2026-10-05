@@ -570,7 +570,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     }
 }
 
-template <typename Geometry, int DChunk, bool MultiBatch, bool Masked, bool Offset>
+template <typename Geometry, int DChunk, bool MultiBatch, bool Masked, bool Offset,
+          bool Sm89FixedPartition = false>
 __launch_bounds__(256) __global__ void causal_attention_small_t_fp8_reduce_output_kernel(
     const float* partial_acc, const float* partial_m, const float* partial_l,
     const std::int32_t* positions, const std::int32_t* valid_columns, std::int32_t tokens,
@@ -613,8 +614,14 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_fp8_reduce_outpu
         partial_m += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
         partial_l += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
     }
-    const int active_splits =
-        causal_small_t_quantized_active_splits<Geometry>(window, split_count, tokens);
+    int active_splits = 0;
+    if constexpr (Sm89FixedPartition) {
+        const int planned = causal_sm89_fp8_split_count(window);
+        active_splits     = planned < split_count ? planned : split_count;
+    } else {
+        active_splits =
+            causal_small_t_quantized_active_splits<Geometry>(window, split_count, tokens);
+    }
     __shared__ float weights[256], warp_sums[8], scalars[2];
     const float head_l = causal_merge_split_statistics<Geometry>(
         partial_m, partial_l, q_head, token, tokens, active_splits, weights, warp_sums, scalars);

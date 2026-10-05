@@ -77,6 +77,38 @@ __device__ __forceinline__ bool causal_valid_q_head(int kv_head, int q_head) {
            q_head < (kv_head + 1) * Geometry::GroupSize && q_head < Geometry::QHeads;
 }
 
+// sm89 FP8 uses absolute split boundaries. A query sees the same reduction partition
+// regardless of TokenTile, compact-batch occupancy, graph envelope, or later columns.
+// The largest range is 4096 keys == 64 physical KV pages, preserving the kernel's
+// fixed page-id staging bound while covering the full 786432-token product envelope
+// in at most 256 splits.
+inline constexpr int kCausalSm89Fp8MaximumSplits = 256;
+
+__host__ __device__ constexpr int causal_sm89_fp8_split_start(int split) {
+    if (split < 16) return split * 128;
+    if (split < 32) return 2048 + (split - 16) * 512;
+    if (split < 48) return 10240 + (split - 32) * 1024;
+    if (split < 64) return 26624 + (split - 48) * 2048;
+    return 59392 + (split - 64) * 4096;
+}
+
+__host__ __device__ constexpr int causal_sm89_fp8_split_count(int window) {
+    if (window <= 0) return 0;
+    int splits = 0;
+    if (window <= 2048) {
+        splits = (window + 127) / 128;
+    } else if (window <= 10240) {
+        splits = 16 + (window - 2048 + 511) / 512;
+    } else if (window <= 26624) {
+        splits = 32 + (window - 10240 + 1023) / 1024;
+    } else if (window <= 59392) {
+        splits = 48 + (window - 26624 + 2047) / 2048;
+    } else {
+        splits = 64 + (window - 59392 + 4095) / 4096;
+    }
+    return splits < kCausalSm89Fp8MaximumSplits ? splits : kCausalSm89Fp8MaximumSplits;
+}
+
 template <typename Geometry>
 __device__ __forceinline__ int causal_small_t_default_splits(int window) {
     int target_keys_per_split = 480 / Geometry::SmallTSplitScale;

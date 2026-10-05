@@ -261,17 +261,37 @@ struct SmallTWorkspace {
     Tensor acc;
     Tensor m;
     Tensor l;
+    Tensor sm89_fp8_q;
 };
 
 template <class Allocator>
 SmallTWorkspace allocate_small_t_workspace(Allocator& workspace, std::int32_t q_heads,
                                            std::int32_t tokens, std::int32_t splits,
-                                           std::int32_t batch_size) {
-    return {
+                                           std::int32_t batch_size,
+                                           KvCacheStorage cache_storage) {
+    SmallTWorkspace result{
         workspace.alloc(DType::FP32, {kHeadDim, q_heads, tokens, splits * batch_size}),
         workspace.alloc(DType::FP32, {q_heads, tokens, splits * batch_size}),
         workspace.alloc(DType::FP32, {q_heads, tokens, splits * batch_size}),
+        Tensor{},
     };
+#if defined(NINFER_SM89)
+    // Main/residual E4M3 codes plus two FP32 row scales. The prepass is worthwhile only once
+    // enough split CTAs would otherwise repeat the same Hadamard/quantization work.
+    if (cache_storage == KvCacheStorage::Fp8E4M3Row256 && splits >= 16) {
+        const std::size_t rows = static_cast<std::size_t>(q_heads) * tokens * batch_size;
+        const std::size_t bytes =
+            rows * (2u * static_cast<std::size_t>(kHeadDim) + 2u * sizeof(float));
+        if (bytes > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+            throw std::overflow_error("causal attention prepared-Q workspace is too large");
+        }
+        result.sm89_fp8_q =
+            workspace.alloc(DType::U8, {static_cast<std::int32_t>(bytes)});
+    }
+#else
+    (void)cache_storage;
+#endif
+    return result;
 }
 
 template <typename Launch>
@@ -287,7 +307,7 @@ void for_each_small_t_chunk(const Tensor& q, const Tensor& positions, WorkspaceA
         auto chunk_scope = workspace.scope();
         const std::int32_t splits =
             detail::causal_attention_split_capacity(q.ne[1], count, cache_storage, envelope);
-        SmallTWorkspace partial = allocate_small_t_workspace(workspace, q.ne[1], count, splits, 1);
+        SmallTWorkspace partial = allocate_small_t_workspace(workspace, q.ne[1], count, splits, 1, cache_storage);
         Tensor q_chunk          = q.slice(2, begin, count);
         Tensor position_chunk   = positions.slice(0, begin, count);
         Tensor out_chunk        = out.slice(2, begin, count);
@@ -310,10 +330,10 @@ void launch_chunked_small_t(const Tensor& q, const Tensor& k, const Tensor& v,
         const std::int32_t splits = detail::causal_attention_split_capacity(
             q.ne[1], count, cache.storage, envelope, q.ne[3]);
         SmallTWorkspace partial =
-            allocate_small_t_workspace(workspace, q.ne[1], count, splits, q.ne[3]);
-        detail::causal_attention_small_t_launch(q, k, v, positions, valid_columns, table_rows,
-                                                scale, cache, envelope, begin, count, partial.acc,
-                                                partial.m, partial.l, out, stream);
+            allocate_small_t_workspace(workspace, q.ne[1], count, splits, q.ne[3], cache.storage);
+        detail::causal_attention_small_t_launch(
+            q, k, v, positions, valid_columns, table_rows, scale, cache, envelope, begin, count,
+            partial.acc, partial.m, partial.l, partial.sm89_fp8_q, out, stream);
     }
 }
 
@@ -325,9 +345,9 @@ void launch_cached_chunked_small_t(const Tensor& q, const Tensor& positions, flo
         q, positions, workspace, cache.storage, envelope, out,
         [&](std::int32_t, std::int32_t, const Tensor& q_chunk, const Tensor& position_chunk,
             SmallTWorkspace& partial, Tensor& out_chunk) {
-            detail::causal_attention_cached_small_t_launch(q_chunk, position_chunk, scale, cache,
-                                                           envelope, partial.acc, partial.m,
-                                                           partial.l, out_chunk, stream);
+            detail::causal_attention_cached_small_t_launch(
+                q_chunk, position_chunk, scale, cache, envelope, partial.acc, partial.m,
+                partial.l, partial.sm89_fp8_q, out_chunk, stream);
         });
 }
 
@@ -424,7 +444,7 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
         const std::int32_t splits = detail::causal_attention_split_capacity(
             q_heads, width, cache_storage, envelope, batch_size);
         WorkspaceLayoutBuilder layout;
-        (void)allocate_small_t_workspace(layout, q_heads, width, splits, batch_size);
+        (void)allocate_small_t_workspace(layout, q_heads, width, splits, batch_size, cache_storage);
         return layout.peak_bytes(1);
     };
     const auto exact_capacity = [&](std::int32_t width) {
@@ -490,17 +510,11 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     prepublish_cache = prepublish_cache || cache.storage == KvCacheStorage::Fp8E4M3Row256;
 #endif
     if (prepublish_cache) {
-        // Publish every live represented KV row before independent query CTAs read it.
-        // A fused per-query append would race with later queries reading earlier new rows.
-        for (std::int32_t row = 0; row < batch; ++row) {
-            const auto row_k = k.slice(3, row, 1);
-            const auto row_v = v.slice(3, row, 1);
-            const auto row_positions = positions.slice(1, row, 1);
-            const auto row_valid = valid_columns.data == nullptr ? Tensor{} : valid_columns.slice(0, row, 1);
-            const auto row_table = kv_table_rows.slice(0, row, 1);
-            detail::kv_cache_append_batch_launch(row_k, row_v, row_positions, row_valid, row_table,
-                                                 cache, stream);
-        }
+        // Publish every live represented KV row in one batched launch before independent query
+        // CTAs read it. The append kernel already owns batch/table-row/mask routing; slicing here
+        // only multiplied launch overhead.
+        detail::kv_cache_append_batch_launch(k, v, positions, valid_columns, kv_table_rows, cache,
+                                             stream);
     }
     const detail::CausalAttentionRoute route =
         detail::causal_attention_resolve_route(q.ne[1], width, batch, cache.storage, envelope);
@@ -513,10 +527,10 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
         const std::int32_t splits =
             detail::causal_attention_split_capacity(q.ne[1], width, cache.storage, envelope, batch);
         SmallTWorkspace partial =
-            allocate_small_t_workspace(workspace, q.ne[1], width, splits, batch);
-        detail::causal_attention_small_t_launch(q, k, v, positions, valid_columns, kv_table_rows,
-                                                scale, cache, envelope, 0, width, partial.acc,
-                                                partial.m, partial.l, out, stream);
+            allocate_small_t_workspace(workspace, q.ne[1], width, splits, batch, cache.storage);
+        detail::causal_attention_small_t_launch(
+            q, k, v, positions, valid_columns, kv_table_rows, scale, cache, envelope, 0, width,
+            partial.acc, partial.m, partial.l, partial.sm89_fp8_q, out, stream);
         return;
     }
     detail::causal_attention_prompt_launch(q, k, v, positions, valid_columns, kv_table_rows, scale,
@@ -542,9 +556,10 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
         const std::int32_t splits =
             detail::causal_attention_split_capacity(q.ne[1], q.ne[2], cache.storage, envelope);
         SmallTWorkspace partial =
-            allocate_small_t_workspace(workspace, q.ne[1], q.ne[2], splits, 1);
+            allocate_small_t_workspace(workspace, q.ne[1], q.ne[2], splits, 1, cache.storage);
         detail::causal_attention_cached_small_t_launch(
-            q, positions, scale, cache, envelope, partial.acc, partial.m, partial.l, out, stream);
+            q, positions, scale, cache, envelope, partial.acc, partial.m, partial.l,
+            partial.sm89_fp8_q, out, stream);
         return;
     }
     detail::causal_attention_prompt_attention_launch(q, positions, scale, cache, out, stream);

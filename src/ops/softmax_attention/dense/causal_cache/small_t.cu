@@ -46,11 +46,18 @@ std::int32_t causal_small_t_split_upper_bound(std::int32_t window) {
 template <typename Geometry>
 std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens,
                                         KvCacheStorage storage) {
+#if defined(NINFER_SM89)
+    if (storage == KvCacheStorage::Fp8E4M3Row256) {
+        (void)tokens;
+        return causal_sm89_fp8_split_count(window);
+    }
+#else
     if constexpr (Geometry::SmallTSplitScale == 1) {
         if (storage == KvCacheStorage::Fp8E4M3Row256 && tokens == 1 && window > 8198) {
             return Geometry::SmallTMaximumSplits;
         }
     }
+#endif
     return causal_small_t_split_upper_bound<Geometry>(window);
 }
 
@@ -361,7 +368,9 @@ void causal_attention_small_t_launch(
     const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& pos,
     const Tensor& valid_columns, const Tensor& table_rows, float scale, PagedKVBatchLayerView cache,
     CausalAttentionExecutionEnvelope envelope, std::int32_t column_begin, std::int32_t width,
-    Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l, Tensor& out, cudaStream_t stream) {
+    Tensor& partial_acc, Tensor& partial_m, Tensor& partial_l, Tensor& sm89_fp8_q_workspace,
+    Tensor& out, cudaStream_t stream) {
+    (void)sm89_fp8_q_workspace;
     if (cache.storage == KvCacheStorage::Fp8KeyNvfp4Value) {
         causal_attention_small_t_k8v4_launch(q, k, v, pos, valid_columns, table_rows, scale, cache,
                                              envelope, column_begin, width, partial_acc, partial_m,
@@ -372,7 +381,8 @@ void causal_attention_small_t_launch(
 #if defined(NINFER_SM89)
         causal_attention_small_t_fp8_sm89_launch(q, k, v, pos, valid_columns, table_rows, scale,
                                                  cache, envelope, column_begin, width, partial_acc,
-                                                 partial_m, partial_l, out, stream);
+                                                 partial_m, partial_l, sm89_fp8_q_workspace, out,
+                                                 stream);
 #else
         causal_attention_small_t_fp8_launch(q, k, v, pos, valid_columns, table_rows, scale, cache,
                                             envelope, column_begin, width, partial_acc, partial_m,
@@ -422,7 +432,9 @@ void causal_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, 
                                             const PagedKVLayerView& cache,
                                             CausalAttentionExecutionEnvelope envelope,
                                             Tensor& partial_acc, Tensor& partial_m,
-                                            Tensor& partial_l, Tensor& out, cudaStream_t stream) {
+                                            Tensor& partial_l, Tensor& sm89_fp8_q_workspace,
+                                            Tensor& out, cudaStream_t stream) {
+    (void)sm89_fp8_q_workspace;
     if (cache.storage == KvCacheStorage::Fp8KeyNvfp4Value) {
         causal_attention_cached_small_t_k8v4_launch(q, pos, scale, cache, envelope, partial_acc,
                                                     partial_m, partial_l, out, stream);
@@ -430,9 +442,9 @@ void causal_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, 
     }
     if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
 #if defined(NINFER_SM89)
-        causal_attention_cached_small_t_fp8_sm89_launch(q, pos, scale, cache, envelope,
-                                                        partial_acc, partial_m, partial_l, out,
-                                                        stream);
+        causal_attention_cached_small_t_fp8_sm89_launch(
+            q, pos, scale, cache, envelope, partial_acc, partial_m, partial_l,
+            sm89_fp8_q_workspace, out, stream);
 #else
         causal_attention_cached_small_t_fp8_launch(q, pos, scale, cache, envelope, partial_acc,
                                                    partial_m, partial_l, out, stream);

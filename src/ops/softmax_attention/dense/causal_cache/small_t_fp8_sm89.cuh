@@ -53,11 +53,80 @@ __device__ __forceinline__ float causal_fp8_decode_code(std::uint8_t code) {
     return static_cast<float>(value);
 }
 
+__device__ __forceinline__ void causal_fp8_store_u32_swizzled_32(
+    std::uint8_t* tile, int row, int column, std::uint32_t packed) {
+    const int offset = row * 32 + (column ^ ((row & 1) << 4));
+    *reinterpret_cast<std::uint32_t*>(tile + offset) = packed;
+}
+
+// For large split counts, prepare rotated main/residual Q once per logical query row instead
+// of repeating Hadamard + E4M3 quantization in every split CTA. The prepared representation is
+// private workspace; persistent/public tensor semantics are unchanged.
+template <typename Geometry, int TokenTile>
+__launch_bounds__(32) __global__ void causal_attention_prepare_q_fp8_sm89_kernel(
+    const __nv_bfloat16* q, std::int32_t full_width, std::int32_t column_begin,
+    std::int32_t batch_size, std::uint8_t* prepared_q, std::uint8_t* prepared_q_res,
+    float* prepared_q_scale, float* prepared_q_res_scale) {
+    constexpr int D = kCausalHeadDim;
+    constexpr unsigned FullMask = 0xffffffffU;
+    const int lane = static_cast<int>(threadIdx.x);
+    const int packed_row = static_cast<int>(blockIdx.x);
+    const int rows_per_batch = Geometry::QHeads * TokenTile;
+    const int total_rows = rows_per_batch * batch_size;
+    if (packed_row >= total_rows) return;
+
+    const int batch = packed_row / rows_per_batch;
+    const int row_in_batch = packed_row - batch * rows_per_batch;
+    const int token = row_in_batch / Geometry::QHeads;
+    const int q_head = row_in_batch - token * Geometry::QHeads;
+    const int source_column = column_begin + token + batch * full_width;
+
+    float values[8];
+    float local_absmax = 0.0F;
+#pragma unroll
+    for (int r = 0; r < 8; ++r) {
+        const int d = lane + 32 * r;
+        values[r] = __bfloat162float(q[causal_q_index<Geometry>(q_head, d, source_column)]);
+    }
+    normalized_hadamard_d256_inplace(values, lane);
+#pragma unroll
+    for (float value : values) local_absmax = fmaxf(local_absmax, fabsf(value));
+    const float absmax = warp_max(local_absmax, FullMask);
+    const float qs = absmax > 0.0F ? absmax / kKVCacheFp8MaxFinite : 0.0F;
+    const float inv = qs > 0.0F ? 1.0F / qs : 0.0F;
+
+    float residual_absmax = 0.0F;
+#pragma unroll
+    for (int r = 0; r < 8; ++r) {
+        const int d = lane + 32 * r;
+        const std::uint8_t code = kv_cache_fp8_quant_code(values[r], inv);
+        prepared_q[static_cast<std::int64_t>(packed_row) * D + d] = code;
+        values[r] -= causal_fp8_decode_code(code) * qs;
+        residual_absmax = fmaxf(residual_absmax, fabsf(values[r]));
+    }
+    residual_absmax = warp_max(residual_absmax, FullMask);
+    const float qrs =
+        residual_absmax > 0.0F ? residual_absmax / kKVCacheFp8MaxFinite : 0.0F;
+    const float rinv = qrs > 0.0F ? 1.0F / qrs : 0.0F;
+#pragma unroll
+    for (int r = 0; r < 8; ++r) {
+        const int d = lane + 32 * r;
+        prepared_q_res[static_cast<std::int64_t>(packed_row) * D + d] =
+            kv_cache_fp8_quant_code(values[r], rinv);
+    }
+    if (lane == 0) {
+        prepared_q_scale[packed_row] = qs;
+        prepared_q_res_scale[packed_row] = qrs;
+    }
+}
+
 template <typename Geometry, int TokenTile, int WarpsPerCta, int MinBlocksPerSm,
-          bool MultiBatch, bool Masked>
+          bool MultiBatch, bool Masked, bool PreparedQ>
 __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 void causal_attention_small_t_fp8_sm89_kernel(
-    const __nv_bfloat16* q, const std::int32_t* positions,
+    const __nv_bfloat16* q, const std::uint8_t* prepared_q,
+    const std::uint8_t* prepared_q_res, const float* prepared_q_scale,
+    const float* prepared_q_res_scale, const std::int32_t* positions,
     const std::uint8_t* cache_k, const std::uint8_t* cache_v,
     const __half* cache_k_scale, const __half* cache_v_scale,
     const std::int32_t* block_tables, const std::int32_t* valid_columns,
@@ -96,14 +165,18 @@ void causal_attention_small_t_fp8_sm89_kernel(
     __shared__ float p_scale_s[Br];
     __shared__ float p_res_scale_s[Br];
     __shared__ float alpha_s[Br];
-    __shared__ __align__(16) __half k_scale_s[Bc];
-    __shared__ __align__(16) __half v_scale_s[Bc];
+    __shared__ __align__(16) __half k_scale_s[2][Bc];
+    __shared__ __align__(16) __half v_scale_s[2][Bc];
     __shared__ std::int32_t physical_pages_s[PageIds];
 
+    constexpr int StageCount = 2;
+    constexpr int TileBytes = Bc * D;
     extern __shared__ __align__(16) std::uint8_t dynamic_raw[];
-    std::uint8_t* k_fp8 = dynamic_raw;
-    std::uint8_t* v_raw = k_fp8 + Bc * D;
-    std::uint8_t* v_t   = v_raw + Bc * D; // [D,Bc], b16-swizzled in the K dimension.
+    // Two K/V stages allow global->shared copies for tile n+1 to overlap all arithmetic on n.
+    // v_t is a single consumer scratch tile: Ada FP8 MMA fixes B to col-major, while persistent V
+    // is key-major and its b16 words pack adjacent D bytes, so ldmatrix.trans cannot replace this
+    // byte-level K-pair repack without changing the stored representation.
+    std::uint8_t* v_t = dynamic_raw + StageCount * 2 * TileBytes;
 
     const int kv_head     = static_cast<int>(blockIdx.x);
     const int split       = static_cast<int>(blockIdx.y);
@@ -168,15 +241,15 @@ void causal_attention_small_t_fp8_sm89_kernel(
         return;
     }
     const int window = last_pos + 1;
+    const int planned_split_count = causal_sm89_fp8_split_count(window);
     const int active_split_count =
-        causal_small_t_quantized_active_splits<Geometry>(window, split_count, TokenTile);
+        planned_split_count < split_count ? planned_split_count : split_count;
     if (split >= active_split_count) return;
 
-    const int logical_tiles = div_up(window, Bc);
-    const int first_owned_tile = split * logical_tiles / active_split_count;
-    const int end_owned_tile   = (split + 1) * logical_tiles / active_split_count;
-    const int split_start      = first_owned_tile * Bc;
-    const int split_end        = min(end_owned_tile * Bc, window);
+    // Absolute ranges preserve the reduction partition for a query when later columns,
+    // TokenTile, compact-batch occupancy, or graph envelopes change.
+    const int split_start = causal_sm89_fp8_split_start(split);
+    const int split_end = min(causal_sm89_fp8_split_start(split + 1), window);
     if (split_start >= split_end) {
         write_neutral();
         return;
@@ -189,63 +262,92 @@ void causal_attention_small_t_fp8_sm89_kernel(
         physical_pages_s[page] = block_table[first_page + page];
     __syncthreads();
 
-    // Hadamard + per-query-row E4M3 quantization. Rows padding the MMA tile stay zero.
-    for (int row = warp; row < Br; row += Wc) {
-        float values[8]{};
-        float local_absmax = 0.0F;
-        if (row < RowCount) {
+    // Hadamard + per-query-row E4M3 quantization. For sufficiently split work the
+    // representation is prepared once globally and copied into the CTA-private swizzled layout.
+    if constexpr (PreparedQ) {
+        for (int row = warp; row < Br; row += Wc) {
             int q_head = 0, token = 0;
-            causal_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
+            const bool valid_row = row < RowCount;
+            if (valid_row) {
+                causal_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
+            }
+            const int prepared_row =
+                q_head + Geometry::QHeads * (token + TokenTile * batch);
 #pragma unroll
             for (int r = 0; r < 8; ++r) {
                 const int d = lane + 32 * r;
-                values[r] = __bfloat162float(q[causal_q_index<Geometry>(q_head, d, token)]);
+                const std::uint8_t main_code =
+                    valid_row ? prepared_q[static_cast<std::int64_t>(prepared_row) * D + d] : 0;
+                const std::uint8_t residual_code =
+                    valid_row ? prepared_q_res[static_cast<std::int64_t>(prepared_row) * D + d] : 0;
+                causal_small_t_store_byte_swizzled(q_fp8, row, d, D / 2, main_code);
+                causal_small_t_store_byte_swizzled(q_res_fp8, row, d, D / 2, residual_code);
             }
-            normalized_hadamard_d256_inplace(values, lane);
-#pragma unroll
-            for (float value : values) local_absmax = fmaxf(local_absmax, fabsf(value));
+            if (lane == 0) {
+                q_scale_s[row] = valid_row ? prepared_q_scale[prepared_row] : 0.0F;
+                q_res_scale_s[row] = valid_row ? prepared_q_res_scale[prepared_row] : 0.0F;
+            }
         }
-        const float absmax = warp_max(local_absmax, FullMask);
-        const float qs     = absmax > 0.0F ? absmax / kKVCacheFp8MaxFinite : 0.0F;
-        const float inv    = qs > 0.0F ? 1.0F / qs : 0.0F;
-        float residual_absmax = 0.0F;
+    } else {
+        for (int row = warp; row < Br; row += Wc) {
+            float values[8]{};
+            float local_absmax = 0.0F;
+            if (row < RowCount) {
+                int q_head = 0, token = 0;
+                causal_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
 #pragma unroll
-        for (int r = 0; r < 8; ++r) {
-            const int d = lane + 32 * r;
-            const std::uint8_t code = kv_cache_fp8_quant_code(values[r], inv);
-            causal_small_t_store_byte_swizzled(q_fp8, row, d, D / 2,
-                                                code);
-            values[r] -= causal_fp8_decode_code(code) * qs;
-            residual_absmax = fmaxf(residual_absmax, fabsf(values[r]));
-        }
-        residual_absmax = warp_max(residual_absmax, FullMask);
-        const float qrs = residual_absmax > 0.0F
-                              ? residual_absmax / kKVCacheFp8MaxFinite : 0.0F;
-        const float rinv = qrs > 0.0F ? 1.0F / qrs : 0.0F;
+                for (int r = 0; r < 8; ++r) {
+                    const int d = lane + 32 * r;
+                    values[r] = __bfloat162float(q[causal_q_index<Geometry>(q_head, d, token)]);
+                }
+                normalized_hadamard_d256_inplace(values, lane);
 #pragma unroll
-        for (int r = 0; r < 8; ++r) {
-            const int d = lane + 32 * r;
-            causal_small_t_store_byte_swizzled(q_res_fp8, row, d, D / 2,
-                                               kv_cache_fp8_quant_code(values[r], rinv));
-        }
-        if (lane == 0) {
-            q_scale_s[row] = qs;
-            q_res_scale_s[row] = qrs;
+                for (float value : values) local_absmax = fmaxf(local_absmax, fabsf(value));
+            }
+            const float absmax = warp_max(local_absmax, FullMask);
+            const float qs = absmax > 0.0F ? absmax / kKVCacheFp8MaxFinite : 0.0F;
+            const float inv = qs > 0.0F ? 1.0F / qs : 0.0F;
+            float residual_absmax = 0.0F;
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                const int d = lane + 32 * r;
+                const std::uint8_t code = kv_cache_fp8_quant_code(values[r], inv);
+                causal_small_t_store_byte_swizzled(q_fp8, row, d, D / 2, code);
+                values[r] -= causal_fp8_decode_code(code) * qs;
+                residual_absmax = fmaxf(residual_absmax, fabsf(values[r]));
+            }
+            residual_absmax = warp_max(residual_absmax, FullMask);
+            const float qrs =
+                residual_absmax > 0.0F ? residual_absmax / kKVCacheFp8MaxFinite : 0.0F;
+            const float rinv = qrs > 0.0F ? 1.0F / qrs : 0.0F;
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                const int d = lane + 32 * r;
+                causal_small_t_store_byte_swizzled(
+                    q_res_fp8, row, d, D / 2, kv_cache_fp8_quant_code(values[r], rinv));
+            }
+            if (lane == 0) {
+                q_scale_s[row] = qs;
+                q_res_scale_s[row] = qrs;
+            }
         }
     }
     __syncthreads();
 
-    auto issue_tile = [&](int tile_k0, int physical_page) {
+    auto issue_tile = [&](int stage, int tile_k0, int physical_page) {
+        std::uint8_t* stage_base = dynamic_raw + stage * 2 * TileBytes;
+        std::uint8_t* k_fp8 = stage_base;
+        std::uint8_t* v_raw = stage_base + TileBytes;
         for (int key_l = tid; key_l < Bc; key_l += Threads) {
             const int key = tile_k0 + key_l;
             if (key >= split_start && key < split_end) {
                 const auto off = kv_cache_fp8_scale_index<Geometry>(
                     physical_page, kv_head, key & kPagedKVPageMask);
-                k_scale_s[key_l] = cache_k_scale[off];
-                v_scale_s[key_l] = cache_v_scale[off];
+                k_scale_s[stage][key_l] = cache_k_scale[off];
+                v_scale_s[stage][key_l] = cache_v_scale[off];
             } else {
-                k_scale_s[key_l] = __float2half_rn(0.0F);
-                v_scale_s[key_l] = __float2half_rn(0.0F);
+                k_scale_s[stage][key_l] = __float2half_rn(0.0F);
+                v_scale_s[stage][key_l] = __float2half_rn(0.0F);
             }
         }
 #pragma unroll 1
@@ -271,8 +373,7 @@ void causal_attention_small_t_fp8_sm89_kernel(
         cp_commit();
     };
 
-    int physical_page = physical_pages_s[0];
-    issue_tile(first_tile, physical_page);
+    issue_tile(0, first_tile, physical_pages_s[0]);
     cp_wait<0>();
     __syncthreads();
 
@@ -290,14 +391,32 @@ void causal_attention_small_t_fp8_sm89_kernel(
 
     for (int kb = 0; kb < key_blocks; ++kb) {
         const int k0 = first_tile + kb * Bc;
+        const int stage = kb & 1;
+        std::uint8_t* stage_base = dynamic_raw + stage * 2 * TileBytes;
+        std::uint8_t* k_fp8 = stage_base;
+        std::uint8_t* v_raw = stage_base + TileBytes;
 
-        // Transpose V code bytes into [D,Bc]. A b16-swizzled row then represents one output
-        // dimension with the 32 contraction keys contiguous, which is exactly the B operand of
-        // m16n8k32 row.col FP8 MMA.
-        for (int item = tid; item < D * Bc; item += Threads) {
-            const int d     = item / Bc;
-            const int key_l = item - d * Bc;
-            causal_fp8_store_byte_swizzled_32(v_t, d, key_l, v_raw[key_l * D + d]);
+        // Start tile n+1 before doing any transpose/MMA/softmax/PV work on n. Its K/V bytes land
+        // in the alternate stage and become visible only after the wait at the bottom.
+        const bool has_next = kb + 1 < key_blocks;
+        if (has_next) {
+            const int next_k0 = k0 + Bc;
+            const int next_page =
+                physical_pages_s[(next_k0 >> kPagedKVPageShift) - first_page];
+            issue_tile(stage ^ 1, next_k0, next_page);
+        }
+
+        // Ada FP8 B fragments are col-major. Pack four K-adjacent bytes per shared store while
+        // global loads for the next tile are already in flight.
+        for (int item = tid; item < D * (Bc / 4); item += Threads) {
+            const int d = item / (Bc / 4);
+            const int key4 = (item - d * (Bc / 4)) * 4;
+            const std::uint32_t packed =
+                static_cast<std::uint32_t>(v_raw[(key4 + 0) * D + d]) |
+                (static_cast<std::uint32_t>(v_raw[(key4 + 1) * D + d]) << 8) |
+                (static_cast<std::uint32_t>(v_raw[(key4 + 2) * D + d]) << 16) |
+                (static_cast<std::uint32_t>(v_raw[(key4 + 3) * D + d]) << 24);
+            causal_fp8_store_u32_swizzled_32(v_t, d, key4, packed);
         }
         __syncthreads();
 
@@ -356,8 +475,8 @@ void causal_attention_small_t_fp8_sm89_kernel(
             for (int nt = 0; nt < QKNt; ++nt) {
                 const int key0 = nt * 8 + 2 * lid;
                 const int key1 = key0 + 1;
-                const float ks0 = __half2float(k_scale_s[key0]);
-                const float ks1 = __half2float(k_scale_s[key1]);
+                const float ks0 = __half2float(k_scale_s[stage][key0]);
+                const float ks1 = __half2float(k_scale_s[stage][key1]);
                 score[nt][0] = (score[nt][0] * qs0 + residual_score[nt][0] * qrs0) * ks0;
                 score[nt][1] = (score[nt][1] * qs0 + residual_score[nt][1] * qrs0) * ks1;
                 score[nt][2] = (score[nt][2] * qs1 + residual_score[nt][2] * qrs1) * ks0;
@@ -407,8 +526,8 @@ void causal_attention_small_t_fp8_sm89_kernel(
                                    : 0.0F;
                 bl0 += probs[nt][0] + probs[nt][1];
                 bl1 += probs[nt][2] + probs[nt][3];
-                const float vs0 = __half2float(v_scale_s[key0]);
-                const float vs1 = __half2float(v_scale_s[key1]);
+                const float vs0 = __half2float(v_scale_s[stage][key0]);
+                const float vs1 = __half2float(v_scale_s[stage][key1]);
                 scaled_abs0 = fmaxf(scaled_abs0, fabsf(probs[nt][0] * vs0));
                 scaled_abs0 = fmaxf(scaled_abs0, fabsf(probs[nt][1] * vs1));
                 scaled_abs1 = fmaxf(scaled_abs1, fabsf(probs[nt][2] * vs0));
@@ -425,8 +544,8 @@ void causal_attention_small_t_fp8_sm89_kernel(
             for (int nt = 0; nt < QKNt; ++nt) {
                 const int key0 = nt * 8 + 2 * lid;
                 const int key1 = key0 + 1;
-                const float vs0 = __half2float(v_scale_s[key0]);
-                const float vs1 = __half2float(v_scale_s[key1]);
+                const float vs0 = __half2float(v_scale_s[stage][key0]);
+                const float vs1 = __half2float(v_scale_s[stage][key1]);
                 const float a0 = probs[nt][0] * vs0;
                 const float a1 = probs[nt][1] * vs1;
                 const float a2 = probs[nt][2] * vs0;
@@ -541,14 +660,7 @@ void causal_attention_small_t_fp8_sm89_kernel(
                             + r_tile3 * p_res_scale_s[row_base + gid + 8];
         }
 
-        const bool has_next = kb + 1 < key_blocks;
-        if (has_next) {
-            const int next_k0 = k0 + Bc;
-            if ((next_k0 & kPagedKVPageMask) == 0)
-                physical_page = physical_pages_s[(next_k0 >> kPagedKVPageShift) - first_page];
-            issue_tile(next_k0, physical_page);
-            cp_wait<0>();
-        }
+        if (has_next) cp_wait<0>();
         __syncthreads();
     }
 

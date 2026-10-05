@@ -75,6 +75,48 @@ its own numerical and performance qualification.
 
 sm86 retains the legacy widened implementation.
 
+## Ada tile, split and software-pipeline policy
+
+The sm89 native path keeps a 32-key Tensor Core tile. A wider key tile increases shared-memory
+and register pressure before it removes enough loop overhead to justify the occupancy loss on
+24 GiB Ada, so Bc32 remains the production granularity for this optimization pass.
+
+FP8 split-KV now uses absolute key ranges rather than repartitioning the visible window evenly.
+The ranges grow from 128 to 512, 1024, 2048 and finally 4096 keys per split. Boundaries are
+independent of query width, compact-batch occupancy and graph replay envelopes. The largest range
+is exactly 64 physical 64-token pages, so the existing fixed page-id staging bound remains valid.
+The old H24/Kv4 T1 rule that forced every window above 8198 keys to 256 splits is removed.
+
+This has two intended properties:
+
+- the same query prefix keeps the same FP32 reduction partition when it is decoded alone or
+  participates in a wider verify tile; later causal-only split ranges contribute neutral state;
+- each long-context CTA owns enough Bc32 iterations for a real load/compute steady state instead
+  of degenerating to one or two key tiles while still exposing enough independent CTAs.
+
+The kernel uses two K/V shared-memory stages. While tile n performs V packing, native QK,
+online-softmax, probability quantization and native PV, tile n+1 is copied with `cp.async` into
+the alternate stage. T1/T2 use four warps; wider row tiles retain the existing 8/12-warp consumer
+geometry.
+
+For split capacities of 16 or more, rotated Q main/residual E4M3 codes and their FP32 scales are
+prepared once in small private workspace and reused by all split CTAs. Smaller launches keep the
+fused per-CTA preparation to avoid an extra kernel and workspace allocation.
+
+Persistent V remains key-major. Ada FP8 MMA fixes operand B to col-major, while the persistent
+byte layout packs adjacent D values into each b16 word; `ldmatrix.trans` therefore cannot turn
+the stored tile into the required K-paired FP8 B fragment without an additional byte permutation.
+The implementation keeps one consumer V-transpose scratch tile, reduces its stores by packing four
+K-adjacent bytes per write, and overlaps that packing with the next stage's asynchronous global
+loads. This avoids claiming an invalid no-transpose route while still removing the load/compute
+serialization.
+
+Append-and-attend now publishes the complete compact batch with one existing batch append launch
+instead of invoking that batch launcher once per row.
+
+These are unqualified schedule changes. No throughput, latency or quality improvement is claimed
+until the RTX 4090 kernel/end-to-end and long-history perplexity gates are run.
+
 ## Long-history quality gate
 
 Use the fixed-depth evaluator, not ordinary 4K sliding-window perplexity:
