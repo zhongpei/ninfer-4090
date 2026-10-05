@@ -26,6 +26,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <type_traits>
 
 namespace ninfer::ops::detail {
 
@@ -105,6 +106,13 @@ __device__ __forceinline__ void t2_v2_b_fragment(const uint4& xa, const uint4& x
     b0                      = __byte_perm(source.x, source.y, sel);
     b1                      = __byte_perm(source.z, source.w, sel);
 }
+
+template <class Publish, class = void>
+struct T2SmallTv2TilePublish : std::false_type {};
+
+template <class Publish>
+struct T2SmallTv2TilePublish<Publish, std::void_t<decltype(Publish::kIsTilePublish)>>
+    : std::bool_constant<Publish::kIsTilePublish> {};
 
 struct T2SmallTv2Bf16Publish {
     __device__ __forceinline__ void operator()(__nv_bfloat16* out, int column, int row,
@@ -305,7 +313,48 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void t2_s
     }
     if constexpr (kKW > 2) { __syncthreads(); }
 
-    if (k_split == 0) {
+    if constexpr (T2SmallTv2TilePublish<Publish>::value) {
+        static_assert(static_cast<std::size_t>(Schedule::kRows) * Schedule::kColumns *
+                              sizeof(float) <=
+                          sizeof(shared.partial),
+                      "T2 tile publish scratch must fit retired K-reduction arena");
+        float* dense = shared.partial;
+        if (k_split == 0) {
+#pragma unroll
+            for (int t = 0; t < kTpw; ++t) {
+                const int local_tile = first_tile + t;
+#pragma unroll
+                for (int nt = 0; nt < kNt; ++nt) {
+                    float4 sum =
+                        make_float4(acc[t][nt][0], acc[t][nt][1], acc[t][nt][2], acc[t][nt][3]);
+#pragma unroll
+                    for (int split = 2; split < kKW; split += 2) {
+                        const float4 value = load_vec<float4>(slot(warp + split, t, nt));
+                        sum.x += value.x;
+                        sum.y += value.y;
+                        sum.z += value.z;
+                        sum.w += value.w;
+                    }
+                    const int col0 = nt * 8 + 2 * lid;
+                    const int row_a = local_tile * 16 + gid;
+                    const int row_b = row_a + 8;
+                    if (col0 < cols) {
+                        dense[row_a * Schedule::kColumns + col0] = sum.x;
+                        dense[row_b * Schedule::kColumns + col0] = sum.z;
+                    }
+                    if (col0 + 1 < cols) {
+                        dense[row_a * Schedule::kColumns + col0 + 1] = sum.y;
+                        dense[row_b * Schedule::kColumns + col0 + 1] = sum.w;
+                    }
+                }
+            }
+        }
+        __syncthreads();
+        if (tid < Schedule::kRows) {
+            publish.template store_tile<Schedule::kColumns, Schedule::kRows>(
+                dense, row0, tid, cols);
+        }
+    } else if (k_split == 0) {
 #pragma unroll
         for (int t = 0; t < kTpw; ++t) {
             const int row = row0 + (first_tile + t) * 16 + gid;
@@ -321,7 +370,8 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void t2_s
                     sum.z += value.z;
                     sum.w += value.w;
                 }
-                const int col = static_cast<int>(blockIdx.y) * Schedule::kColumns + nt * 8 + 2 * lid;
+                const int col =
+                    static_cast<int>(blockIdx.y) * Schedule::kColumns + nt * 8 + 2 * lid;
                 if (col < cols) {
                     publish(out, col, row, rows, sum.x);
                     publish(out, col, row + 8, rows, sum.z);
@@ -333,6 +383,7 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void t2_s
             }
         }
     }
+}
 }
 
 } // namespace ninfer::ops::detail
