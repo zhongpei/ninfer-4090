@@ -19,15 +19,16 @@ The sm89 path keeps persistent K/V codes in their row-scaled E4M3 representation
 
 ## Native QK
 
-Each BF16 query row is Hadamard-rotated exactly like the cache producer, quantized to E4M3 with one
-FP32 query scale, and contracted directly against cached E4M3 K codes:
+Each BF16 query row is Hadamard-rotated exactly like the cache producer, represented as main and residual E4M3 terms with independent
+FP32 scales, and contracted directly against cached E4M3 K codes:
 
 ```text
-Q_bf16 -> Hadamard -> Q_e4m3 + q_scale
+Q_bf16 -> Hadamard -> Q_main_e4m3 + q_main_scale
+                         + Q_residual_e4m3 + q_residual_scale
 K_cache = K_e4m3 + k_scale
 
-raw_score = MMA(Q_e4m3, K_e4m3)
-score     = raw_score * q_scale * k_scale
+score = (MMA(Q_main_e4m3, K_e4m3) * q_main_scale
+       + MMA(Q_residual_e4m3, K_e4m3) * q_residual_scale) * k_scale
 ```
 
 The score is then masked/scaled and fed to the existing online-softmax/split reducer contract.
@@ -41,19 +42,22 @@ For one key tile the kernel instead forms:
 A[k] = P[k] * v_scale[k]
 ```
 
-and quantizes A per query row:
+and represents A as main and residual E4M3 terms per query row/tile:
 
 ```text
-A ~= a_scale * A_e4m3
+A ~= a_main_scale * A_main_e4m3 + a_residual_scale * A_residual_e4m3
 V = v_scale * V_e4m3
 
-sum(P * V) ~= a_scale * MMA(A_e4m3, V_e4m3)
+sum(P * V) ~= a_main_scale * MMA(A_main_e4m3, V_e4m3)
+            + a_residual_scale * MMA(A_residual_e4m3, V_e4m3)
 ```
 
 Softmax maxima and denominators continue to use the unquantized FP32 probabilities. Only the PV
-Tensor Core operand is quantized. That extra probability-side E4M3 boundary is an intentional
-quality/performance trade and is why this change ships together with a depth-conditioned
-perplexity protocol.
+Tensor Core operand is quantized. The residual term reduces transient quantization error while
+keeping native FP8 contraction. These are private arithmetic details, not new public storage
+boundaries; qualification still uses the independent FP64 attention oracle and the existing
+FP8 criterion. The depth-conditioned perplexity protocol measures the real model consequences
+of the stored KV representation and execution arithmetic.
 
 ## Unified sm89 route
 
@@ -76,7 +80,7 @@ Use the fixed-depth evaluator, not ordinary 4K sliding-window perplexity:
 python3 -m tools.bench.run_kv_long_context_perplexity \
   --exe ./build/apps/ninfer-perplexity \
   --model /absolute/path/Ternary-Bonsai-2-27B-NInfer-v3.ninfer \
-  --corpus eval/corpora/perplexity-1m/manifest.json \
+  --text /absolute/path/long-evaluation-stream.txt \
   --depths 8192,32768,65536,131072,196608,258048 \
   --tail 2048 \
   --dtypes int8,fp8,rk8v4,rk4v4-e8 \
@@ -88,3 +92,8 @@ INT8 is the default baseline. Evaluate the per-depth `delta_mean_nll_vs_baseline
 
 No quality or performance result is claimed by this implementation PR. Local RTX 4090 measurement
 is authoritative.
+
+The input must reach every requested depth. The bundled corpus has approximately 64K tokens per
+stream; for deeper measurements explicitly construct a longer stream and record its source order.
+The matrix runner rejects missing depths or unequal stream/target coverage rather than producing
+a partial comparison.

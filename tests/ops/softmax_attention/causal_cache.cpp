@@ -2622,7 +2622,7 @@ void validate_batch_case(const BatchAttentionCase& test_case) {
 
 int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchAttentionCase& test_case,
                    bool compare_single_queries = false, const char* represented_input = nullptr,
-                   float activation_range = 0.25f) {
+                   float activation_range = 0.25f, bool graph_replay = false) {
     validate_batch_case(test_case);
     const std::int32_t batch = static_cast<std::int32_t>(test_case.contexts.size());
     std::cout << "ATTENTION_CASE " << geometry.name << " " << cache_name(plan)
@@ -2758,10 +2758,11 @@ int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchA
 
     const bool masked = std::any_of(test_case.valid_columns.begin(), test_case.valid_columns.end(),
                                     [&](std::int32_t valid) { return valid != test_case.width; });
-    ops::causal_softmax_attention(tq, tk, tv, tp, masked ? tvalid : Tensor{}, ttable_rows,
-                                  op_geometry(geometry), kAttentionScale, cache.view(), envelope,
-                                  workspace, tout, nullptr);
-    cuda_synchronize();
+    launch_attention_case([&](cudaStream_t stream) {
+        ops::causal_softmax_attention(tq, tk, tv, tp, masked ? tvalid : Tensor{}, ttable_rows,
+                                      op_geometry(geometry), kAttentionScale, cache.view(), envelope,
+                                      workspace, tout, stream);
+    }, graph_replay);
 
     const std::string label = std::string("causal_softmax_attention batch ") + geometry.name + " " +
                               cache_name(plan) + " mapping=" + mapping_name(test_case.mapping) +
@@ -3330,6 +3331,48 @@ int verify_workspace_capacity_contract() {
 }
 
 } // namespace
+
+int run_softmax_attention_native_fp8_tests() {
+    if (cuda_unavailable()) return 77;
+    cudaDeviceProp device{};
+    int ordinal = 0;
+    cuda_check(cudaGetDevice(&ordinal), "get native FP8 device");
+    cuda_check(cudaGetDeviceProperties(&device, ordinal), "get native FP8 properties");
+    if (device.major != 8 || device.minor != 9) {
+        std::cout << "SKIP: native FP8 qualification requires sm_89\n";
+        return 77;
+    }
+    // The FP64 oracle uses public BF16 Q and independently decoded stored K/V.
+    // It does not reproduce private Q rotation/quantization or per-tile P*VScale
+    // quantization. Their error is included in the existing FP8 numerical criterion.
+    int failures = 0;
+    for (const Geometry& geometry : kGeometries) {
+        for (int width : {1, 7, 16, 17, 65}) {
+            const AttentionCase test_case{width, 61,
+                static_cast<std::uint32_t>(61 + width + 3),
+                static_cast<std::uint32_t>(2400 + width), false, true};
+            failures += run_a1_case(geometry, kPlanFp8, test_case, MappingPattern::Fragmented);
+            failures += run_a3_case(geometry, kPlanFp8, test_case, MappingPattern::Offset);
+        }
+        // Ragged rows exercise partial chunks, completely inert chunks, empty
+        // requests, reordered cache slots and masked graph replay together.
+        failures += run_batch_case(geometry, kPlanFp8,
+            {16, {61, 127, 511}, {16, 9, 0}, {2, 0, 1}, MappingPattern::Fragmented, 2480u},
+            false, nullptr, 0.25f, true);
+    }
+    failures += run_a3_case(kGeometries[0], kPlanFp8,
+        {1, 16384, 32768, 2481u, false, true}, MappingPattern::Fragmented);
+    // Zero Q tests a zero query scale; broad BF16 Q/K magnitudes exercise the
+    // additional native Q quantization beyond nearly uniform attention.
+    failures += run_a1_case(kGeometries[0], kPlanFp8,
+        {7, 0, 7, 2482u, true, true}, MappingPattern::Fragmented);
+    failures += run_batch_case(kGeometries[0], kPlanFp8,
+        {17, {54}, {17}, {0}, MappingPattern::Fragmented, 2483u},
+        false, nullptr, 2.0f, true);
+    std::cout << (failures == 0 ? "PASS" : "FAIL")
+              << " causal_softmax_attention native FP8 independent correctness\n";
+    return failures == 0 ? 0 : 1;
+}
 
 int run_softmax_attention_nvfp4_tests() {
     if (cuda_unavailable()) {
