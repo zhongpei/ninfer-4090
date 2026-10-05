@@ -384,6 +384,5 @@ __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) void t2_s
         }
     }
 }
-}
 
 } // namespace ninfer::ops::detail
