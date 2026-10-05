@@ -18,8 +18,11 @@ jobs:
       - name: Compile the affected LinearSwiGLU Q8 conformance target
         run: |
           docker run --rm ninfer-pr-ci bash -lc '
-            cmake -S /src -B /build-tests -G Ninja               -DCMAKE_BUILD_TYPE=Release               -DCMAKE_CUDA_ARCHITECTURES=89               -DBUILD_TESTING=ON               -DNINFER_BUILD_APPS=OFF               -DNINFER_BUILD_BENCHMARKS=OFF &&
-            cmake --build /build-tests --parallel --target ninfer_linear_swiglu_q8_a16_test
+            apt-get update &&
+            apt-get install --yes --no-install-recommends python3 &&
+            rm -rf /var/lib/apt/lists/* &&
+            cmake -S /src -B /build -DBUILD_TESTING=ON -DPython3_EXECUTABLE=/usr/bin/python3 &&
+            cmake --build /build --parallel --target ninfer_linear_swiglu_q8_a16_test
           '
 
   python-regression:
