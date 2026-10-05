@@ -72,6 +72,34 @@ int run_split_capacity_batch_invariance_tests() {
             }
         }
     }
+    struct Int8Expected {
+        std::uint32_t visible;
+        int expected;
+    };
+    // Absolute INT8 partitions are shared across head geometries and token widths.
+    // Pin the 4K boundary where obsolete occupancy tuning began, and the actual
+    // 8K partition transition, including its former 8198-key tuning endpoint.
+    constexpr Int8Expected int8_cases[]{
+        {4096, 8}, {4097, 9}, {5631, 11}, {8192, 16}, {8193, 17}, {8198, 17},
+    };
+    for (const int heads : {24, 16}) {
+        for (const int width : {1, 5, 6, 7, 128}) {
+            for (const auto& test : int8_cases) {
+                for (const std::uint32_t begin : {1U, test.visible}) {
+                    const int actual = causal_attention_split_capacity(
+                        heads, width, KvCacheStorage::Int8Group64,
+                        CausalAttentionExecutionEnvelope{begin, test.visible}, 1);
+                    if (actual != test.expected) {
+                        ++failures;
+                        std::cerr << "INT8 split policy mismatch: heads=" << heads
+                                  << " width=" << width << " keys=" << begin << ".."
+                                  << test.visible << " expected=" << test.expected
+                                  << " actual=" << actual << '\n';
+                    }
+                }
+            }
+        }
+    }
     std::cout << "split-capacity batch invariance: " << (failures ? "FAIL\n" : "PASS\n");
     return failures ? 1 : 0;
 }
