@@ -118,7 +118,7 @@ constexpr std::array<std::uint32_t, 7> kAutoPrefillRungs{
 };
 constexpr std::size_t kExplicitAutoPrefillHeadroomBytes = 256ULL << 20;
 
-EngineOptions resolve_auto_prefill_options(const execution::Parameters& parameters,
+EngineOptions resolve_auto_prefill_options(const models::qwen3_5::execution::Parameters& parameters,
                                            DeviceContext& device,
                                            const EngineOptions& source,
                                            std::size_t available_after_weights,
