@@ -338,6 +338,16 @@ namespace detail {
 CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::int32_t width,
                                                     std::int32_t batch_size, KvCacheStorage storage,
                                                     CausalAttentionExecutionEnvelope envelope) {
+#if defined(NINFER_SM89)
+    // Ada FP8 uses one native E4M3 QK/PV implementation for decode, verify and prefill. Wide
+    // prompt work is segmented through the small-T kernel so quality/performance experiments do
+    // not silently switch back to the legacy FP8->BF16/FP16 widen path.
+    if (storage == KvCacheStorage::Fp8E4M3Row256) {
+        const std::int32_t chunk =
+            causal_attention_chunk_tokens(q_heads, width, batch_size, storage, envelope);
+        return width <= chunk ? CausalAttentionRoute::SmallT : CausalAttentionRoute::ChunkedSmallT;
+    }
+#endif
     if (kv_storage_is_int8_family(storage)) {
         return width <= 8 ? CausalAttentionRoute::SmallT : CausalAttentionRoute::ChunkedSmallT;
     }
@@ -442,7 +452,11 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
             maximum = std::max(maximum, exact_capacity(width));
         }
     }
-    if (max_width > kMaximumVerifyTokens && kv_storage_is_int8_family(cache_storage)) {
+    bool wide_chunked = kv_storage_is_int8_family(cache_storage);
+#if defined(NINFER_SM89)
+    wide_chunked = wide_chunked || cache_storage == KvCacheStorage::Fp8E4M3Row256;
+#endif
+    if (max_width > kMaximumVerifyTokens && wide_chunked) {
         maximum = std::max(maximum, exact_capacity(max_width));
     }
     return maximum;
@@ -469,7 +483,13 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     require_contiguous_nonnull(v, op, "v");
 
     auto scope = workspace.scope();
-    if (kv_storage_is_int8_family(cache.storage)) {
+    bool prepublish_cache = kv_storage_is_int8_family(cache.storage);
+#if defined(NINFER_SM89)
+    // The native FP8 Tensor Core kernel consumes only the represented cache. Publish all live K/V
+    // rows once before chunked query CTAs begin, matching the race-free INT8 family contract.
+    prepublish_cache = prepublish_cache || cache.storage == KvCacheStorage::Fp8E4M3Row256;
+#endif
+    if (prepublish_cache) {
         // Publish every live represented KV row before independent query CTAs read it.
         // A fused per-query append would race with later queries reading earlier new rows.
         for (std::int32_t row = 0; row < batch; ++row) {

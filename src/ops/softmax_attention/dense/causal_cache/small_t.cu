@@ -369,9 +369,15 @@ void causal_attention_small_t_launch(
         return;
     }
     if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
+#if defined(NINFER_SM89)
+        causal_attention_small_t_fp8_sm89_launch(q, k, v, pos, valid_columns, table_rows, scale,
+                                                 cache, envelope, column_begin, width, partial_acc,
+                                                 partial_m, partial_l, out, stream);
+#else
         causal_attention_small_t_fp8_launch(q, k, v, pos, valid_columns, table_rows, scale, cache,
                                             envelope, column_begin, width, partial_acc, partial_m,
                                             partial_l, out, stream);
+#endif
         return;
     }
     if (cache.storage == KvCacheStorage::Nvfp4Group16) {
@@ -423,8 +429,14 @@ void causal_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, 
         return;
     }
     if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
+#if defined(NINFER_SM89)
+        causal_attention_cached_small_t_fp8_sm89_launch(q, pos, scale, cache, envelope,
+                                                        partial_acc, partial_m, partial_l, out,
+                                                        stream);
+#else
         causal_attention_cached_small_t_fp8_launch(q, pos, scale, cache, envelope, partial_acc,
                                                    partial_m, partial_l, out, stream);
+#endif
         return;
     }
     if (cache.storage == KvCacheStorage::Nvfp4Group16) {

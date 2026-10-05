@@ -46,10 +46,13 @@ struct Options {
     std::optional<std::filesystem::path> output;
     std::uint32_t context     = 4096;
     std::uint32_t stride      = 2048;
+    std::vector<std::uint32_t> depths;
+    std::uint32_t tail_tokens = 2048;
     int device                = 0;
 #if defined(NINFER_SM8X_COMPAT)
-    // FP8 E4M3 KV attention has no SM86 implementation, so the upstream default would fail at
-    // engine construction on this fork. INT8 group-64 is the qualified quantized profile here.
+    // Keep INT8 as the compatibility/default baseline. sm_89 now has a native E4M3 QK/PV path,
+    // but changing the product default requires the long-history quality and throughput evidence
+    // this evaluator is designed to collect; sm_86 continues to use the legacy supported set.
     ninfer::KvCacheStorage kv = ninfer::KvCacheStorage::Int8Group64;
 #else
     ninfer::KvCacheStorage kv = ninfer::KvCacheStorage::Fp8E4M3Row256;
@@ -71,8 +74,10 @@ struct Options {
 std::string usage_text() {
     return "usage: ninfer-perplexity <model.ninfer> "
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
-           "       [--context N] [--stride N] [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|rk8v4|nvfp4|k8v4] [--output <directory>]\n"
+           "       [--context N] [--stride N] [--depths D1,D2,... --tail N] [--device N]\n"
+           "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--output <directory>]\n"
+           "       (--depths switches to long-history quality mode: build prefix [0,D), score only\n"
+           "        the following --tail tokens, and never truncate history before D)\n"
            "       [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] [--gdn-state-fp16]\n"
            "       [--mlp-a8-decode] [--no-prefill-a8]\n"
            "       (--mlp-a8-decode is inert here: the route it enables is verify-phase"
@@ -100,6 +105,27 @@ Integer parse_integer(std::string_view text, const char* label) {
     return value;
 }
 
+std::vector<std::uint32_t> parse_depths(std::string_view text) {
+    std::vector<std::uint32_t> out;
+    std::size_t begin = 0;
+    while (begin <= text.size()) {
+        const std::size_t comma = text.find(',', begin);
+        const std::string_view piece =
+            text.substr(begin, comma == std::string_view::npos ? std::string_view::npos
+                                                               : comma - begin);
+        if (piece.empty()) usage_error("--depths entries must not be empty");
+        const auto value = parse_integer<std::uint32_t>(piece, "depth");
+        if (value == 0 || (!out.empty() && value <= out.back())) {
+            usage_error("--depths must be positive and strictly increasing");
+        }
+        out.push_back(value);
+        if (comma == std::string_view::npos) break;
+        begin = comma + 1;
+    }
+    if (out.empty()) usage_error("--depths requires at least one depth");
+    return out;
+}
+
 Options parse_options(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
         return Options{.help_requested = true};
@@ -125,6 +151,10 @@ Options parse_options(int argc, char** argv) {
             out.context = parse_integer<std::uint32_t>(value("--context"), "context");
         } else if (option == "--stride") {
             out.stride = parse_integer<std::uint32_t>(value("--stride"), "stride");
+        } else if (option == "--depths") {
+            out.depths = parse_depths(value("--depths"));
+        } else if (option == "--tail") {
+            out.tail_tokens = parse_integer<std::uint32_t>(value("--tail"), "tail");
         } else if (option == "--device") {
             out.device = parse_integer<int>(value("--device"), "device");
         } else if (option == "--kv-dtype") {
@@ -137,12 +167,18 @@ Options parse_options(int argc, char** argv) {
                 out.kv = ninfer::KvCacheStorage::Fp8E4M3Row256;
             } else if (dtype == "rk8v4") {
                 out.kv = ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64;
+            } else if (dtype == "rk4v4") {
+                out.kv = ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64;
+            } else if (dtype == "rk4v4-e8") {
+                out.kv = ninfer::KvCacheStorage::RK4V4E8;
+            } else if (dtype == "rk2v4-e8") {
+                out.kv = ninfer::KvCacheStorage::RK2V4E8;
             } else if (dtype == "nvfp4") {
                 out.kv = ninfer::KvCacheStorage::Nvfp4Group16;
             } else if (dtype == "k8v4") {
                 out.kv = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
             } else {
-                usage_error("--kv-dtype must be bf16, int8, fp8, rk8v4, nvfp4, or k8v4");
+                usage_error("--kv-dtype must be bf16, int8, fp8, rk8v4, rk4v4, rk4v4-e8, rk2v4-e8, nvfp4, or k8v4");
             }
         } else if (option == "--output") {
             out.output = std::filesystem::path(value("--output"));
@@ -179,6 +215,7 @@ Options parse_options(int argc, char** argv) {
     if (out.context < 2 || out.stride == 0 || out.stride >= out.context) {
         usage_error("context/stride must satisfy context>=2 and 1<=stride<context");
     }
+    if (out.tail_tokens == 0) usage_error("--tail must be positive");
     return out;
 }
 
@@ -191,7 +228,13 @@ std::string kv_name(ninfer::KvCacheStorage value) {
     case ninfer::KvCacheStorage::Fp8E4M3Row256:
         return "fp8-e4m3-r256";
     case ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
-        return "rotated-k8g64-v4g32";
+        return "rk8v4";
+    case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
+        return "rk4v4";
+    case ninfer::KvCacheStorage::RK4V4E8:
+        return "rk4v4-e8";
+    case ninfer::KvCacheStorage::RK2V4E8:
+        return "rk2v4-e8";
     case ninfer::KvCacheStorage::Nvfp4Group16:
         return "nvfp4";
     case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
@@ -269,11 +312,24 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
         ninfer::product::StartupLogRenderer& startup_log,
         const std::shared_ptr<ninfer::product::TerminalProgress>& progress) {
     const Clock::time_point total_started = Clock::now();
+    const bool depth_mode = !options.depths.empty();
+    std::uint32_t effective_context = options.context;
+    if (depth_mode) {
+        const std::uint64_t required =
+            static_cast<std::uint64_t>(options.depths.back()) + options.tail_tokens;
+        if (required > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("long-context perplexity depth+tail exceeds uint32");
+        }
+        effective_context =
+            std::max(effective_context, static_cast<std::uint32_t>(required));
+    }
+
     ninfer::EngineOptions engine_options;
     engine_options.artifact_path    = options.artifact;
     engine_options.purpose          = ninfer::EnginePurpose::CausalScoring;
     engine_options.device           = options.device;
-    engine_options.max_context      = options.context;
+    engine_options.max_context      = effective_context;
+    engine_options.kv_capacity      = ninfer::KvCapacityPolicy::explicit_capacity(effective_context);
     engine_options.kv_cache         = options.kv;
     engine_options.lm_head_q4       = options.lm_head_q4;
     engine_options.lm_head_q6       = options.lm_head_q6;
@@ -306,13 +362,23 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
             throw std::runtime_error("stream tokenized to fewer than two tokens: " + source.id);
         }
         std::vector<WindowPlan> windows =
-            ninfer::perplexity::plan_windows(tokens.size(), options.context, options.stride);
+            depth_mode
+                ? ninfer::perplexity::plan_depth_windows(tokens.size(), options.depths,
+                                                         options.tail_tokens)
+                : ninfer::perplexity::plan_windows(tokens.size(), options.context, options.stride);
         total_input_tokens += static_cast<std::uint64_t>(tokens.size());
-        total_scored_tokens += static_cast<std::uint64_t>(tokens.size() - 1);
+        for (const WindowPlan& window : windows) {
+            total_scored_tokens += static_cast<std::uint64_t>(window.target_end - window.target_begin);
+        }
         total_windows += static_cast<std::uint64_t>(windows.size());
-        streams.push_back(EvaluationStream{.source  = std::move(source),
-                                           .tokens  = std::move(tokens),
-                                           .windows = std::move(windows)});
+        if (!windows.empty()) {
+            streams.push_back(EvaluationStream{.source  = std::move(source),
+                                               .tokens  = std::move(tokens),
+                                               .windows = std::move(windows)});
+        }
+    }
+    if (streams.empty()) {
+        throw std::runtime_error("no corpus stream reaches the requested long-context depth");
     }
     const double preflight_seconds = seconds_since(preflight_started);
     logger->info("corpus ready | {} streams | {} input tokens | {} scored tokens | {} windows | {}",
@@ -331,6 +397,8 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     Clock::time_point next_progress = scoring_started + std::chrono::seconds(10);
     ScoreAggregate overall;
     std::map<std::string, ScoreAggregate> domains;
+    std::map<std::uint32_t, ScoreAggregate> depth_scores;
+    std::map<std::uint32_t, std::uint32_t> depth_streams;
     json stream_reports             = json::array();
     std::uint64_t completed_windows = 0;
 
@@ -372,6 +440,11 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
             stream_score.add(window_score);
             overall.add(window_score);
             domains[stream.source.domain].add(window_score);
+            if (depth_mode) {
+                const auto depth = static_cast<std::uint32_t>(window.target_begin);
+                depth_scores[depth].add(window_score);
+                ++depth_streams[depth];
+            }
             ++completed_windows;
             json window_report            = aggregate_json(window_score);
             window_report["index"]        = window_index;
@@ -380,6 +453,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
             window_report["target_begin"] = window.target_begin;
             window_report["target_end"]   = window.target_end;
             window_report["first_target"] = window.first_target;
+            if (depth_mode) window_report["prefix_depth"] = window.target_begin;
             window_report["seconds"]      = seconds_since(window_started);
             window_reports.push_back(std::move(window_report));
 
@@ -415,8 +489,8 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
         stream_report["domain"]          = stream.source.domain;
         stream_report["path"]            = stream.source.path.string();
         stream_report["input_tokens"]    = stream.tokens.size();
-        stream_report["unscored_tokens"] = 1;
-        stream_report["seconds"]         = stream_seconds;
+        if (!depth_mode) stream_report["unscored_tokens"] = 1;
+        stream_report["seconds"] = stream_seconds;
         stream_report["windows"]         = std::move(window_reports);
         stream_reports.push_back(std::move(stream_report));
     }
@@ -434,11 +508,40 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
         item["domain"] = domain;
         domain_reports.push_back(std::move(item));
     }
+    json depth_reports = json::array();
+    if (depth_mode) {
+        for (const auto& [depth, aggregate] : depth_scores) {
+            json item            = aggregate_json(aggregate);
+            item["prefix_depth"] = depth;
+            item["stream_count"] = depth_streams.at(depth);
+            item["tail_tokens_requested"] = options.tail_tokens;
+            depth_reports.push_back(std::move(item));
+        }
+    }
+    json execution{
+        {"purpose", "causal_scoring"},
+        {"device", options.device},
+        {"context_tokens", effective_context},
+        {"prefill_chunk_tokens", 1024},
+        {"score_tile_tokens", 1024},
+        {"kv_dtype", kv_name(options.kv)},
+    };
+    if (depth_mode) {
+        execution["protocol"] = "fixed-depth-long-history";
+        execution["prefix_depths"] = options.depths;
+        execution["tail_tokens"] = options.tail_tokens;
+    } else {
+        execution["protocol"] = "fixed-window-truncated-context";
+        execution["stride_tokens"] = options.stride;
+    }
 
     json report{
-        {"schema_version", 2},
+        {"schema_version", 3},
         {"metric",
-         {{"name", "fixed-window truncated-context causal perplexity"}, {"log_base", "natural"}}},
+         {{"name",
+           depth_mode ? "fixed-depth long-history causal perplexity"
+                      : "fixed-window truncated-context causal perplexity"},
+          {"log_base", "natural"}}},
         {"artifact",
          {{"path", std::filesystem::absolute(options.artifact).lexically_normal().string()},
           {"architecture", load.architecture},
@@ -450,14 +553,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
           {"mode", corpus.mode},
           {"source", corpus.source.string()},
           {"stream_count", streams.size()}}},
-        {"execution",
-         {{"purpose", "causal_scoring"},
-          {"device", options.device},
-          {"context_tokens", options.context},
-          {"stride_tokens", options.stride},
-          {"prefill_chunk_tokens", 1024},
-          {"score_tile_tokens", 1024},
-          {"kv_dtype", kv_name(options.kv)}}},
+        {"execution", std::move(execution)},
         {"timing",
          {{"load_seconds", load.load_seconds},
           {"read_and_tokenize_seconds", preflight_seconds},
@@ -467,6 +563,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
            static_cast<double>(overall.scored_tokens) / scoring_seconds}}},
         {"streams", std::move(stream_reports)},
         {"domains", std::move(domain_reports)},
+        {"depths", std::move(depth_reports)},
         {"overall", aggregate_json(overall)},
     };
 
@@ -484,8 +581,23 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     std::cout << "Perplexity result\n"
               << "artifact: " << load.model_name << '\n'
               << "kv: " << kv_name(options.kv) << ", corpus: " << corpus.corpus_id << " / "
-              << corpus.mode << ", context/stride: " << options.context << '/' << options.stride
-              << "\n\n";
+              << corpus.mode;
+    if (depth_mode) {
+        std::cout << ", long-history tail=" << options.tail_tokens << ", max-context="
+                  << effective_context << "\n\n";
+        std::cout << std::left << std::setw(16) << "prefix_depth" << std::right << std::setw(12)
+                  << "streams" << std::setw(16) << "tokens" << std::setw(16) << "mean_nll"
+                  << std::setw(16) << "ppl" << '\n';
+        for (const auto& [depth, aggregate] : depth_scores) {
+            std::cout << std::left << std::setw(16) << depth << std::right << std::setw(12)
+                      << depth_streams.at(depth) << std::setw(16) << aggregate.scored_tokens
+                      << std::setw(16) << std::fixed << std::setprecision(6)
+                      << aggregate.mean_nll() << std::setw(16) << aggregate.ppl() << '\n';
+        }
+        std::cout << '\n';
+    } else {
+        std::cout << ", context/stride: " << options.context << '/' << options.stride << "\n\n";
+    }
     std::cout << std::left << std::setw(24) << "domain" << std::right << std::setw(16) << "tokens"
               << std::setw(16) << "mean_nll" << std::setw(16) << "ppl" << '\n';
     for (const auto& [domain, aggregate] : domains) {

@@ -59,6 +59,20 @@ void causal_attention_cached_small_t_fp8_launch(const Tensor& q, const Tensor& p
                                                 Tensor& partial_l, Tensor& out,
                                                 cudaStream_t stream);
 
+// RTX 4090 native E4M3 Tensor Core path. Append-and-attend publishes K/V through the
+// canonical cache append Op first; the kernel itself reads only the persistent FP8 cache.
+void causal_attention_small_t_fp8_sm89_launch(
+    const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& positions,
+    const Tensor& valid_columns, const Tensor& table_rows, float scale,
+    PagedKVBatchLayerView cache, CausalAttentionExecutionEnvelope envelope,
+    std::int32_t column_begin, std::int32_t width, Tensor& partial_acc, Tensor& partial_m,
+    Tensor& partial_l, Tensor& out, cudaStream_t stream);
+
+void causal_attention_cached_small_t_fp8_sm89_launch(
+    const Tensor& q, const Tensor& positions, float scale, const PagedKVLayerView& cache,
+    CausalAttentionExecutionEnvelope envelope, Tensor& partial_acc, Tensor& partial_m,
+    Tensor& partial_l, Tensor& out, cudaStream_t stream);
+
 void causal_attention_small_t_nvfp4_launch(
     const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& positions,
     const Tensor& valid_columns, const Tensor& table_rows, float scale, PagedKVBatchLayerView cache,

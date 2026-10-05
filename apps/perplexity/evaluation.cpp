@@ -41,6 +41,38 @@ std::vector<WindowPlan> plan_windows(std::size_t tokens, std::uint32_t context,
     return windows;
 }
 
+std::vector<WindowPlan> plan_depth_windows(std::size_t tokens,
+                                                   std::span<const std::uint32_t> depths,
+                                                   std::uint32_t tail_tokens) {
+    if (tokens < 2) { throw std::invalid_argument("perplexity stream must contain two tokens"); }
+    if (depths.empty()) { throw std::invalid_argument("long-context perplexity requires depths"); }
+    if (tail_tokens == 0) { throw std::invalid_argument("long-context perplexity tail must be positive"); }
+
+    std::vector<WindowPlan> windows;
+    windows.reserve(depths.size());
+    std::uint32_t previous = 0;
+    bool first = true;
+    for (const std::uint32_t depth : depths) {
+        if (depth == 0) { throw std::invalid_argument("long-context perplexity depth must be positive"); }
+        if (!first && depth <= previous) {
+            throw std::invalid_argument("long-context perplexity depths must be strictly increasing");
+        }
+        first = false;
+        previous = depth;
+        if (static_cast<std::size_t>(depth) >= tokens) { continue; }
+        const std::size_t target_end =
+            std::min<std::size_t>(tokens, static_cast<std::size_t>(depth) + tail_tokens);
+        windows.push_back(WindowPlan{
+            .input_begin = 0,
+            .input_end = target_end,
+            .target_begin = depth,
+            .target_end = target_end,
+            .first_target = depth,
+        });
+    }
+    return windows;
+}
+
 void ScoreAggregate::add(std::span<const float> logprobs) {
     for (const float logprob : logprobs) {
         if (!std::isfinite(logprob)) {
