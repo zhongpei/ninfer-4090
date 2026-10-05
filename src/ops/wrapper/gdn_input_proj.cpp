@@ -362,16 +362,14 @@ void dispatch_single_parent(const Tensor& x, const Weight& weight, Tensor& qkv, 
     detail::q8_gdn_input_dispatch(x, weight, qkv, z, stream);
 }
 
-// The Q4/Q5 conv forms always materialize the projection through gdn_input_proj() and run the conv
-// separately. A fused projection-epilogue conv (SIMT GEMV/GEMM, T=1..3 and 5..6) served batch 1
-// until 2026-09-11 and lost at every width it took: record form, RTX 3090, graph replay, cold L2,
-// median of 50 (gdn_input_proj_conv_snapshot_bench), us:
-//
-//   T               1      2      3      5      6
-//   fused        95.2  104.4  123.9  162.8  191.5
-//   materialized 80.9   80.9   81.9   85.0   86.0     (snapshot form at T=1)
-//
-// At T=5 that was 4.8 ms of a four-draft-token MTP round.
+// Historical note: the old Q4/Q5 fused path was a SIMT GEMV/GEMM implementation and lost to
+// materialization after the small-T MMA rewrite (for example T=5: 162.8 us fused vs 85.0 us
+// materialized on RTX 3090). That result does not apply to the current fusion. Batch-1 T<=16 now
+// stays on the production q4_ksplit_mma/q5_small_t_mma kernels and changes only their epilogue:
+// completed FP32 MMA accumulators are staged in the CTA's retired K-reduction arena and consumed
+// directly by GdnConvEpilogue. No old SIMT projection kernel is reintroduced and no global BF16
+// [channels,T] projection matrix is written/read in that domain. Wider or batched forms keep the
+// measured materialized path.
 void require_q4_q5_conv_admitted(std::int32_t tokens, std::int32_t batch_size) {
     if (!detail::q4_q5_gdn_input_admits({5120, 4096, 12288, 10240, 6144, 5120, tokens}) ||
         batch_size <= 0 || batch_size > 8) {
