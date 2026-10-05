@@ -72,6 +72,34 @@ int run_split_capacity_batch_invariance_tests() {
             }
         }
     }
+#if defined(NINFER_SM89)
+    struct Sm89Expected {
+        int heads;
+        int width;
+        std::uint32_t visible;
+        int expected;
+    };
+    constexpr Sm89Expected sm89_cases[]{
+        {24, 1, 5631, 30}, {24, 5, 5631, 30}, {24, 6, 5631, 30},
+        {24, 1, 8198, 32}, {24, 6, 8198, 32},
+        {16, 1, 5631, 59}, {16, 5, 5631, 59}, {16, 6, 5631, 59},
+        {16, 1, 8198, 86}, {16, 6, 8198, 86},
+        // H24 width 7 is outside the sm89 one-wave specialization and keeps the
+        // generic partitioning. This protects the exact T1..T6 scope.
+        {24, 7, 5631, 64},
+    };
+    for (const auto& test : sm89_cases) {
+        const int actual = causal_attention_split_capacity(
+            test.heads, test.width, KvCacheStorage::Int8Group64,
+            CausalAttentionExecutionEnvelope{1, test.visible}, 1);
+        if (actual != test.expected) {
+            ++failures;
+            std::cerr << "sm89 split policy mismatch: heads=" << test.heads
+                      << " width=" << test.width << " keys=" << test.visible
+                      << " expected=" << test.expected << " actual=" << actual << '\n';
+        }
+    }
+#endif
     std::cout << "split-capacity batch invariance: " << (failures ? "FAIL\n" : "PASS\n");
     return failures ? 1 : 0;
 }
