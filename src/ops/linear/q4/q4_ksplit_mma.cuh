@@ -370,7 +370,6 @@ __launch_bounds__(256, MinBlocks) __global__
         }
     }
 }
-}
 
 // Launches q4_ksplit_mma_kernel over `blocks` CTAs.
 template <class Geometry, int TileCols, int ActiveCols, class Epilogue = Q4KSplitStoreEpilogue,
