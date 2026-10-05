@@ -833,6 +833,10 @@ std::size_t t2_two_parent_projection_bytes(std::int32_t min_columns, std::int32_
 // storage is needed only by the A16 arithmetic branch.
 std::size_t t2_conv_capacity(std::int32_t batch, std::int32_t min_width,
                              std::int32_t max_width, LinearPolicy policy, bool snapshot) {
+    // Bonsai A16 batch-1 small-T now consumes the T2 FP32 accumulator inside the same CTA as
+    // causal convolution. No activation quantization, global projection plane, or conv scratch is
+    // needed for the exact T=1..16 domain.
+    if (batch == 1 && max_width <= 16 && !detail::t2_a8_admits(policy)) { return 0; }
     const int min_columns = batch * min_width;
     const int max_columns = batch * max_width;
     const auto projection_bytes =
@@ -1227,9 +1231,15 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
 
     if (ternary && t2_uses_current_fp32(qk_weight, value_z_weight,
                                          geometry.aggregate_columns, policy)) {
-        compose_t2_current(x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
-                           initial_state_slots, &snapshot_base_slots, nullptr, query, key, value,
-                           z, geometry, ws, stream);
+        if (geometry.batch == 1 && geometry.width <= 16) {
+            detail::gdn_t2_conv_snapshot_fused_launch(
+                x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+                initial_state_slots, snapshot_base_slots, query, key, value, z, stream);
+        } else {
+            compose_t2_current(x, qk_weight, value_z_weight, conv_weight, conv_states,
+                               valid_columns, initial_state_slots, &snapshot_base_slots, nullptr,
+                               query, key, value, z, geometry, ws, stream);
+        }
         return;
     }
 
@@ -1319,9 +1329,15 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
 
     if (ternary && t2_uses_current_fp32(qk_weight, value_z_weight,
                                          geometry.aggregate_columns, policy)) {
-        compose_t2_current(x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
-                           initial_state_slots, nullptr, &conv_record, query, key, value, z,
-                           geometry, workspace, stream);
+        if (geometry.batch == 1 && geometry.width <= 16) {
+            detail::gdn_t2_conv_record_fused_launch(
+                x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+                initial_state_slots, conv_record, query, key, value, z, stream);
+        } else {
+            compose_t2_current(x, qk_weight, value_z_weight, conv_weight, conv_states,
+                               valid_columns, initial_state_slots, nullptr, &conv_record, query,
+                               key, value, z, geometry, workspace, stream);
+        }
         return;
     }
     if (!ternary) {
