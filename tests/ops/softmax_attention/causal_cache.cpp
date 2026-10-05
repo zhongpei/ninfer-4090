@@ -3362,6 +3362,16 @@ int run_softmax_attention_native_fp8_tests() {
     }
     failures += run_a3_case(kGeometries[0], kPlanFp8,
         {1, 16384, 32768, 2481u, false, true}, MappingPattern::Fragmented);
+    // A verification block straddles each change in absolute split span. Check
+    // the independently decoded oracle and bitwise equality with sequential T1
+    // calls: future columns and masked/reordered batch rows must not change a
+    // previously represented query's partition or output.
+    for (int context : {10236, 34812}) {
+        failures += run_batch_case(kGeometries[0], kPlanFp8,
+            {8, {context, 61}, {8, 3}, {1, 0}, MappingPattern::Fragmented,
+             static_cast<std::uint32_t>(context + 2490)},
+            true, nullptr, 0.25f, true);
+    }
     // Zero Q tests a zero query scale; broad BF16 Q/K magnitudes exercise the
     // additional native Q quantization beyond nearly uniform attention.
     failures += run_a1_case(kGeometries[0], kPlanFp8,

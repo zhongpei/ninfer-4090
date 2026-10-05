@@ -179,7 +179,9 @@ void causal_attention_small_t_fp8_sm89_kernel(
     std::uint8_t* v_t = dynamic_raw + StageCount * 2 * TileBytes;
 
     const int kv_head     = static_cast<int>(blockIdx.x);
-    const int split       = static_cast<int>(blockIdx.y);
+    // Map long absolute ranges toward the front of the Ada launch grid. Logical
+    // IDs and the reducer's merge order stay fixed across widths and envelopes.
+    const int split       = static_cast<int>(gridDim.y - 1 - blockIdx.y);
     const int batch       = MultiBatch ? static_cast<int>(blockIdx.z) : 0;
     const int split_count = static_cast<int>(gridDim.y);
     const int tid         = static_cast<int>(threadIdx.x);

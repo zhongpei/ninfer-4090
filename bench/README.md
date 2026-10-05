@@ -761,6 +761,28 @@ complete Op latency. Payload rates exclude repeated reads and do not measure DRA
 Logical FLOPs do not model private operand conversion, padding, or additional quantization work;
 the benchmark therefore does not infer Tensor Core utilization from a storage-format label.
 
+For end-to-end decode attribution, export native Nsight Systems `cuda_gpu_trace` and
+`nvtx_gpu_proj_trace` CSV reports from a capture containing one request. The summary tool selects
+the exact projected NVTX name; use the name actually present in the exported report. For the
+existing NInfer decode range on Nsight Systems 2024.6, it is `ninfer:decode`:
+
+```bash
+nsys stats --report cuda_gpu_trace,nvtx_gpu_proj_trace \
+  --format csv --output profiles/nsys/decode profiles/nsys/capture.nsys-rep
+/home/fofo/.local/bin/python3.11 tools/bench/summarize_nsys_trace.py \
+  --gpu-trace profiles/nsys/decode_cuda_gpu_trace.csv \
+  --ranges profiles/nsys/decode_nvtx_gpu_proj_trace.csv \
+  --range-name ninfer:decode --out profiles/nsys/decode-summary.json
+```
+
+The selected window spans the first through last matching projected GPU range, including gaps
+between rounds. Kernel totals are grouped by name, grid/block and resources; GPU busy time uses
+the union of kernel and memory-operation intervals to avoid counting overlap twice. The tool
+rejects boundaries that cut an event and selections spanning multiple devices or contexts.
+Untraced gaps alone do not establish a CPU bottleneck. Graph capture-time internal NVTX ranges
+do not establish replay-stage timings. Profiler timings are diagnostic evidence, not normal
+benchmark throughput; measure throughput separately without profiling.
+
 `ninfer_context_softmax_attention_bench` measures the public read-only context-plus-query contract
 at Q32/KV8/D128 with BF16 context storage. `T` is a complete non-causal query block and `L` is its
 external context length.

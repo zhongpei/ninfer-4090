@@ -23,6 +23,11 @@ The [PR #25 single-direction FP8 report](performance/bonsai-fp8-pr25-4090-2026-1
 compares the repaired new implementation with stored PR #24 results. Numerical checks pass;
 C1 Fixed K7 short-input decode improves 2.12%, while long-input decode regresses 7.19%.
 It does not establish a general speedup or change the INT8 product default.
+The [single-direction diagnosis and scheduling repair](performance/bonsai-fp8-pr25-diagnosis.md)
+identifies split work imbalance and records the controlled fixes. The repaired C1 Fixed K7
+29K-input decode reaches 513.7 tok/s, 14.34% above the pre-repair PR #25 result and 6.11%
+above the stored PR #24 result. Native numerical checks pass; six-depth PPL changes are mixed.
+The report also records the theoretical resource limit and missing NCU-counter evidence.
 
 The final 2026-10-04 fixed-route campaign passes all 84 correctness
 comparisons and qualifies 71 performance comparisons across seven workloads,

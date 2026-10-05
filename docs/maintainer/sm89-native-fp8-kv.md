@@ -1,7 +1,7 @@
 # RTX 4090 native FP8 KV attention
 
 Status: **opt-in through `--kv-dtype fp8`**. Bonsai 27B qualification on 2026-10-05
-selects INT8 as the sm89 product default. Native-FP8 passes 25 focused numerical cases and has
+selects INT8 as the sm89 product default. Native-FP8 passes focused numerical cases and has
 measured quality through a 258048-token history. It improves decode on the tested 29K synthetic
 input while reducing prefill throughput. See the [four-format report](../performance/bonsai-kv-4090-2026-10-05.md)
 for measurements and their limits.
@@ -82,10 +82,17 @@ and register pressure before it removes enough loop overhead to justify the occu
 24 GiB Ada, so Bc32 remains the production granularity for this optimization pass.
 
 FP8 split-KV now uses absolute key ranges rather than repartitioning the visible window evenly.
-The ranges grow from 128 to 512, 1024, 2048 and finally 4096 keys per split. Boundaries are
+The ranges grow from 128 to 512, 768, 2048 and finally 4096 keys per split. Span changes occur
+at absolute key positions 2048, 10240, 34816 and 59392. Boundaries are
 independent of query width, compact-batch occupancy and graph replay envelopes. The largest range
 is exactly 64 physical 64-token pages, so the existing fixed page-id staging bound remains valid.
 The old H24/Kv4 T1 rule that forced every window above 8198 keys to 256 splits is removed.
+The original PR #25 middle spans produced a 4-to-64-tile CTA work imbalance around 29K.
+The 768-key middle span caps that region at 24 tiles while retaining the 59392-key start of
+the 4096-key tail; the 786432-key envelope fits in 254 splits, below the 256-slot bound.
+The physical sm89 grid maps CTA y to logical split `gridDim.y - 1 - blockIdx.y`. This preserves
+absolute partial slots and reducer order while placing longer ranges toward the front of the
+grid. CUDA does not guarantee block execution order; the mapping is qualified by Ada measurements.
 
 This has two intended properties:
 
@@ -116,9 +123,12 @@ instead of invoking that batch launcher once per row.
 
 The [PR #25 RTX 4090 qualification](../performance/bonsai-fp8-pr25-4090-2026-10-05.md)
 records the required batch-append repair, passing independent numerical checks, fixed-depth
-perplexity and C1 Fixed K7 generation measurements. Performance is mixed: short-input decode
-improves, while long-input decode regresses. No general throughput improvement or individual
-kernel speedup is claimed.
+perplexity and C1 Fixed K7 generation measurements before the scheduling repair: short-input
+decode improves, while long-input decode regresses. The subsequent
+[split scheduling diagnosis and repair](../performance/bonsai-fp8-pr25-diagnosis.md)
+records the current policy above, passing native numerical checks, six-depth PPL, and
+29K-input decode of 513.7 tok/s (14.34% above pre-repair PR #25). These measurements
+qualify the reported workloads; they do not establish a general throughput or quality improvement.
 
 ## Long-history quality gate
 
