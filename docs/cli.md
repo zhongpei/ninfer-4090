@@ -243,7 +243,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 |---|---|---:|
 | `--max-context N` | per-sequence logical context ceiling | `2048` |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `2048` |
-| `--prefill-chunk N` | positive text-prefill chunk, in multiples of 128 | `1024` |
+| `--prefill-chunk N\|auto` | fixed positive text-prefill chunk in multiples of 128, or startup-selected physical chunk | `1024` |
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
 | `--kv-dtype bf16\|int8\|fp8\|rk8v4\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant; all six are accepted on this fork's sm_86/sm_89 targets | `bf16` |
@@ -349,13 +349,21 @@ unallocated. It does not probe allocations or resize the pool at request time. T
 CLI normally leaves the option omitted so it follows
 `--max-context`; the distinction matters primarily to a concurrent Engine or server.
 
+Fixed numeric `--prefill-chunk` values keep their existing execution and scheduling behavior.
+The opt-in `auto` mode chooses the largest safe physical chunk at startup from
+8192/6144/4096/3072/2048/1536/1024 while preserving the KV capacity resolved with a 1024-token
+baseline. When decode work is runnable, each Auto prefill service processes at most
+`min(resolved chunk, 2048)` tokens before returning to decode; isolated prefill may use the full
+physical chunk. See [automatic prefill chunk](maintainer/auto-prefill-chunk.md) for memory and
+scheduling details.
+
 At Engine startup NInfer reserves model weights, persistent sequence state, one phase-reused
 Program workspace, and a separate CUDA Graph driver allowance. With Vision enabled, that one
 workspace contains a general execution prefix and a fixed item-output handoff region. Vision encode
 may reuse the full backing before producing the output; Text/MTP/decode work remains inside the
 general prefix while the handoff is live. The capacity is therefore the maximum legal simultaneous
-extent, not the sum of Text, Vision scratch, and Vision output allocations. Text prefill uses
-`min(--prefill-chunk,--max-context)`; Vision keeps the existing 32,768-token aggregate prompt budget
+extent, not the sum of Text, Vision scratch, and Vision output allocations. Text prefill plans for
+`min(resolved prefill chunk,--max-context)`; Vision keeps the existing 32,768-token aggregate prompt budget
 but plans Device execution for the registered 16,384-token maximum single item. Requests perform no
 project-owned device allocation or growth. Context-cache capacity controls are intentionally absent
 from this one-request interface; the persistent Engine and server routes own cross-request reuse and

@@ -788,7 +788,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `600000` |
-| `--prefill-chunk N` | text-prefill chunk | `1024` |
+| `--prefill-chunk N\|auto` | fixed text-prefill chunk in multiples of 128, or startup-selected physical chunk | `1024` |
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
 | `--device N` | CUDA device index | `0` |
 | `--context-cost-presets FILE` | optional runtime context-cost preset registry | generic + compiled defaults |
@@ -985,9 +985,15 @@ response the deployment allows rather than to a connection timeout: at C1 on an 
 6,500-token response occupies the engine for about 106 seconds. The 600,000 ms default admits a
 queued caller behind roughly ten such responses; lower it only to fail fast on purpose.
 
-One request owns the staged prefill at a time, and the executor alternates a single prefill chunk
-with a single decode round, so `--prefill-chunk` sets the worst-case pause every active stream sees
-while a new prompt is ingested. On an RTX 3090 ingesting a 4,900-token prompt behind four active
+One request owns the staged prefill at a time, and the executor alternates one prefill service
+with one decode round. Fixed numeric `--prefill-chunk` values keep their existing behavior: the
+chunk bounds the prompt work between decode rounds. The opt-in `auto` mode selects the largest
+safe physical chunk at startup from 8192/6144/4096/3072/2048/1536/1024 while preserving the KV
+capacity resolved with a 1024-token baseline. Isolated prefill may use that full physical chunk;
+when decode work is runnable, each service processes at most `min(resolved chunk, 2048)` tokens
+before returning to decode. See [automatic prefill chunk](maintainer/auto-prefill-chunk.md).
+
+On an RTX 3090 ingesting a 4,900-token prompt behind four active
 streams, the largest inter-token gap measured 1,043 ms at chunk 1024, 515 ms at 512, and 312 ms at
 256, against an 82 ms median decode interval; the ingesting request's own prefill rate fell only
 from 1,135 to 1,130 to 1,110 tok/s. Prefill is not batched across requests at any chunk size, so a
