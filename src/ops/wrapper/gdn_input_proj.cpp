@@ -1044,7 +1044,10 @@ std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
     if (q4_q5) {
         require_q4_q5_conv_admitted(min_width, 1);
         require_q4_q5_conv_admitted(max_width, 1);
-        largest_materialized_width = max_width;
+        // The current Q4/Q5 small-T MMA path feeds the causal convolution directly from its
+        // FP32 CTA accumulator through T=16. Only wider batch-1 intervals need the historical
+        // global BF16 [channels,T] projection scratch.
+        largest_materialized_width = max_width > 16 ? max_width : 0;
     } else {
         (void)resolve_q8_conv_plan(min_width, 1);
         (void)resolve_q8_conv_plan(max_width, 1);
@@ -1247,7 +1250,15 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
         return;
     }
 
-    if (!ternary) { require_q4_q5_conv_admitted(geometry.width, geometry.batch); }
+    if (!ternary) {
+        require_q4_q5_conv_admitted(geometry.width, geometry.batch);
+        if (geometry.width <= 16) {
+            detail::q4_q5_gdn_input_conv_snapshot_fused_launch(
+                x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+                initial_state_slots, snapshot_base_slots, query, key, value, z, stream);
+            return;
+        }
+    }
     auto scope                 = ws.scope();
     ProjectedWorkspace scratch = allocate_projected_workspace(ws, kChannels, geometry.width);
     if (ternary) {
@@ -1315,7 +1326,15 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
                            geometry, workspace, stream);
         return;
     }
-    if (!ternary) { require_q4_q5_conv_admitted(geometry.width, geometry.batch); }
+    if (!ternary) {
+        require_q4_q5_conv_admitted(geometry.width, geometry.batch);
+        if (geometry.batch == 1 && geometry.width <= 16) {
+            detail::q4_q5_gdn_input_conv_record_fused_launch(
+                x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+                initial_state_slots, conv_record, query, key, value, z, stream);
+            return;
+        }
+    }
     compose_record(x, conv_weight, conv_states, valid_columns, initial_state_slots, conv_record,
                    query, key, value, z, geometry, workspace, stream,
                    [&](const Tensor& x_flat, Tensor& record_flat, Tensor& z_flat) {
