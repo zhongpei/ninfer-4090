@@ -729,6 +729,15 @@ submission gaps. Reported times are normalized per Op, and the CSV records `grap
 append calls overwrite the same positions with identical values; this is a warm Op measurement,
 not 32 speculative rounds. Cold measurements require one call per graph.
 
+`--max-visible-keys N` widens the public execution envelope while preserving the actual
+context and valid columns; zero (the default) uses the actual maximum visible window. The
+benchmark allocates KV table/storage capacity sufficient for that envelope and initializes
+the represented visible region through the public codec. Values below the represented
+window or above the public limit are rejected. CSV and terminal output record
+`min_visible_keys` and `max_visible_keys`; workspace uses that same envelope. Useful payload
+and `physical_cache_bytes` still model the visible region, rather than the complete
+preallocated capacity. This option isolates capacity-related launch costs for Graph analysis.
+
 ```bash
 cmake --build build --parallel --target ninfer_causal_softmax_attention_bench
 ./build/bench/ninfer_causal_softmax_attention_bench \

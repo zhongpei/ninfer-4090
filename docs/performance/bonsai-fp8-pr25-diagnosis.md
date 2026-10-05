@@ -216,3 +216,45 @@ nsys profile --trace=cuda,nvtx --cuda-graph-trace=node \
 - `campaign/attention/append-h24-t8-context29141-sm89-attn.ncu.log`：NCU权限阻塞。
 
 此次未运行旧方案、旧counter采集、C8、其他KV、其他硬件、全仓库套件或CI。修复后的代表性公共Op、真实生成和六深度PPL已完成；硬件等待类型和历史退步的唯一归因仍有上述限制。全部改动留在工作区，未创建提交或推送。
+
+## 同类调度问题扩展排查
+
+目标是判断当前sm89 attention是否还有与本次修复相同的可修复退步。范围包括共享split planner、其他KV格式的small-T路径，以及FP8不同query宽度、batch和Graph envelope。不会把不均匀跨度、较高资源需求或物理block顺序单独判定为bug。
+
+先只读核对调用、分区和已有证据；仅对可能改变修复决策的候选运行公共Op聚焦实验。确认问题需要可观察的错误或受控性能证据。性能候选须保留数学契约，覆盖其影响的边界，并在实际修改后通过独立oracle。若没有足够证据，则报告为未验证假设，不移植本次FP8分区或grid映射到其他路线。当前基线为已提交的 `8c76e89`；不运行PR24或其他历史实现。
+
+源码调查找到两个候选，尚无性能结论：
+
+- FP8宽Graph envelope：普通profile在32767之后覆盖整个capacity（`src/models/qwen3_5/program/planning/graph_profiles.cpp`），launcher按max_visible_keys选择gridY，kernel按实际window过滤inactive split。例如实际32768而容量786432时，约62个active split与254个grid槽位并存。现有反向映射使inactive槽位位于物理grid前部。先用同一输入、不同合法envelope测量，避免把不同context的数学工作量混入对照。
+- NVFP4/K8V4：host upper bound保留旧分段最高split数，而device按实际window选active数。它保证容量安全，但可能发射更多inactive CTA，暂未发现数值错误。本轮优先验证FP8；不将其结论推广至其他KV格式。
+
+最低成本实施是让已有公共Op benchmark显式接受较宽execution envelope，并记录该参数；不修改产品调度或数学。宽envelope测量由单一worker执行，另一个verifier只测已冻结生产代码的相邻分区边界。确认额外开销后再选择生产修复，保持absolute logical split、partial槽位及reduce顺序。此次新增排查尚未提交。
+
+
+### 扩展排查的聚焦结果
+
+当前生产代码仍为8c76e89，仅benchmark增加了 `--max-visible-keys` 参数，生产调度没有改动。Release sm89、CUDA12.8.61、RTX4090，公共FP8 append、H24/KV4、D256、Graph、warm、identity mapping，预热5次、31次计时。普通边界测量使用GPU0，宽envelope使用GPU1；不能混作同场绝对延迟比较。
+
+| 分区边界 | B1前后 µs | B8前后 µs | 判断 |
+|---:|---:|---:|---|
+| 10240 | 83.968 → 83.968 | 447.488 → 450.432 | B8 +0.66%，无明显跳变 |
+| 34816 | 194.496 → 193.536 | 1317.888 → 1320.960 | B8复测+0.23%；首轮异常未复现 |
+| 59392 | 278.528 → 278.400 | 1909.600 → 1923.008 | B8 +0.70%，无明显跳变 |
+
+每个边界使用context分别为边界−8、边界+8，T8的实际最大window还包含8个query列。34816的B8首轮曾下降7.45%，复测后消失，不作为可修复缺陷。29K的T2/T16亦完成：B1为153.600/362.496 µs，B8为899.072/2249.728 µs；不同宽度本来有不同工作量，不能据此计算改进收益或推断端到端吞吐。T16捕获7节点，T2捕获4节点。
+
+同一个context34824、T8输入（实际可见34832）在B1下的合法宽envelope对照：
+
+| max_visible_keys | 延迟中位数 µs | 相对精确envelope | workspace bytes |
+|---:|---:|---:|---:|
+| 34832 | 194.560 | — | 12979200 |
+| 131072 | 195.584 | +0.53% | 18725376 |
+| 786432 | 196.608 | +1.05% | 50428416 |
+
+B8补测同一输入的精确envelope与786432上界：1320.96 → 1340.42 µs（+1.47%），workspace由103833600增至403427328 bytes，两点均成功且无OOM。证据为 `envelope/b8-exact.csv` 与 `envelope/b8-wide786k.csv`。
+
+**扩展结论：在本轮测得的边界、宽度、batch与宽envelope场景，没有确认另一个需要立即修复的性能退化。** B1/B8下inactive CTA确有小幅成本，暂不支持修改生产调度。workspace明显增加，但宽envelope承诺图可服务更长输入，减少容量需要改变Graph分段契约；不是可以直接删掉的内存浪费。KV逻辑/物理capacity依法扩到envelope上限，不绕过公共Op校验；初始化和计时仍只使用真实可见输入。
+
+源码审计没有确认另一个数值bug。INT8有自己的绝对planner，不应照搬FP8改动；NVFP4/K8V4的overlaunch仍是未实测候选，本轮没有测试这些KV格式，也没有对其修改。完整命令、CSV和日志位于 `profiles/bench/pr25-fp8-similar-audit-2026-10-05/`，使用带identity后缀的正式边界CSV与 `envelope/`；早期探索行和失败的非法容量尝试不是通过证据。
+
+benchmark构建、过小上界拒绝、超过公开上限拒绝及新增help参数检查通过。原生产native FP8数值证据继续有效；本轮未重跑PPL、真实生成、旧实现、全套测试或CI。新增benchmark和报告留工作区，未提交或推送。
