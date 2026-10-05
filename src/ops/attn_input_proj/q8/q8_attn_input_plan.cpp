@@ -58,7 +58,7 @@ constexpr std::array<RouteSpec, 9> kCompanionRoutes{{
 //
 // DFlash2MmaR16C64K128 is no longer selected at any width -- it never won one. It is kept rather
 // than deleted so the next catch-up merge does not have to re-add it.
-constexpr std::array<RouteSpec, 8> kDFlash2Routes{{
+constexpr std::array<RouteSpec, 8> kDFlash2RoutesSm86{{
     {1, 16, Q8AttnInputScheduleId::DFlash2SmallT},
     {17, 32, Q8AttnInputScheduleId::DFlash2MmaR32C32K128},
     {33, 64, Q8AttnInputScheduleId::DFlash2MmaR32C64K128},
@@ -68,6 +68,29 @@ constexpr std::array<RouteSpec, 8> kDFlash2Routes{{
     {160, 192, Q8AttnInputScheduleId::DFlash2MmaR32C64},
     {193, kAnyCols, Q8AttnInputScheduleId::DFlash2MmaR64C128},
 }};
+
+// Ada starts from the proven sm_86 mapping but owns an independent catalog from this point on.
+// The K7 production extents are exactly T8/T16/T32/T64: small-T owns T8/T16, C32-K128 owns
+// T32, and C64-K128 owns T64.  bench/ops/q8_dflash2_schedule_bench plus the sm89 qualification
+// driver measures every competing schedule at those four widths before this table is retuned.
+// Keeping a distinct table is intentional: 72 MiB L2 and 128 SMs make sm_86 crossovers
+// non-authoritative even though both devices execute the same instruction set.
+constexpr std::array<RouteSpec, 8> kDFlash2RoutesSm89{{
+    {1, 16, Q8AttnInputScheduleId::DFlash2SmallT},
+    {17, 32, Q8AttnInputScheduleId::DFlash2MmaR32C32K128},
+    {33, 64, Q8AttnInputScheduleId::DFlash2MmaR32C64K128},
+    {65, 96, Q8AttnInputScheduleId::DFlash2MmaR32C32K128},
+    {97, 128, Q8AttnInputScheduleId::DFlash2MmaR32C64K128},
+    {129, 159, Q8AttnInputScheduleId::DFlash2MmaR32C32K128},
+    {160, 192, Q8AttnInputScheduleId::DFlash2MmaR32C64},
+    {193, kAnyCols, Q8AttnInputScheduleId::DFlash2MmaR64C128},
+}};
+
+#if defined(NINFER_SM89)
+constexpr const auto& kDFlash2Routes = kDFlash2RoutesSm89;
+#else
+constexpr const auto& kDFlash2Routes = kDFlash2RoutesSm86;
+#endif
 
 template <std::size_t N>
 constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes) {

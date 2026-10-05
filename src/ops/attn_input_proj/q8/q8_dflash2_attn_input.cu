@@ -53,6 +53,26 @@ void launch_small(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, T
     CUDA_CHECK(cudaGetLastError());
 }
 
+template <int Columns>
+void launch_sm89_occ_small(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, Tensor& v,
+                           cudaStream_t stream) {
+    static_assert(Columns == 8 || Columns == 16);
+    using Schedule = Q8KSplitSchedule<4, Columns, 4, Q8KSplitScaleAccess::Shared>;
+    static_assert((kQueryRows % Schedule::kRowsPerCta) == 0);
+    static_assert((kKvRows % Schedule::kRowsPerCta) == 0);
+    const Output output{static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
+                        static_cast<__nv_bfloat16*>(v.data)};
+    constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
+    q8_ksplit_mma_kernel<Geometry, Columns, Schedule, Output, Q8KSplitStoreEpilogue,
+                         Q8KSplitIdentityRows, false, false>
+        <<<kBlocks, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output, Q8KSplitStoreEpilogue{},
+            Q8KSplitIdentityRows{}, Columns);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 template <bool Exact, std::size_t... I>
 constexpr auto make_small_launchers(std::index_sequence<I...>) {
     return std::array<Launch, sizeof...(I)>{&launch_small < Exact ? 1 + static_cast<int>(I)
@@ -143,6 +163,33 @@ void q8_dflash2_attn_input_mma_r32_c64_k128_launch(const Tensor& x, const Weight
     // Three-block launch bounds reduce register usage and keep all 384 decode CTAs in one wave.
     using Schedule = Q8RowSplitMmaGemmSchedule<32, 64, 16, 16, 3, 2, 128, 1>;
     launch_mma<Schedule>(x, w, q, k, v, stream);
+}
+
+void q8_dflash2_attn_input_sm89_occ_launch(const Tensor& x, const Weight& w, Tensor& q, Tensor& k,
+                                           Tensor& v, cudaStream_t stream) {
+    // These are candidate launch bounds, not a production route. Ada has 128 SMs and 48 resident
+    // warps per SM; the inherited sm86 schedules leave room to trade registers for another CTA at
+    // the K7 extents. The sweep decides whether that trade actually wins.
+    switch (x.ne[1]) {
+    case 8:
+        launch_sm89_occ_small<8>(x, w, q, k, v, stream);
+        return;
+    case 16:
+        launch_sm89_occ_small<16>(x, w, q, k, v, stream);
+        return;
+    case 32: {
+        using Schedule = Q8RowSplitMmaGemmSchedule<32, 32, 16, 16, 4, 2, 128, 1>;
+        launch_mma<Schedule>(x, w, q, k, v, stream);
+        return;
+    }
+    case 64: {
+        using Schedule = Q8RowSplitMmaGemmSchedule<32, 64, 16, 16, 4, 2, 128, 1>;
+        launch_mma<Schedule>(x, w, q, k, v, stream);
+        return;
+    }
+    default:
+        throw std::invalid_argument("Q8 DFlash2 sm89 occupancy candidate requires T=8,16,32,64");
+    }
 }
 
 } // namespace ninfer::ops::detail
