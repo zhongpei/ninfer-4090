@@ -239,6 +239,177 @@ void dispatch_dtype(const Tensor& projected, const Tensor& conv_weight, const Te
     }
 }
 
+template <bool ValueParent, int Tokens, class HistoryPublish>
+struct T2GdnFusedTilePublish {
+    static constexpr bool kIsTilePublish = true;
+    static constexpr int kChannels       = 10240;
+    static constexpr int kQkRows         = 4096;
+    static constexpr int kQueryRows      = 2048;
+    static constexpr int kKeyRows        = 2048;
+    static constexpr int kValueRows      = 6144;
+    static constexpr int kZRows          = 6144;
+
+    const __nv_bfloat16* conv_weight;
+    const __nv_bfloat16* state_read;
+    const std::int32_t* valid_columns;
+    const std::int32_t* initial_state_slots;
+    __nv_bfloat16* query;
+    __nv_bfloat16* key;
+    __nv_bfloat16* value;
+    __nv_bfloat16* z;
+    __nv_bfloat16* record;
+    HistoryPublish history_publish;
+
+    template <int TileCols, int RowsPerCta>
+    __device__ __forceinline__ void store_tile(const float* dense, int parent_row0, int local_row,
+                                               int live_columns) const {
+        static_assert(Tokens <= TileCols);
+        if (local_row >= RowsPerCta) return;
+        const int parent_row = parent_row0 + local_row;
+
+        if constexpr (ValueParent) {
+            if (parent_row >= kValueRows) {
+#pragma unroll
+                for (int token = 0; token < Tokens; ++token) {
+                    const float p = token < live_columns
+                                        ? dense[local_row * TileCols + token]
+                                        : 0.0F;
+                    z[static_cast<std::int64_t>(token) * kZRows + parent_row - kValueRows] =
+                        __float2bfloat16_rn(p);
+                }
+                return;
+            }
+        }
+
+        const int row = ValueParent ? kQkRows + parent_row : parent_row;
+        int valid = valid_columns == nullptr ? Tokens : valid_columns[0];
+        valid     = valid < 0 ? 0 : (valid > Tokens ? Tokens : valid);
+
+        constexpr std::int64_t slot_stride = static_cast<std::int64_t>(kChannels) * 3;
+        const std::int64_t initial_base =
+            static_cast<std::int64_t>(initial_state_slots[0]) * slot_stride;
+        float s0       = __bfloat162float(state_read[initial_base + row]);
+        float s1       = __bfloat162float(state_read[initial_base + kChannels + row]);
+        float s2       = __bfloat162float(state_read[initial_base + 2LL * kChannels + row]);
+        const float w0 = __bfloat162float(conv_weight[row]);
+        const float w1 = __bfloat162float(conv_weight[kChannels + row]);
+        const float w2 = __bfloat162float(conv_weight[2LL * kChannels + row]);
+        const float w3 = __bfloat162float(conv_weight[3LL * kChannels + row]);
+
+#pragma unroll
+        for (int token = 0; token < Tokens; ++token) {
+            const float p = token < live_columns ? dense[local_row * TileCols + token] : 0.0F;
+            if (record != nullptr) {
+                record[static_cast<std::int64_t>(token) * kChannels + row] =
+                    __float2bfloat16_rn(p);
+            }
+            if (token >= valid) {
+                if (row < kQueryRows) {
+                    query[static_cast<std::int64_t>(token) * kQueryRows + row] =
+                        __float2bfloat16_rn(0.0F);
+                } else if (row < kQueryRows + kKeyRows) {
+                    key[static_cast<std::int64_t>(token) * kKeyRows + row - kQueryRows] =
+                        __float2bfloat16_rn(0.0F);
+                } else {
+                    value[static_cast<std::int64_t>(token) * kValueRows + row - kQueryRows -
+                          kKeyRows] = __float2bfloat16_rn(0.0F);
+                }
+                continue;
+            }
+
+            float conv = fmaf(w0, s0, 0.0F);
+            conv       = fmaf(w1, s1, conv);
+            conv       = fmaf(w2, s2, conv);
+            conv       = fmaf(w3, p, conv);
+            const __nv_bfloat16 output = __float2bfloat16_rn(silu(conv));
+            if (row < kQueryRows) {
+                query[static_cast<std::int64_t>(token) * kQueryRows + row] = output;
+            } else if (row < kQueryRows + kKeyRows) {
+                key[static_cast<std::int64_t>(token) * kKeyRows + row - kQueryRows] = output;
+            } else {
+                value[static_cast<std::int64_t>(token) * kValueRows + row - kQueryRows -
+                      kKeyRows] = output;
+            }
+
+            history_publish.publish(token, 0, row, s1, s2, p);
+            s0 = s1;
+            s1 = s2;
+            // Preserve the existing Bonsai A16 semantic boundary: the current p participates in
+            // this token's convolution at FP32 precision, then becomes observable BF16 history.
+            s2 = __bfloat162float(__float2bfloat16_rn(p));
+        }
+    }
+};
+
+template <bool ValueParent, int Tokens, class HistoryPublish>
+void launch_t2_gdn_fused_parent(const Tensor& x, const Weight& weight,
+                                const Tensor& conv_weight, const Tensor& state_read,
+                                const Tensor& valid_columns, const Tensor& initial_state_slots,
+                                Tensor& query, Tensor& key, Tensor& value, Tensor& z,
+                                Tensor* record, HistoryPublish history_publish,
+                                cudaStream_t stream) {
+    constexpr int kColumnTiles = Tokens <= 8 ? 1 : 2;
+    using Schedule = T2SmallTv2Schedule<4, 2, kColumnTiles, 2, 4>;
+    const dim3 grid(static_cast<unsigned>(weight.n / Schedule::kRows), 1u, 1u);
+    const T2GdnFusedTilePublish<ValueParent, Tokens, HistoryPublish> publish{
+        static_cast<const __nv_bfloat16*>(conv_weight.data),
+        static_cast<const __nv_bfloat16*>(state_read.data),
+        valid_columns.data == nullptr ? nullptr
+                                      : static_cast<const std::int32_t*>(valid_columns.data),
+        static_cast<const std::int32_t*>(initial_state_slots.data),
+        static_cast<__nv_bfloat16*>(query.data),
+        static_cast<__nv_bfloat16*>(key.data),
+        static_cast<__nv_bfloat16*>(value.data),
+        static_cast<__nv_bfloat16*>(z.data),
+        record == nullptr ? nullptr : static_cast<__nv_bfloat16*>(record->data),
+        history_publish,
+    };
+    t2_small_t_v2_kernel<Schedule><<<grid, Schedule::kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), nullptr, weight.n, weight.k, Tokens,
+        publish);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <int Tokens, class HistoryPublish>
+void launch_t2_gdn_fused_pair(const Tensor& x, const Weight& qk_weight,
+                              const Weight& value_z_weight, const Tensor& conv_weight,
+                              const Tensor& state_read, const Tensor& valid_columns,
+                              const Tensor& initial_state_slots, Tensor& query, Tensor& key,
+                              Tensor& value, Tensor& z, Tensor* record,
+                              HistoryPublish history_publish, cudaStream_t stream) {
+    launch_t2_gdn_fused_parent<false, Tokens>(
+        x, qk_weight, conv_weight, state_read, valid_columns, initial_state_slots, query, key,
+        value, z, record, history_publish, stream);
+    launch_t2_gdn_fused_parent<true, Tokens>(
+        x, value_z_weight, conv_weight, state_read, valid_columns, initial_state_slots, query, key,
+        value, z, record, history_publish, stream);
+}
+
+template <class Launch>
+void dispatch_t2_gdn_fused_width(int width, Launch&& launch) {
+    switch (width) {
+    case 1: launch.template operator()<1>(); return;
+    case 2: launch.template operator()<2>(); return;
+    case 3: launch.template operator()<3>(); return;
+    case 4: launch.template operator()<4>(); return;
+    case 5: launch.template operator()<5>(); return;
+    case 6: launch.template operator()<6>(); return;
+    case 7: launch.template operator()<7>(); return;
+    case 8: launch.template operator()<8>(); return;
+    case 9: launch.template operator()<9>(); return;
+    case 10: launch.template operator()<10>(); return;
+    case 11: launch.template operator()<11>(); return;
+    case 12: launch.template operator()<12>(); return;
+    case 13: launch.template operator()<13>(); return;
+    case 14: launch.template operator()<14>(); return;
+    case 15: launch.template operator()<15>(); return;
+    case 16: launch.template operator()<16>(); return;
+    default: throw std::invalid_argument("T2 fused GDN conv requires T in [1,16]");
+    }
+}
+
 template <bool ValueParent>
 struct T2GdnCurrentPublish {
     float* projected;
@@ -278,6 +449,38 @@ void launch_t2_current(const Tensor& x, const Weight& weight, Tensor& projected,
 }
 
 } // namespace
+
+void gdn_t2_conv_snapshot_fused_launch(
+    const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+    const Tensor& conv_weight, Tensor& conv_states, const Tensor& valid_columns,
+    const Tensor& initial_state_slots, const Tensor& snapshot_base_slots,
+    Tensor& query, Tensor& key, Tensor& value, Tensor& z, cudaStream_t stream) {
+    const SnapshotHistoryPublish history{
+        static_cast<__nv_bfloat16*>(conv_states.data),
+        static_cast<const std::int32_t*>(snapshot_base_slots.data),
+        10240,
+    };
+    const auto launch = [&]<int Tokens>() {
+        launch_t2_gdn_fused_pair<Tokens>(
+            x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+            initial_state_slots, query, key, value, z, nullptr, history, stream);
+    };
+    dispatch_t2_gdn_fused_width(x.ne[1], launch);
+}
+
+void gdn_t2_conv_record_fused_launch(
+    const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+    const Tensor& conv_weight, const Tensor& conv_states, const Tensor& valid_columns,
+    const Tensor& initial_state_slots, Tensor& conv_record,
+    Tensor& query, Tensor& key, Tensor& value, Tensor& z, cudaStream_t stream) {
+    const NoHistoryPublish history{};
+    const auto launch = [&]<int Tokens>() {
+        launch_t2_gdn_fused_pair<Tokens>(
+            x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns,
+            initial_state_slots, query, key, value, z, &conv_record, history, stream);
+    };
+    dispatch_t2_gdn_fused_width(x.ne[1], launch);
+}
 
 void gdn_t2_current_projection_launch(const Tensor& x, const Weight& qk_weight,
                                       const Weight& value_z_weight, Tensor& projected, Tensor& z,
