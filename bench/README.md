@@ -227,7 +227,7 @@ ninfer_bench --weights <artifact.ninfer>
           [-n, --n-gen <list>]
           [-pg, --prompt-gen <P,G;P,G...>]
           [-r, --repetitions <n>] [--warmup <n>]
-          [--max-ctx <tokens>] [--prefill-chunk <tokens>]
+          [--max-ctx <tokens>] [--prefill-chunk <tokens|auto>]
           [--kv-dtype <bf16|int8|fp8|nvfp4|k8v4>]
           [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--lm-head-draft]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
@@ -235,6 +235,16 @@ ninfer_bench --weights <artifact.ninfer>
 ```
 
 With no `-p`, `-n`, or `-pg`, the matrix is `pp512` and `tg128`.
+
+`--prefill-chunk` defaults to fixed 1024. Numeric values keep the existing behavior; `auto`
+selects the largest safe physical chunk at startup from 8192/6144/4096/3072/2048/1536/1024
+without reducing the KV capacity resolved with a 1024-token baseline. The table reports
+`prefill_chunk=auto->N`; JSON `config.prefill_chunk` and CSV `prefill_chunk` contain the resolved
+numeric chunk, and JSON `config.prefill_chunk_auto` records whether Auto was requested.
+Independent root requests measure isolated prefill using that physical capacity. Concurrent
+serving limits Auto prefill services to at most 2048 tokens when decode is runnable; see
+[automatic prefill chunk](../docs/maintainer/auto-prefill-chunk.md) for the qualification matrix
+and scheduling contract.
 
 Example:
 
@@ -297,7 +307,9 @@ kind, KV dtype, and speculative backend do not select different coefficients; an
 create are represented by those two physical quantities. For a suffix `S` after prefix `B`,
 `attention_pairs = B*S + S*(S+1)/2`. `chunks` is the sum of
 `ceil(segment_tokens/prefill_chunk)` across the actual prefill schedule's capture/rewrite segments;
-with no such boundary it is simply `ceil(S/prefill_chunk)`.
+with no such boundary it is simply `ceil(S/prefill_chunk)`. Here `prefill_chunk` is the resolved
+physical chunk, including in Auto mode. Context-cache machine cost does not use Auto's separate
+2048-token scheduler service cap.
 
 Build the tool, then measure machine transfer without a model:
 

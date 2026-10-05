@@ -83,6 +83,9 @@ struct SequencePlanningInputs {
     std::uint32_t capacity                  = 0;
     std::uint32_t max_concurrency           = 1;
     std::uint32_t prefill_chunk             = 0;
+    // Scheduler/accounting quantum. Fixed mode equals prefill_chunk. Auto keeps the larger
+    // physical workspace but plans service in smaller units so decode can interleave safely.
+    std::uint32_t prefill_service_chunk     = 0;
     std::uint32_t draft_window              = 0;
     std::uint32_t lookup_ngram             = 0;
     LookupDraftOptions lookup_options;
@@ -112,6 +115,7 @@ struct SequencePlanImpl {
     std::uint32_t main_page_groups          = 0;
     std::uint32_t max_concurrency           = 1;
     std::uint32_t prefill_chunk             = 0;
+    std::uint32_t prefill_service_chunk     = 0;
     std::uint32_t draft_window              = 0;
     std::uint32_t lookup_ngram             = 0;
     LookupDraftOptions lookup_options;

@@ -714,6 +714,7 @@ private:
 struct PrefillProgress {
     runtime::BeginSummary summary;
     std::uint32_t processed_prompt_tokens = 0;
+    std::uint64_t service_work_quanta     = 1;
     bool complete                         = false;
     runtime::ExecutionTiming timing;
     std::optional<PendingBatch> pending;
@@ -894,7 +895,8 @@ public:
     // window; the Engine gives that lane no prefill unit until it completes.
     [[nodiscard]] bool vision_pending(SequenceHandle sequence) const noexcept;
     [[nodiscard]] PrefillProgress
-    advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* failed_timing = nullptr);
+    advance_prefill(SequenceHandle sequence, runtime::ExecutionTiming* failed_timing = nullptr,
+                    std::uint32_t maximum_prompt_tokens = 0);
     [[nodiscard]] CaptureAssessment
     inspect_capture(const CaptureOffer& offer, const SharedPrefixHandle* exact_shared,
                     const SharedPrefixHandle* replacement,

@@ -57,8 +57,10 @@ other references own narrower contracts:
 | [TandemLLM 24GB adoption status](maintainer/tandem-adoption-24g.md) | final adopted scope, native teacher loop, memory policy and deliberate non-goals |
 | [Speculative A/B testing](maintainer/speculative-ab-testing.md) | alternating CLI/server A/B, exact-output gates, multi-workload/KV/concurrency matrix |
 | [Adaptive speculative routing](maintainer/speculative-routing.md) | fixed-vs-Stair A/B policy, verify-cost calibration and per-request online learning |
+| [sm_89 kernel routing](maintainer/sm89-kernel-routing.md) | architecture-specific route catalogs, Ada K7 candidates and route measurement |
 | [Multi-source lookup drafting](maintainer/lookup-drafting.md) | recent/vote suffix memory, persistent/corpus sources, DFlash replace/head-skip and deep copy |
 | [Resource scheduling and context cache](maintainer/resource-scheduling-and-context-cache.md) | candidate selection, retention, materialization and Device/Host checkpoint policy |
+| [Automatic prefill chunk](maintainer/auto-prefill-chunk.md) | startup physical chunk selection, protected KV capacity and decode interleave service limits |
 | [Paged KV context store](maintainer/paged-kv-cache.md) | typed pools, pages, replicas, address spaces, reservations and consumer views |
 | [ReplaySSM GDN](maintainer/replayssm-gdn.md) | raw transition records and faithful commitment of the verified state prefix |
 | [Op development](maintainer/op-development.md) | semantic boundaries, source ownership, numerical qualification and performance evidence |

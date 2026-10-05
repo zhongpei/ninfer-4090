@@ -297,8 +297,8 @@ std::string usage_text(std::string_view program) {
         << "  --warmup <n>                discarded repetitions (default: " << kDefaultWarmup
         << ")\n"
         << "  --max-ctx <tokens>          override auto-sized context capacity\n"
-        << "  --prefill-chunk <tokens>    multiple of " << kPrefillChunkAlignment
-        << " (default: " << kDefaultPrefillChunk << ")\n"
+        << "  --prefill-chunk <tokens|auto>  fixed multiple of " << kPrefillChunkAlignment
+        << " or VRAM-aware auto (default: " << kDefaultPrefillChunk << ")\n"
         << "  --kv-dtype <bf16|int8|fp8|rk8v4|nvfp4|k8v4>  KV cache storage (default: bf16)\n"
         << "  --spec <mtp|dflash|dflash2> speculative backend (default: none)\n"
         << "  --draft-tokens <n>         MTP 1..5; DFlash/DFlash2 1..15\n"
@@ -356,7 +356,14 @@ BenchOptions parse_args(int argc, char** argv) {
         } else if (arg == "--max-ctx") {
             options.max_context = parse_u32(value("--max-ctx"), "max-ctx");
         } else if (arg == "--prefill-chunk") {
-            options.prefill_chunk = parse_u32(value("--prefill-chunk"), "prefill-chunk");
+            const std::string selected = value("--prefill-chunk");
+            if (selected == "auto") {
+                options.prefill_chunk_auto = true;
+                options.prefill_chunk = kMaximumAutoPrefillChunk;
+            } else {
+                options.prefill_chunk_auto = false;
+                options.prefill_chunk = parse_u32(selected, "prefill-chunk");
+            }
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value("--kv-dtype"));
         } else if (arg == "--spec") {
@@ -397,8 +404,8 @@ BenchOptions parse_args(int argc, char** argv) {
         }
     }
     if (!saw_artifact) { throw std::invalid_argument("--weights is required"); }
-    if (options.prefill_chunk % kPrefillChunkAlignment != 0) {
-        throw std::invalid_argument("--prefill-chunk must be a multiple of 128");
+    if (options.prefill_chunk == 0 || options.prefill_chunk % kPrefillChunkAlignment != 0) {
+        throw std::invalid_argument("--prefill-chunk must be auto or a positive multiple of 128");
     }
     product::validate_speculative_cli_options(options.speculative);
     return options;
@@ -608,7 +615,8 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
         << format_bytes(env.memory.cuda_graph_allowance_bytes) << ", KV payload "
         << format_bytes(env.memory.kv_payload_bytes) << '\n'
         << "  corpus:     " << env.corpus_path << " (" << env.corpus_tokens << " tokens)\n"
-        << "  config:     max_context=" << env.max_context << " prefill_chunk=" << env.prefill_chunk
+        << "  config:     max_context=" << env.max_context << " prefill_chunk="
+        << (env.prefill_chunk_auto ? "auto->" : "") << env.prefill_chunk
         << " kv_cache=" << kv_cache_name(env.kv_cache)
         << " spec=" << product::speculative_backend_name(env.speculative.backend)
         << " draft_tokens=" << env.speculative.draft_tokens
@@ -725,6 +733,8 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "  },\n"
         << "  \"config\": {\n"
         << "    \"max_context\": " << env.max_context << ",\n"
+        << "    \"prefill_chunk_auto\": " << (env.prefill_chunk_auto ? "true" : "false") << ",\n"
+        << "    \"requested_prefill_chunk\": " << env.requested_prefill_chunk << ",\n"
         << "    \"prefill_chunk\": " << env.prefill_chunk << ",\n"
         << "    \"kv_cache\": \"" << kv_cache_name(env.kv_cache) << "\",\n"
         << "    \"speculative_backend\": \""

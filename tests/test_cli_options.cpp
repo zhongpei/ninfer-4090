@@ -33,6 +33,22 @@ int check(bool condition, const char* message) {
 
 int main() {
     int failures = calibrated_product_options_cases(parse, {"ninfer-cli", "model.ninfer", "--prompt", "hello"}, ninfer::cli::usage_text("ninfer-cli"));
+    const ninfer::cli::Options auto_prefill =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--prefill-chunk", "auto"});
+    failures += check(auto_prefill.prefill_chunk_auto &&
+                          auto_prefill.prefill_chunk == ninfer::kMaximumAutoPrefillChunk,
+                      "--prefill-chunk auto did not select the bounded auto policy");
+    const ninfer::cli::Options fixed_prefill =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--prefill-chunk", "4096"});
+    failures += check(!fixed_prefill.prefill_chunk_auto && fixed_prefill.prefill_chunk == 4096,
+                      "explicit --prefill-chunk no longer selects a fixed chunk");
+    failures += check(ninfer::cli::usage_text("ninfer-cli").find("N|auto") != std::string::npos,
+                      "CLI help omits the automatic prefill chunk form");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--prefill-chunk", "1000"});
+                      }),
+                      "CLI accepted a non-128-aligned prefill chunk");
     const ninfer::cli::Options configured =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--thinking-budget", "37"});
     failures += check(configured.thinking_budget == 37,

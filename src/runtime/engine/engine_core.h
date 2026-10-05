@@ -69,6 +69,12 @@ public:
           max_outstanding_(static_cast<std::size_t>(options.max_concurrency) +
                            options.max_pending_requests),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
+          prefill_chunk_auto_(options.prefill_chunk_auto),
+          prefill_service_chunk_(std::min(
+              options.max_context,
+              options.prefill_chunk_auto
+                  ? std::min(options.prefill_chunk, kAutoPrefillInterleaveChunk)
+                  : options.prefill_chunk)),
           decode_round_observer_(options.decode_round_observer),
           resources_(max_concurrency_, options.context_cache.max_private_continuations.value(),
                      options.context_cache.max_shared_prefixes.value(),
@@ -1352,7 +1358,14 @@ private:
         ++cumulative_stats_.host_work.prefill_units;
         ++request->host_timing.prefill_units;
         cumulative_stats_.computed_prefill_tokens += progress.processed_prompt_tokens;
-        Scheduling::consume_service_work(*request, 1);
+        std::uint64_t service_work_quanta = 1;
+        if constexpr (requires { progress.service_work_quanta; }) {
+            service_work_quanta = progress.service_work_quanta;
+        }
+        if (service_work_quanta == 0) {
+            throw std::logic_error("prefill progress consumed zero service work");
+        }
+        Scheduling::consume_service_work(*request, service_work_quanta);
         if (!request->admitted_begin) {
             throw std::logic_error("prefill progress has no committed admission summary");
         }
@@ -1398,7 +1411,8 @@ private:
         progress.pending.reset();
     }
 
-    void run_prefill_step(const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start) {
+    void run_prefill_step(const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start,
+                          bool decode_runnable) {
         nvtx::ScopedRange prefill_range(nvtx::Name::Prefill, nvtx::Category::Prefill);
         EnginePhaseScope setup(*this, EngineHostPhase::CommitOutput);
         const auto prefill_lane = scheduler_.prefill_lane();
@@ -1413,8 +1427,22 @@ private:
         }
         setup.finish();
         ProgramCallScope program_call(*this);
-        auto progress =
-            instance_.program->advance_prefill(*request->sequence, &program_call.failed_timing());
+        const std::uint32_t prompt_budget =
+            prefill_chunk_auto_ && decode_runnable ? prefill_service_chunk_ : 0U;
+        auto progress = [&]() {
+            if constexpr (requires(Program& program, SequenceHandle sequence,
+                                   runtime::ExecutionTiming* timing, std::uint32_t budget) {
+                              program.advance_prefill(sequence, timing, budget);
+                          }) {
+                return instance_.program->advance_prefill(
+                    *request->sequence, &program_call.failed_timing(), prompt_budget);
+            } else {
+                // Keep EngineCore usable by narrow contract fixtures that implement the historical
+                // two-argument Program surface. Production Qwen3.5 takes the budgeted overload.
+                return instance_.program->advance_prefill(
+                    *request->sequence, &program_call.failed_timing());
+            }
+        }();
         program_call.finish(progress.timing);
         resolve_prefill_progress(request, std::move(progress), cancelled_at_unit_start);
         publish_runtime_stats();
@@ -2063,7 +2091,7 @@ private:
                 if (action == ExecutionAction::Prefill) {
                     set_host_work_class(HostWorkClass::Prefill);
                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
-                    run_prefill_step(cancelled_at_unit_start);
+                    run_prefill_step(cancelled_at_unit_start, !membership.empty());
                     previous_unit_was_decode = false;
                     continue;
                 }
@@ -2098,6 +2126,8 @@ private:
     const std::uint32_t max_concurrency_;
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;
+    const bool prefill_chunk_auto_;
+    const std::uint32_t prefill_service_chunk_;
     const DecodeRoundObserver decode_round_observer_;
     ResourceManagement resources_;
 

@@ -713,9 +713,11 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
 }
 
 runtime::PrefillStepResult
-ProgramImpl::advance_prefill_raw(std::uint32_t lane, runtime::ExecutionTiming* failed_timing) {
+ProgramImpl::advance_prefill_raw(std::uint32_t lane, runtime::ExecutionTiming* failed_timing,
+                                 std::uint32_t maximum_prompt_tokens) {
     if (lane >= max_concurrency) { throw std::out_of_range("request lane is out of range"); }
-    return advance_prefill(active_sequence(lane), requests[lane], failed_timing);
+    return advance_prefill(active_sequence(lane), requests[lane], failed_timing,
+                           maximum_prompt_tokens);
 }
 
 runtime::ExecutionTiming ProgramImpl::resolve_prefill_raw(std::uint32_t lane, bool terminal,
@@ -1098,9 +1100,9 @@ void ProgramImpl::record_dflash_teacher_chunk(
         std::span<const float>(host_top_scores));
 }
 
-runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
-                                                        RequestControl& request,
-                                                        runtime::ExecutionTiming* failed_timing) {
+runtime::PrefillStepResult ProgramImpl::advance_prefill(
+    SequenceState& sequence, RequestControl& request, runtime::ExecutionTiming* failed_timing,
+    std::uint32_t maximum_prompt_tokens) {
     runtime::ExecutionTimingRecorder timing(runtime::ExecutionTimingPhase::Submit, failed_timing);
     if (request.lifecycle != Lifecycle::Prefilling || !request.prefill) {
         throw std::logic_error("staged prefill step requires an active concurrent request");
@@ -1114,6 +1116,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                                         .reused_prompt_tokens = staged.base,
                                         .prefix_reuse_path    = staged.reuse};
     std::uint32_t processed_prompt_tokens = 0;
+    std::uint64_t service_work_quanta     = 0;
     const auto started                    = Clock::now();
     try {
         if (staged.next_capture < staged.capture_groups.size() &&
@@ -1199,8 +1202,14 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         }
 
         if (staged.cursor < staged.prompt_tokens) {
+            const std::uint32_t execution_chunk =
+                maximum_prompt_tokens == 0 ? prefill_chunk
+                                           : std::min(prefill_chunk, maximum_prompt_tokens);
+            if (execution_chunk == 0) {
+                throw std::logic_error("prefill execution budget must be positive");
+            }
             const std::uint32_t nominal =
-                std::min(prefill_chunk, staged.prompt_tokens - staged.cursor);
+                std::min(execution_chunk, staged.prompt_tokens - staged.cursor);
             mark_workspace_usage(staged.prepare_mtp ? workspace_plan.mtp_prefill
                                                     : workspace_plan.text_prefill);
             if (is_masked_draft_backend(speculative_backend)) {
@@ -1259,6 +1268,9 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 if (result.processed_tokens == 0 || result.processed_tokens > remaining) {
                     throw std::logic_error("ordinary prefill chunk made invalid progress");
                 }
+                service_work_quanta +=
+                    1ULL + (static_cast<std::uint64_t>(result.processed_tokens) - 1ULL) /
+                               prefill_service_chunk;
                 if (staged.vision) { staged.vision->release_encoded_media_payloads(); }
                 staged.cursor += result.processed_tokens;
                 processed_prompt_tokens += result.processed_tokens;
@@ -1287,6 +1299,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                         return runtime::PrefillStepResult{
                             .summary                 = summary,
                             .processed_prompt_tokens = processed_prompt_tokens,
+                            .service_work_quanta     = std::max<std::uint64_t>(1, service_work_quanta),
                             .timing                  = timing.finish(),
                         };
                     }
@@ -1305,6 +1318,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 return runtime::PrefillStepResult{
                     .summary                 = summary,
                     .processed_prompt_tokens = processed_prompt_tokens,
+                    .service_work_quanta     = std::max<std::uint64_t>(1, service_work_quanta),
                     .timing                  = timing.finish(),
                 };
             }
@@ -1409,6 +1423,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             .summary = summary,
             .round   = runtime::GeneratedRound{.tokens = std::span<const TokenId>(host_tokens, 1)},
             .processed_prompt_tokens = processed_prompt_tokens,
+            .service_work_quanta     = std::max<std::uint64_t>(1, service_work_quanta),
             .complete                = true,
             .timing                  = timing.finish(),
         };

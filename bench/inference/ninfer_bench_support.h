@@ -61,6 +61,7 @@ struct BenchOptions {
     int warmup      = kDefaultWarmup;
     std::optional<std::uint32_t> max_context;
     std::uint32_t prefill_chunk = kDefaultPrefillChunk;
+    bool prefill_chunk_auto = false;
     KvCacheStorage kv_cache     = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     int device            = 0;
@@ -106,6 +107,8 @@ struct BenchEnvironment {
 
     std::uint32_t max_context   = 0;
     std::uint32_t prefill_chunk = kDefaultPrefillChunk;
+    bool prefill_chunk_auto     = false;
+    std::uint32_t requested_prefill_chunk = kDefaultPrefillChunk;
     KvCacheStorage kv_cache     = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     bool use_cuda_graph                            = true;

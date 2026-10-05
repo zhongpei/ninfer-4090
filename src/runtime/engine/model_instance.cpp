@@ -8,6 +8,7 @@
 #include "models/qwen3_5/measurement.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <set>
 #include <mutex>
@@ -53,6 +54,12 @@ void validate_options(const EngineOptions& options) {
     }
     if (options.max_pending_requests == 0 || options.pending_timeout_ms == 0) {
         throw std::invalid_argument("Engine pending request capacity and timeout must be nonzero");
+    }
+    if (options.prefill_chunk == 0 || options.prefill_chunk % 128 != 0) {
+        throw std::invalid_argument("Engine prefill_chunk must be a positive multiple of 128");
+    }
+    if (options.prefill_chunk_auto && options.prefill_chunk > kMaximumAutoPrefillChunk) {
+        throw std::invalid_argument("Engine automatic prefill chunk exceeds its maximum rung");
     }
     if (options.enable_vision && options.media_live_bytes == 0) {
         throw std::invalid_argument(
@@ -106,6 +113,71 @@ std::size_t current_free_device_bytes() {
     return free_bytes;
 }
 
+constexpr std::array<std::uint32_t, 7> kAutoPrefillRungs{
+    8192, 6144, 4096, 3072, 2048, 1536, 1024,
+};
+constexpr std::size_t kExplicitAutoPrefillHeadroomBytes = 256ULL << 20;
+
+EngineOptions resolve_auto_prefill_options(const execution::Parameters& parameters,
+                                           DeviceContext& device,
+                                           const EngineOptions& source,
+                                           std::size_t available_after_weights,
+                                           std::uint32_t* preserved_main_page_groups) {
+    if (preserved_main_page_groups != nullptr) { *preserved_main_page_groups = 0; }
+    if (!source.prefill_chunk_auto) { return source; }
+
+    // Establish the capacity contract at the historical 1024-token chunk first. Auto prefill is
+    // allowed to spend only otherwise-unused runtime memory; it must never buy a larger GEMM tile
+    // by shrinking the KV capacity that the same startup configuration would have received before
+    // this feature existed.
+    EngineOptions baseline = source;
+    baseline.prefill_chunk = kDefaultPrefillChunk;
+    auto baseline_planner =
+        models::qwen3_5::make_sequence_planner(parameters, device, baseline);
+    const auto baseline_resolution =
+        resolve_kv_capacity(baseline.kv_capacity, baseline_planner.capacity_curve(),
+                            available_after_weights);
+    const std::uint32_t target_pages = baseline_resolution.main_page_groups;
+    if (preserved_main_page_groups != nullptr) {
+        *preserved_main_page_groups = target_pages;
+    }
+
+    // Explicit KV has no built-in slack, so keep a modest allocation margin for CUDA/driver
+    // bookkeeping. Automatic KV already owns its configured headroom and that headroom must remain
+    // untouched while selecting the prefill rung.
+    std::size_t candidate_budget = available_after_weights;
+    if (source.kv_capacity.mode == KvCapacityMode::Explicit) {
+        candidate_budget =
+            available_after_weights > kExplicitAutoPrefillHeadroomBytes
+                ? available_after_weights - kExplicitAutoPrefillHeadroomBytes
+                : 0;
+    } else {
+        const std::size_t headroom = source.kv_capacity.automatic_headroom_bytes;
+        candidate_budget =
+            available_after_weights > headroom ? available_after_weights - headroom : 0;
+    }
+
+    for (const std::uint32_t rung : kAutoPrefillRungs) {
+        if (rung > source.prefill_chunk || rung > source.max_context) { continue; }
+        EngineOptions candidate = source;
+        candidate.prefill_chunk = rung;
+        auto planner = models::qwen3_5::make_sequence_planner(parameters, device, candidate);
+        const auto& curve = planner.capacity_curve();
+        if (target_pages < curve.minimum_main_page_groups ||
+            target_pages > curve.maximum_main_page_groups) {
+            continue;
+        }
+        if (curve.reservation_bytes(target_pages) <= candidate_budget) {
+            return candidate;
+        }
+    }
+
+    // The safety margin may reject every enlarged rung on a nearly-full explicit-KV startup.
+    // Preserve backwards compatibility by using the already-proven 1024 baseline against the real
+    // available bytes instead of failing a configuration that previously started successfully.
+    return baseline;
+}
+
 } // namespace
 
 EngineOptions normalize_engine_options(EngineOptions options) {
@@ -115,7 +187,8 @@ EngineOptions normalize_engine_options(EngineOptions options) {
     case EnginePurpose::CausalScoring:
         options.max_concurrency      = 1;
         options.max_pending_requests = 1;
-        options.prefill_chunk        = 1024;
+        options.prefill_chunk        = kDefaultPrefillChunk;
+        options.prefill_chunk_auto   = false;
         options.kv_capacity          = KvCapacityPolicy::explicit_capacity(options.max_context);
         options.speculative          = {};
         options.enable_vision        = false;
@@ -219,9 +292,19 @@ ConstructedModel prepare_model(const EngineOptions& options, DeviceContext& devi
                 context_cost_hardware_class(device.props.name, device.props.major, device.props.minor),
             .prefill_signature = signature},
         options.context_cost.preset_path);
-    auto planner    = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
-    auto resolution = resolve_kv_capacity(options.kv_capacity, planner.capacity_curve(),
-                                          current_free_device_bytes());
+    const std::size_t available_after_weights = current_free_device_bytes();
+    std::uint32_t preserved_main_page_groups = 0;
+    EngineOptions resolved_options =
+        resolve_auto_prefill_options(instance->parameters, device, options,
+                                     available_after_weights, &preserved_main_page_groups);
+    auto planner = models::qwen3_5::make_sequence_planner(instance->parameters, device,
+                                                           resolved_options);
+    auto resolution = resolve_kv_capacity(resolved_options.kv_capacity, planner.capacity_curve(),
+                                          available_after_weights);
+    if (options.prefill_chunk_auto &&
+        resolution.main_page_groups != preserved_main_page_groups) {
+        throw std::logic_error("automatic prefill chunk changed the baseline KV capacity");
+    }
     auto sequence   = std::move(planner).finalize(resolution.main_page_groups);
     if (sequence.device_reservation_bytes() != resolution.runtime_reservation_bytes ||
         sequence.kv_capacity() != resolution.resolved_tokens) {
@@ -230,18 +313,18 @@ ConstructedModel prepare_model(const EngineOptions& options, DeviceContext& devi
     std::optional<SpeculativeRoutingProfileIdentity> speculative_identity;
     if (options.speculative.backend == SpeculativeBackend::DFlash2 &&
         options.speculative.draft_tokens == 15) {
-        speculative_identity = routing_identity(options, instance->model->info().artifact_id,
+        speculative_identity = routing_identity(resolved_options, instance->model->info().artifact_id,
             signature, context_cost.summary.hardware_class, resolution.resolved_tokens);
     }
-    if (options.speculative.routing.mode == SpeculativeRoutingMode::Calibrated) {
+    if (resolved_options.speculative.routing.mode == SpeculativeRoutingMode::Calibrated) {
         sequence.set_calibrated_routing(load_calibrated_routing_profile(
-            options.speculative.routing.profile_path, *speculative_identity));
+            resolved_options.speculative.routing.profile_path, *speculative_identity));
     }
     instance->kv_capacity_resolution = resolution;
     planning.complete();
     StartupPhaseScope program(options.startup_observer, StartupPhase::ProgramInitialize);
     instance->program = models::qwen3_5::create_program(instance->parameters, std::move(sequence),
-                                                        device, options.startup_observer);
+                                                        device, resolved_options.startup_observer);
     device.synchronize();
     program.complete();
     instance->kv_capacity_resolution.available_after_startup_bytes = current_free_device_bytes();
@@ -268,7 +351,8 @@ ConstructedModel prepare_model(const EngineOptions& options, DeviceContext& devi
     summary.device_object_count  = stats.device_object_count;
     summary.host_object_count    = stats.host_object_count;
     summary.context_cost         = std::move(context_cost.summary);
-    return {std::move(instance), std::move(summary), std::move(context_cost.model)};
+    return {std::move(instance), std::move(summary), std::move(context_cost.model),
+            std::move(resolved_options)};
 }
 
 } // namespace
