@@ -51,25 +51,6 @@ std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens
             return Geometry::SmallTMaximumSplits;
         }
     }
-    // A 64-key default split just above a 32-key boundary makes the partial kernel execute a
-    // nearly empty second tile. T=5 uses one 32-key tile per split; the short T>=6 profile keeps
-    // all newly appended rows in one tail split while retaining a useful B=8 grid.
-    if (kv_storage_is_int8_family(storage) && tokens == 5 && window > 128 && window <= 512) {
-        return div_up(window, 32 / Geometry::SmallTSplitScale);
-    }
-    if (kv_storage_is_int8_family(storage) && tokens >= 6 && window > 128 && window <= 160) {
-        constexpr std::int32_t kKeysPerSplit = Geometry::SmallTSplitScale == 2 ? 17 : 24;
-        return div_up(window, kKeysPerSplit);
-    }
-    // Bc=64 is one CTA/SM on these model shapes. Keep the 8K grid at or below
-    // one 170-SM wave after accounting for the geometry's KV-head count.
-    if (kv_storage_is_int8_family(storage) && tokens >= 6 && window > 5000 && window <= 8198) {
-        const std::int32_t splits   = div_up(window, 192 / Geometry::SmallTSplitScale);
-        constexpr std::int32_t kMin = 4 * Geometry::SmallTSplitScale;
-        constexpr std::int32_t kMax = 42 * Geometry::SmallTSplitScale;
-        const std::int32_t clamped  = (splits > kMin) ? splits : kMin;
-        return (clamped < kMax) ? clamped : kMax;
-    }
     return causal_small_t_split_upper_bound<Geometry>(window);
 }
 
