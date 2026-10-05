@@ -513,7 +513,8 @@ public:
     // the lane must not be given a prefill unit, and every other lane keeps running.
     [[nodiscard]] bool vision_pending(SequenceHandle sequence) const noexcept;
     [[nodiscard]] PrefillProgress advance_prefill(SequenceHandle sequence,
-                                                  runtime::ExecutionTiming* failed_timing);
+                                                  runtime::ExecutionTiming* failed_timing,
+                                                  std::uint32_t maximum_prompt_tokens);
     [[nodiscard]] CaptureAssessment
     inspect_capture(const CaptureOffer& offer, const SharedPrefixHandle* exact_shared,
                     const SharedPrefixHandle* replacement,
@@ -581,6 +582,7 @@ public:
     const std::uint32_t continuation_capacity;
     const std::uint32_t shared_prefix_capacity;
     const std::uint32_t prefill_chunk;
+    const std::uint32_t prefill_service_chunk;
     const std::uint32_t draft_window;
     const std::uint32_t lookup_ngram;
     const LookupDraftOptions lookup_options;
@@ -998,7 +1000,8 @@ private:
                         MaterializationTransaction& transaction);
     void release_materialization_staging(MaterializationTransaction& transaction) noexcept;
     [[nodiscard]] runtime::PrefillStepResult
-    advance_prefill_raw(std::uint32_t lane, runtime::ExecutionTiming* failed_timing);
+    advance_prefill_raw(std::uint32_t lane, runtime::ExecutionTiming* failed_timing,
+                        std::uint32_t maximum_prompt_tokens);
     [[nodiscard]] runtime::BatchedGeneratedRound
     decode_raw(std::span<const std::uint32_t> lanes, std::span<const runtime::RoundBudget> budgets,
                runtime::ExecutionTiming* failed_timing);
@@ -1213,7 +1216,8 @@ private:
                                     runtime::ExecutionTiming* failed_timing);
     [[nodiscard]] runtime::PrefillStepResult
     advance_prefill(SequenceState& sequence, RequestControl& request,
-                    runtime::ExecutionTiming* failed_timing);
+                    runtime::ExecutionTiming* failed_timing,
+                    std::uint32_t maximum_prompt_tokens);
     void enqueue_dflash_context_append(std::span<const std::uint32_t> lanes,
                                        std::span<const std::uint32_t> starts,
                                        std::span<const std::uint32_t> counts);

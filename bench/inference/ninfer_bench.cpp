@@ -152,7 +152,8 @@ int main(int argc, char** argv) {
         engine_options.device        = options.device;
         engine_options.max_context   = max_context;
         engine_options.kv_capacity   = ninfer::KvCapacityPolicy::explicit_capacity(max_context);
-        engine_options.prefill_chunk = options.prefill_chunk;
+        engine_options.prefill_chunk      = options.prefill_chunk;
+        engine_options.prefill_chunk_auto = options.prefill_chunk_auto;
         engine_options.kv_cache      = options.kv_cache;
         engine_options.context_cache.enabled = false;
         engine_options.speculative           = options.speculative;
@@ -165,6 +166,8 @@ int main(int argc, char** argv) {
         env.artifact_path            = options.artifact_path;
         env.artifact_file_size_bytes = ninfer::bench::file_size_or_zero(options.artifact_path);
         env.max_context              = max_context;
+        env.requested_prefill_chunk  = options.prefill_chunk;
+        env.prefill_chunk_auto       = options.prefill_chunk_auto;
         env.prefill_chunk            = options.prefill_chunk;
         env.kv_cache                 = options.kv_cache;
         env.speculative              = options.speculative;
@@ -183,6 +186,7 @@ int main(int argc, char** argv) {
                   << ", kv_cache=" << ninfer::bench::kv_cache_name(options.kv_cache) << ")\n";
         ninfer::Engine engine(std::move(engine_options));
         fill_cuda_environment(env, options.device);
+        env.prefill_chunk = engine.options().prefill_chunk;
         env.load   = engine.load_summary();
         env.memory = engine.memory_summary();
 

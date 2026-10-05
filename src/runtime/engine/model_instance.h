@@ -37,6 +37,9 @@ struct ConstructedModel {
     std::unique_ptr<ModelInstance> instance;
     LoadSummary load;
     ContextMachineCostModel context_cost;
+    // Normalized startup options after hardware-dependent policies (currently auto prefill chunk)
+    // have resolved. Engine publishes these rather than the unresolved user sentinel/configuration.
+    EngineOptions resolved_options;
 };
 
 [[nodiscard]] ConstructedModel construct_model(const EngineOptions& options, DeviceContext& device);

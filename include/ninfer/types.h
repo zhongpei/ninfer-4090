@@ -308,6 +308,10 @@ struct DFlashTeacherOptions {
     [[nodiscard]] bool enabled() const noexcept { return !output_directory.empty(); }
 };
 
+inline constexpr std::uint32_t kDefaultPrefillChunk = 1024;
+inline constexpr std::uint32_t kMaximumAutoPrefillChunk = 8192;
+inline constexpr std::uint32_t kAutoPrefillInterleaveChunk = 2048;
+
 struct EngineOptions {
     std::filesystem::path artifact_path;
     std::filesystem::path chat_template_path;
@@ -323,7 +327,12 @@ struct EngineOptions {
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
-    std::uint32_t prefill_chunk        = 1024;
+    // Maximum physical prefill chunk. With prefill_chunk_auto=false this is the exact fixed
+    // execution/service chunk. Auto starts at kMaximumAutoPrefillChunk, resolves the largest
+    // VRAM-feasible rung after weights load, and uses kAutoPrefillInterleaveChunk as the service
+    // quantum when decode work is active so a long prompt does not monopolize the GPU.
+    std::uint32_t prefill_chunk        = kDefaultPrefillChunk;
+    bool prefill_chunk_auto            = false;
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     DFlashTeacherOptions dflash_teacher;

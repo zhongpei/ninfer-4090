@@ -22,7 +22,8 @@ struct Options {
     std::uint32_t max_new        = 128;
     std::uint32_t max_context    = 2048;
     KvCapacityPolicy kv_capacity = KvCapacityPolicy::explicit_capacity(2048);
-    std::uint32_t prefill_chunk  = 1024;
+    std::uint32_t prefill_chunk  = kDefaultPrefillChunk;
+    bool prefill_chunk_auto      = false;
     int device                   = 0;
     // Two ids enable the expert-offload split: rank 0 serves attention and holds the KV cache,
     // rank 1 holds the offloaded mlp/expert blocks. Empty means use `device`.

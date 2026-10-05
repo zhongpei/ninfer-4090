@@ -37,6 +37,35 @@ int main() {
     failures += check(calibrated_engine.speculative.routing.mode == ninfer::SpeculativeRoutingMode::Calibrated &&
                           calibrated_engine.speculative.routing.profile_path == "route.json",
                       "calibrated mode/profile did not reach Engine options");
+    const auto calibrated_auto =
+        parse({"ninfer-serve", "model.ninfer", "--prefill-chunk", "auto", "--spec", "dflash2",
+               "--draft-tokens", "15", "--spec-router", "calibrated",
+               "--spec-router-profile", "route.json"});
+    const auto calibrated_auto_engine = make_engine_options(calibrated_auto);
+    failures += check(calibrated_auto_engine.prefill_chunk_auto &&
+                          calibrated_auto_engine.speculative.routing.mode ==
+                              ninfer::SpeculativeRoutingMode::Calibrated,
+                      "automatic prefill policy did not compose with calibrated routing options");
+    const ServeOptions auto_prefill =
+        parse({"ninfer-serve", "model.ninfer", "--prefill-chunk", "auto"});
+    failures += check(auto_prefill.prefill_chunk_auto &&
+                          auto_prefill.prefill_chunk == ninfer::kMaximumAutoPrefillChunk,
+                      "--prefill-chunk auto did not select the bounded auto policy");
+    const ninfer::EngineOptions auto_engine = make_engine_options(auto_prefill);
+    failures += check(auto_engine.prefill_chunk_auto &&
+                          auto_engine.prefill_chunk == ninfer::kMaximumAutoPrefillChunk,
+                      "automatic prefill policy did not reach Engine options");
+    const ServeOptions fixed_prefill =
+        parse({"ninfer-serve", "model.ninfer", "--prefill-chunk", "4096"});
+    failures += check(!fixed_prefill.prefill_chunk_auto && fixed_prefill.prefill_chunk == 4096,
+                      "explicit server prefill chunk no longer stays fixed");
+    failures += check(serve_usage_text("ninfer-serve").find("N|auto") != std::string::npos,
+                      "serve help omits the automatic prefill chunk form");
+    bool bad_prefill_rejected = false;
+    try { (void)parse({"ninfer-serve", "model.ninfer", "--prefill-chunk", "1000"}); }
+    catch (const std::invalid_argument&) { bad_prefill_rejected = true; }
+    failures += check(bad_prefill_rejected,
+                      "serve accepted a non-128-aligned prefill chunk");
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
     failures += check(defaults.speculative.routing.scope == ninfer::SpeculativeRouterScope::Request,
                       "serve router state is shared across requests by default");

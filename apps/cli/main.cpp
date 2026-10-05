@@ -315,6 +315,7 @@ int main(int argc, char** argv) {
         engine_options.max_context              = cli.max_context;
         engine_options.kv_capacity              = cli.kv_capacity;
         engine_options.prefill_chunk            = cli.prefill_chunk;
+        engine_options.prefill_chunk_auto       = cli.prefill_chunk_auto;
         engine_options.kv_cache                 = cli.kv_cache;
         engine_options.speculative              = cli.speculative;
         engine_options.dflash_teacher.output_directory = cli.dflash_teacher_out;

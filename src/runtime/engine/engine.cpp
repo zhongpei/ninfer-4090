@@ -174,6 +174,7 @@ public:
                                                  : runtime::construct_model(options, device);
         active            = std::move(constructed.instance);
         load              = std::move(constructed.load);
+        options           = std::move(constructed.resolved_options);
         sampling_defaults = active->frontend.sampling_defaults();
         StartupPhaseScope finalize_phase(options.startup_observer, StartupPhase::EngineFinalize);
         if (options.purpose == EnginePurpose::CausalScoring) {

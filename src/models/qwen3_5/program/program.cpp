@@ -356,8 +356,9 @@ bool Program::vision_pending(SequenceHandle sequence) const noexcept {
 }
 
 PrefillProgress Program::advance_prefill(SequenceHandle sequence,
-                                         runtime::ExecutionTiming* failed_timing) {
-    return impl_->advance_prefill(sequence, failed_timing);
+                                         runtime::ExecutionTiming* failed_timing,
+                                         std::uint32_t maximum_prompt_tokens) {
+    return impl_->advance_prefill(sequence, failed_timing, maximum_prompt_tokens);
 }
 
 CaptureAssessment

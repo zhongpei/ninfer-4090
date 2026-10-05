@@ -119,7 +119,7 @@ ReasoningEffort parse_reasoning_effort(std::string_view text) {
 std::string usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
-           "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
+           "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N|auto] [--max-new N]\n"
            "       [--device N] [--devices N,M]\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N]\n"
            "       [--dflash-teacher-out DIR]\n"
@@ -227,7 +227,14 @@ Options parse_options(int argc, char** argv) {
             options.kv_capacity  = parse_kv_capacity(value(arg));
             kv_capacity_explicit = true;
         } else if (arg == "--prefill-chunk") {
-            options.prefill_chunk = parse_u32(value(arg), "prefill-chunk");
+            const std::string_view chunk = value(arg);
+            if (chunk == "auto") {
+                options.prefill_chunk_auto = true;
+                options.prefill_chunk = kMaximumAutoPrefillChunk;
+            } else {
+                options.prefill_chunk_auto = false;
+                options.prefill_chunk = parse_u32(chunk.data(), "prefill-chunk");
+            }
         } else if (arg == "--device") {
             options.device  = parse_device(value(arg));
             device_explicit = true;
@@ -427,8 +434,8 @@ Options parse_options(int argc, char** argv) {
     if (has_prompt == has_messages) {
         throw std::invalid_argument("pass exactly one of --prompt or --messages");
     }
-    if (options.prefill_chunk % 128 != 0) {
-        throw std::invalid_argument("--prefill-chunk must be a multiple of 128");
+    if (options.prefill_chunk == 0 || options.prefill_chunk % 128 != 0) {
+        throw std::invalid_argument("--prefill-chunk must be auto or a positive multiple of 128");
     }
     if (options.kv_capacity.mode == KvCapacityMode::Explicit &&
         options.kv_capacity.explicit_tokens < options.max_context) {

@@ -47,6 +47,7 @@ PrefillProgress ProgramImpl::wrap_prefill(std::uint32_t lane, runtime::PrefillSt
     PrefillProgress out;
     out.summary                 = step.summary;
     out.processed_prompt_tokens = step.processed_prompt_tokens;
+    out.service_work_quanta     = step.service_work_quanta;
     out.complete                = step.complete;
     out.timing                  = step.timing;
     if (step.complete) {

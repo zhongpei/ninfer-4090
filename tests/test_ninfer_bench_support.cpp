@@ -103,7 +103,16 @@ int test_cli_contract() {
                        "combined list");
     failures += expect(parsed.repetitions == 3 && parsed.warmup == 2, "repetition settings");
     failures += expect(parsed.max_context == std::optional<std::uint32_t>(4096), "max context");
-    failures += expect(parsed.prefill_chunk == 128, "prefill chunk");
+    failures += expect(parsed.prefill_chunk == 128 && !parsed.prefill_chunk_auto,
+                       "fixed prefill chunk");
+    const qb::BenchOptions auto_prefill =
+        parse_for_test({"ninfer_bench", "--weights", "model.ninfer",
+                        "--prefill-chunk", "auto"});
+    failures += expect(auto_prefill.prefill_chunk_auto &&
+                           auto_prefill.prefill_chunk == ninfer::kMaximumAutoPrefillChunk,
+                       "benchmark automatic prefill policy");
+    failures += expect(qb::usage_text("ninfer_bench").find("tokens|auto") != std::string::npos,
+                       "benchmark help omits automatic prefill");
     failures += expect(parsed.kv_cache == ninfer::KvCacheStorage::Int8Group64, "INT8 KV");
     failures += expect(parsed.speculative.draft_tokens == 5, "MTP window");
     failures += expect(parsed.speculative.proposal_head == ninfer::ProposalHead::Optimized,

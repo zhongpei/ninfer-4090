@@ -83,7 +83,10 @@ struct PrefillStepResult {
     BeginSummary summary;
     GeneratedRound round;
     std::uint32_t processed_prompt_tokens = 0;
-    bool complete                         = false;
+    // Admission/service accounting units consumed by this physical call. Fixed chunk execution
+    // is one. Auto may execute several service chunks at once when no decode round is runnable.
+    std::uint64_t service_work_quanta       = 1;
+    bool complete                           = false;
     ExecutionTiming timing;
 };
 

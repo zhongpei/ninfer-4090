@@ -74,7 +74,7 @@ std::string serve_usage_text(const char* argv0) {
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
-           "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
+           "[--prefill-chunk N|auto] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
@@ -255,8 +255,15 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.pending_timeout_ms = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--pending-timeout-ms"), "pending-timeout-ms"));
         } else if (arg == "--prefill-chunk") {
-            options.prefill_chunk = static_cast<std::uint32_t>(
-                parse_nonnegative_int(require_value("--prefill-chunk"), "prefill-chunk"));
+            const std::string_view chunk = require_value("--prefill-chunk");
+            if (chunk == "auto") {
+                options.prefill_chunk_auto = true;
+                options.prefill_chunk = kMaximumAutoPrefillChunk;
+            } else {
+                options.prefill_chunk_auto = false;
+                options.prefill_chunk = static_cast<std::uint32_t>(
+                    parse_nonnegative_int(chunk.data(), "prefill-chunk"));
+            }
         } else if (arg == "--context-cost-presets") {
             options.context_cost_presets = require_value("--context-cost-presets");
             if (options.context_cost_presets.empty()) {
@@ -596,7 +603,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--max-request-mib must be positive");
     }
     if (options.prefill_chunk == 0 || options.prefill_chunk % 128 != 0) {
-        throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
+        throw std::invalid_argument("--prefill-chunk must be auto or a positive multiple of 128");
     }
     product::validate_speculative_cli_options(options.speculative);
     if (options.vision_residency == VisionResidency::Overlay && !options.enable_vision) {

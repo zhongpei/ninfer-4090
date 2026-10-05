@@ -1011,8 +1011,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
         sequence.ledger_frontier    = request.pending.prompt_tokens + 1;
         break;
     case PendingKind::Ordinary:
-        advance_rebuild_work(sequence, request.pending.base_E + request.pending.produced,
-                             prefill_chunk);
+        advance_rebuild_work(sequence, request.pending.base_E + request.pending.produced, prefill_chunk);
         sequence.execution_frontier = request.pending.base_E + request.pending.produced;
         sequence.ledger_frontier    = request.pending.base_S + request.pending.produced;
         break;
