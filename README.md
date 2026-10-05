@@ -136,10 +136,11 @@ Enable that profile in the server with the matching configuration:
   --no-thinking --default-max-tokens 512
 ```
 
-Startup K15 retains the maximum drafter; the table then selects K0/K7/K11/K15 from actual
-batch and context frontier. Selected compute is enabled by the schema-2 profile's
-`"proposal_compute": "selected"`. There is no production `--proposal-compute selected`
-flag; that flag belongs to measurement tools. Unqualified or uncovered cells use K0.
+Startup K15 retains the maximum drafter; the schema-3 table then selects its K7 default or a
+qualified K0/K11 override from actual batch and context frontier. Selected compute is enabled by
+the profile's `"proposal_compute": "selected"`. There is no production
+`--proposal-compute selected` flag; that flag belongs to measurement tools. Unqualified or
+uncovered cells use K7.
 
 Keep the default A8 prefill, full proposal head and CUDA Graphs, with cache enabled and Vision
 and RoPE scaling disabled for this profile. Changing KV format, cache capacities, concurrency,
