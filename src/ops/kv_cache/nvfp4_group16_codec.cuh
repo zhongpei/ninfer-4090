@@ -78,27 +78,46 @@ kv_cache_nvfp4_quantize_group16(const float* source) {
     return result;
 }
 
+// E2M1 has only three magnitude bits. Placing those magnitude bits directly in FP16 bits
+// [11:9] represents exactly E2M1(code) * 2^-14, including the 0.5 subnormal at 2^-15. Multiplying
+// by 2^14 and the represented E4M3 group scale reconstructs the same FP16 value without routing
+// every nibble through CUDA's generic FP4 conversion path. Adapted from jram4/ninfer-4090
+// 11e269a2423b9712e1fe9b01f8fb32b7bf9c8d56, whose exhaustive 256-code x 256-scale test found
+// this expansion bit-identical and whose sm89 K8V4 attention measurements showed the conversion
+// pipe was a material bottleneck.
+__device__ __forceinline__ __half2
+kv_cache_nvfp4_e2m1x2_scaled_f16x2(std::uint32_t byte) {
+    const std::uint32_t bits = ((byte & 0x7U) << 9) | ((byte & 0x8U) << 12) |
+                               ((byte & 0x70U) << 21) | ((byte & 0x80U) << 24);
+    return *reinterpret_cast<const __half2*>(&bits);
+}
+
+__device__ __forceinline__ __half2 kv_cache_nvfp4_scale_f16x2(std::uint8_t scale_code) {
+    __nv_fp8_e4m3 encoded_scale;
+    encoded_scale.__x  = scale_code;
+    const __half scale = static_cast<__half>(encoded_scale);
+    return __halves2half2(scale, scale);
+}
+
+__device__ __forceinline__ unsigned kv_cache_nvfp4_dequant_f16x2(std::uint32_t byte,
+                                                                 __half2 scale2) {
+    const __half2 unit = __float2half2_rn(0x1p14F);
+    const __half2 value =
+        __hmul2(__hmul2(kv_cache_nvfp4_e2m1x2_scaled_f16x2(byte), unit), scale2);
+    return *reinterpret_cast<const unsigned*>(&value);
+}
+
 __device__ __forceinline__ int4 kv_cache_nvfp4_dequant_f16x8(const std::uint8_t* codes,
                                                              std::uint8_t scale_code) {
     // Every finite E2M1 value times a legal nonnegative E4M3 cache scale is exactly representable
     // in FP16 (at most four product fraction bits and magnitude <= 2688). Half2 multiplication is
     // therefore the exact FP16 expansion boundary, not an additional approximation.
     const std::uint32_t packed = load_vec<std::uint32_t>(codes);
-    const std::uint8_t* bytes  = reinterpret_cast<const std::uint8_t*>(&packed);
-    __nv_fp8_e4m3 encoded_scale;
-    encoded_scale.__x    = scale_code;
-    const __half scale   = static_cast<__half>(encoded_scale);
-    const __half2 scale2 = __halves2half2(scale, scale);
-    unsigned half_bits[4];
-#pragma unroll
-    for (int pair = 0; pair < 4; ++pair) {
-        __nv_fp4x2_e2m1 encoded;
-        encoded.__x         = bytes[pair];
-        const __half2 value = __hmul2(static_cast<__half2>(encoded), scale2);
-        half_bits[pair]     = *reinterpret_cast<const unsigned*>(&value);
-    }
-    return make_int4(static_cast<int>(half_bits[0]), static_cast<int>(half_bits[1]),
-                     static_cast<int>(half_bits[2]), static_cast<int>(half_bits[3]));
+    const __half2 scale2       = kv_cache_nvfp4_scale_f16x2(scale_code);
+    return make_int4(static_cast<int>(kv_cache_nvfp4_dequant_f16x2(packed, scale2)),
+                     static_cast<int>(kv_cache_nvfp4_dequant_f16x2(packed >> 8, scale2)),
+                     static_cast<int>(kv_cache_nvfp4_dequant_f16x2(packed >> 16, scale2)),
+                     static_cast<int>(kv_cache_nvfp4_dequant_f16x2(packed >> 24, scale2)));
 }
 
 // BF16 counterpart of kv_cache_nvfp4_dequant_f16x8, for QK MMA operands on hardware with no FP4
@@ -132,19 +151,14 @@ struct KVCacheNvfp4DequantizedF16x16 {
 
 __device__ __forceinline__ KVCacheNvfp4DequantizedF16x16
 kv_cache_nvfp4_dequant_f16x16(const std::uint8_t* codes, std::uint8_t scale_code) {
-    const int2 packed         = load_vec<int2>(codes);
-    const std::uint8_t* bytes = reinterpret_cast<const std::uint8_t*>(&packed);
-    __nv_fp8_e4m3 encoded_scale;
-    encoded_scale.__x    = scale_code;
-    const __half scale   = static_cast<__half>(encoded_scale);
-    const __half2 scale2 = __halves2half2(scale, scale);
+    const int2 packed    = load_vec<int2>(codes);
+    const __half2 scale2 = kv_cache_nvfp4_scale_f16x2(scale_code);
     unsigned half_bits[8];
 #pragma unroll
     for (int pair = 0; pair < 8; ++pair) {
-        __nv_fp4x2_e2m1 encoded;
-        encoded.__x         = bytes[pair];
-        const __half2 value = __hmul2(static_cast<__half2>(encoded), scale2);
-        half_bits[pair]     = *reinterpret_cast<const unsigned*>(&value);
+        const std::uint32_t word = static_cast<std::uint32_t>(pair < 4 ? packed.x : packed.y);
+        half_bits[pair] =
+            kv_cache_nvfp4_dequant_f16x2(word >> (8 * (pair & 3)), scale2);
     }
     return {
         make_int4(static_cast<int>(half_bits[0]), static_cast<int>(half_bits[1]),
