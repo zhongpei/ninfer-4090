@@ -23,8 +23,9 @@ The default evaluation uses a 4,096-token context and a 2,048-token stride. Use 
 KV representations are `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `rk4v4-e8`,
 `rk2v4-e8`, `nvfp4`, and `k8v4`.
 
-All six have been measured on this corpus; the results, alongside each format's size and decode
-speed, are in [`docs/config-calculator.html`](config-calculator.html).
+Historical fixed-window measurements for selected formats are in
+[`docs/config-calculator.html`](config-calculator.html). They do not qualify the new sm89 native
+FP8 arithmetic or every format listed above on Bonsai 27B.
 
 ```bash
 ./build/apps/ninfer-perplexity models/qwen3_8_27b.ninfer \
@@ -63,12 +64,18 @@ For example:
 
 ```bash
 ./build/apps/ninfer-perplexity models/Ternary-Bonsai-2-27B.ninfer \
-  --corpus eval/corpora/perplexity-1m/manifest.json \
+  --text /absolute/path/long-evaluation-stream.txt \
   --kv-dtype int8 \
   --depths 8192,32768,65536,131072,196608,258048 \
   --tail 2048 \
   --output profiles/perplexity/bonsai-int8-depth
 ```
+
+The bundled corpus streams are approximately 64K tokens each, with exact lengths determined by
+the artifact tokenizer. They cannot individually cover 128K–258K prefix depths. To test those
+depths, provide an explicitly constructed longer UTF-8 stream with `--text`, and record its source
+order and construction in the test report. Do not infer long-depth coverage from the manifest
+name.
 
 Depths beyond an individual corpus stream are omitted for that stream and every report records the
 exact stream/token coverage. The report schema is v3 and includes a `depths` table with token-weighted
@@ -80,7 +87,7 @@ For a complete KV A/B, use the matrix runner:
 python3 -m tools.bench.run_kv_long_context_perplexity \
   --exe ./build/apps/ninfer-perplexity \
   --model models/Ternary-Bonsai-2-27B.ninfer \
-  --corpus eval/corpora/perplexity-1m/manifest.json \
+  --text /absolute/path/long-evaluation-stream.txt \
   --out profiles/perplexity/bonsai-kv-depth
 ```
 
@@ -93,7 +100,7 @@ with the ordinary full-corpus fixed-window PPL table; the useful result is the *
 
 ## Metric
 
-For a stream `x[0..N)`, every token after `x[0]` is scored exactly once. A window `[b,e)` with target
+In fixed-window mode, for a stream `x[0..N)`, every token after `x[0]` is scored exactly once. A window `[b,e)` with target
 suffix `[s,e)` contributes:
 
 ```text

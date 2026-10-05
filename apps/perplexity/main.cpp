@@ -224,9 +224,9 @@ std::string kv_name(ninfer::KvCacheStorage value) {
     case ninfer::KvCacheStorage::BFloat16:
         return "bf16";
     case ninfer::KvCacheStorage::Int8Group64:
-        return "int8-g64";
+        return "int8";
     case ninfer::KvCacheStorage::Fp8E4M3Row256:
-        return "fp8-e4m3-r256";
+        return "fp8";
     case ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
         return "rk8v4";
     case ninfer::KvCacheStorage::RotatedInt4KeyInt4ValueGroup64:
@@ -525,6 +525,9 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
         {"prefill_chunk_tokens", 1024},
         {"score_tile_tokens", 1024},
         {"kv_dtype", kv_name(options.kv)},
+        {"prefill_a8", options.prefill_a8},
+        {"prefill_cublas", options.prefill_cublas},
+        {"prefill_cublas_projections", options.prefill_cublas_projections},
     };
     if (depth_mode) {
         execution["protocol"] = "fixed-depth-long-history";
@@ -535,6 +538,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
         execution["stride_tokens"] = options.stride;
     }
 
+    const ninfer::MemorySummary memory = engine.memory_summary();
     json report{
         {"schema_version", 3},
         {"metric",
@@ -554,6 +558,14 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
           {"source", corpus.source.string()},
           {"stream_count", streams.size()}}},
         {"execution", std::move(execution)},
+        {"resources",
+         {{"weights_capacity_bytes", memory.weights.capacity_bytes},
+          {"sequence_capacity_bytes", memory.sequence.capacity_bytes},
+          {"workspace_capacity_bytes", memory.workspace.capacity_bytes},
+          {"kv_capacity_tokens", memory.kv_capacity},
+          {"kv_payload_bytes", memory.kv_payload_bytes},
+          {"runtime_reservation_bytes", memory.runtime_reservation_bytes},
+          {"available_after_startup_bytes", memory.available_after_startup_bytes}}},
         {"timing",
          {{"load_seconds", load.load_seconds},
           {"read_and_tokenize_seconds", preflight_seconds},

@@ -68,8 +68,8 @@ def run_arm(args: argparse.Namespace, dtype: str, root: Path) -> dict:
         command.append("--no-prefill-a8")
     if args.prefill_cublas:
         command.append("--prefill-cublas")
-        if args.no_prefill_cublas_projections:
-            command.append("--no-prefill-cublas-projections")
+    if args.no_prefill_cublas_projections:
+        command.append("--no-prefill-cublas-projections")
 
     (arm_dir / "command.json").write_text(json.dumps(command, indent=2) + "\n", encoding="utf-8")
     started = time.perf_counter()
@@ -88,24 +88,59 @@ def run_arm(args: argparse.Namespace, dtype: str, root: Path) -> dict:
     execution = report.get("execution", {})
     if execution.get("protocol") != "fixed-depth-long-history":
         raise RuntimeError(f"{dtype}: evaluator did not run fixed-depth protocol")
+    if (execution.get("kv_dtype") != dtype or execution.get("prefix_depths") != args.depths
+            or execution.get("tail_tokens") != args.tail
+            or execution.get("prefill_a8") != (not args.no_prefill_a8)
+            or execution.get("prefill_cublas") != args.prefill_cublas
+            or execution.get("prefill_cublas_projections") != (not args.no_prefill_cublas_projections)
+            or Path(report.get("artifact", {}).get("path", "")).resolve() != args.model.resolve()):
+        raise RuntimeError(f"{dtype}: evaluator execution differs from requested arm")
 
     depths = {}
     for row in report.get("depths", []):
         depth = int(row["prefix_depth"])
+        if depth not in args.depths or depth in depths:
+            raise RuntimeError(f"{dtype}: unexpected or duplicate depth {depth}")
         depths[depth] = {
             "stream_count": int(row["stream_count"]),
             "scored_tokens": int(row["scored_tokens"]),
             "total_nll": float(row["total_nll"]),
             "mean_nll": float(row["mean_nll"]),
             "perplexity": float(row["perplexity"]),
+            "coverage": [],
         }
+        if (depths[depth]["scored_tokens"] <= 0 or depths[depth]["stream_count"] <= 0
+                or not all(math.isfinite(depths[depth][key])
+                           for key in ("total_nll", "mean_nll", "perplexity"))):
+            raise RuntimeError(f"{dtype}: invalid score at depth {depth}")
+    for stream in report.get("streams", []):
+        for window in stream["windows"]:
+            depth = int(window["prefix_depth"])
+            coverage = [stream["id"], window["input_begin"], window["input_end"],
+                        window["target_begin"], window["target_end"], window["first_target"]]
+            if (depth not in depths or coverage[1] != 0 or coverage[3] != depth
+                    or coverage[5] != depth or coverage[2] != coverage[4]
+                    or not depth < coverage[4] <= depth + args.tail):
+                raise RuntimeError(f"{dtype}: invalid long-history target coverage")
+            depths[depth]["coverage"].append(coverage)
+    for depth, row in depths.items():
+        row["coverage"].sort()
+        if (len(row["coverage"]) != row["stream_count"]
+                or len({item[0] for item in row["coverage"]}) != row["stream_count"]
+                or sum(item[4] - item[3] for item in row["coverage"]) != row["scored_tokens"]):
+            raise RuntimeError(f"{dtype}: inconsistent coverage at depth {depth}")
     if not depths:
         raise RuntimeError(f"{dtype}: no requested depth had score coverage")
+    missing_depths = sorted(set(args.depths) - depths.keys())
+    if missing_depths:
+        raise RuntimeError(f"{dtype}: requested depths without score coverage: {missing_depths}")
     return {
         "dtype": dtype,
         "seconds": time.perf_counter() - started,
         "depths": depths,
         "overall": report["overall"],
+        "execution": execution,
+        "resources": report.get("resources", {}),
         "report": str(report_path.resolve()),
     }
 
@@ -113,6 +148,9 @@ def run_arm(args: argparse.Namespace, dtype: str, root: Path) -> dict:
 def compare(arms: list[dict]) -> dict:
     baseline = arms[0]
     base_depths = baseline["depths"]
+    for arm in arms:
+        if arm["depths"].keys() != base_depths.keys():
+            raise RuntimeError(f"{arm['dtype']}: depth coverage differs from {baseline['dtype']}")
     rows = []
     for depth in sorted(base_depths):
         base = base_depths[depth]
@@ -120,8 +158,8 @@ def compare(arms: list[dict]) -> dict:
             if depth not in arm["depths"]:
                 raise RuntimeError(f"{arm['dtype']}: missing baseline depth {depth}")
             row = arm["depths"][depth]
-            if (row["scored_tokens"], row["stream_count"]) != (
-                base["scored_tokens"], base["stream_count"]
+            if (row["scored_tokens"], row["stream_count"], row["coverage"]) != (
+                base["scored_tokens"], base["stream_count"], base["coverage"]
             ):
                 raise RuntimeError(
                     f"{arm['dtype']}: depth {depth} coverage differs from {baseline['dtype']}"
@@ -208,17 +246,35 @@ def main(argv=None) -> int:
     args.out.mkdir(parents=True)
 
     arms = []
+    failures = []
     for dtype in args.dtypes:
         print(f"[kv-ppl] {dtype}", flush=True)
-        arms.append(run_arm(args, dtype, args.out))
-    summary = compare(arms)
+        try:
+            arms.append(run_arm(args, dtype, args.out))
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError) as error:
+            failures.append({"dtype": dtype, "error": str(error)})
+            print(f"[kv-ppl] {dtype}: {error}", flush=True)
+    try:
+        summary = compare(arms) if not failures else {"arms": arms, "rows": []}
+    except (RuntimeError, OverflowError) as error:
+        failures.append({"error": str(error)})
+        summary = {"arms": arms, "rows": []}
+    summary["status"] = "failed" if failures else "passed"
+    summary["schema_version"] = 1
+    summary["artifact_type"] = "ninfer_long_context_kv_perplexity_comparison"
+    summary["requested_depths"] = args.depths
+    summary["requested_dtypes"] = args.dtypes
+    summary["failures"] = failures
     (args.out / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    table = markdown(summary)
+    table = (markdown(summary) if not failures else
+             "# KV comparison failed\n\n" + "\n".join(
+                 f"- {failure.get('dtype', 'comparison')}: {failure['error']}"
+                 for failure in failures) + "\n")
     (args.out / "summary.md").write_text(table, encoding="utf-8")
     print(table)
-    return 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
