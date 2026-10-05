@@ -28,8 +28,14 @@ completes full/selected calibration and held-out automatic-route comparisons:
 each GPU loads its model once. Fixed K7 is the default recommendation for that
 matrix, with a Fixed K11 exception for single-request medium-context reuse.
 Auto Selected is correct but does not qualify as faster than the best fixed
-policy. Earlier server measurements below are historical evidence and do not
-qualify the final routing profile.
+policy. The subsequent
+[2026-10-05 schema-3 follow-up](performance/dflash2-auto-k7-4090-2026-10-05.md)
+removes the old uncovered-cell K0 regression: concurrent Auto Selected reaches
+1.419×/1.728× None versus Fixed K7's 1.433×/1.740×. Its E8 profile has no
+override and no held-out condition clears the required 2% gain over the best
+fixed policy, so Fixed K7 remains the production default. Earlier server
+measurements below are historical evidence and do not qualify the final routing
+profile.
 
 The 2026-10-03 campaign uses the explicit local
 `Ternary-Bonsai-2-27B-ninfer-v3.ninfer` artifact, INT8 KV, greedy zero-penalty

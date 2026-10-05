@@ -69,10 +69,11 @@ distinguishes fixed-route measurements from resident-drafter policy evidence.
 
 ### Enable Fixed K7 or Auto Selected
 
-The [2026-10-04 RTX 4090 test report](docs/performance/dflash2-4090-2026-10-04.md)
-recommends **Fixed K7** for the tested INT8-KV, native-context configurations. Auto Selected
-passes correctness checks, but its calibrated profiles do not beat the best fixed policy.
-The measured exception is one request with a reused medium prompt: Fixed K11 is faster there.
+The [2026-10-05 Auto K7-baseline follow-up](docs/performance/dflash2-auto-k7-4090-2026-10-05.md)
+keeps **Fixed K7** as the production default for the tested INT8-KV, native-context configurations.
+Schema-3 Auto Selected fixes the old uncovered-cell K0 regression and reaches 1.419×/1.728× None
+for concurrent cold/warm workloads, close to Fixed K7's 1.433×/1.740×. It remains opt-in because
+no held-out condition qualifies it as at least 2% faster than the best fixed policy.
 
 **Fixed K7** needs no calibration file. Set `--spec dflash2 --draft-tokens 7`; routing defaults
 to `fixed`. For example, this serves up to eight concurrent requests on GPU 0:
@@ -118,8 +119,8 @@ python3.11 -m tools.bench.run_dflash_gpu_campaign \
 
 The script writes `auto-E8-selected.json` for Engine capacity eight, independently of its
 capacity-one profile. Its `cells` array is intentionally sparse: an absent cell means K7,
-not K0. The 2026-10-04 qualification report predates this K7-baseline policy, so Fixed K7
-remains the production recommendation until a fresh campaign qualifies the new Auto profile.
+not K0. The 2026-10-05 follow-up found no E8 override, so concurrent Auto Selected effectively
+uses K7 and does not provide the qualified incremental gain required to replace Fixed K7.
 Enable that profile in the server with the matching configuration:
 
 ```bash
