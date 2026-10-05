@@ -16,6 +16,7 @@ template <typename Geometry, typename CacheView, typename Metadata>
 void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, CacheView cache,
                  Metadata metadata, cudaStream_t stream) {
     const auto tokens = static_cast<std::int32_t>(k.ne[2]);
+    const auto batch  = static_cast<unsigned>(k.ne[3]);
     Tensor& cache_k   = cache.k_pages;
     Tensor& cache_v   = cache.v_pages;
     if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
@@ -25,7 +26,7 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
             constexpr int TokensPerTile = 8;
             const int max_tiles         = div_up(tokens + TokensPerTile - 1, TokensPerTile);
             const dim3 fill_grid(static_cast<unsigned>(max_tiles),
-                                 static_cast<unsigned>(Geometry::KVHeads));
+                                 static_cast<unsigned>(Geometry::KVHeads) * batch);
             kv_cache_append_full_fp8_page_kernel<Geometry, Metadata>
                 <<<fill_grid, kBlock, 0, stream>>>(
                     static_cast<const __nv_bfloat16*>(k.data),
@@ -38,8 +39,9 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
         } else {
             constexpr int FillWarps       = kBlock / 32;
             const std::int64_t fill_units = static_cast<std::int64_t>(tokens) * Geometry::KVHeads;
-            const int fill_grid =
-                static_cast<int>(div_up(fill_units, static_cast<std::int64_t>(FillWarps)));
+            const dim3 fill_grid(
+                static_cast<unsigned>(div_up(fill_units, static_cast<std::int64_t>(FillWarps))),
+                batch);
             kv_cache_append_full_fp8_kernel<Geometry, Metadata><<<fill_grid, kBlock, 0, stream>>>(
                 static_cast<const __nv_bfloat16*>(k.data),
                 static_cast<const __nv_bfloat16*>(v.data),
@@ -61,7 +63,7 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
                 constexpr int TokensPerTile = 8;
                 const int max_tiles = static_cast<int>(div_up(tokens + TokensPerTile, TokensPerTile));
                 const dim3 fill_grid(static_cast<unsigned>(max_tiles),
-                                     static_cast<unsigned>(Geometry::KVHeads),
+                                     static_cast<unsigned>(Geometry::KVHeads) * batch,
                                      static_cast<unsigned>(kKVCacheInt8Groups));
                 kv_cache_append_full_i8_page_kernel<Geometry, PackedV, RotateK, RotateV, PackedK,
                                                     E8Lattice, E8Root, Metadata>
@@ -77,8 +79,9 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
                 constexpr int FillWarps = kBlock / 32;
                 const std::int64_t fill_units =
                     static_cast<std::int64_t>(tokens) * Geometry::KVHeads * kKVCacheInt8Groups;
-                const int fill_grid =
-                    static_cast<int>(div_up(fill_units, static_cast<std::int64_t>(FillWarps)));
+                const dim3 fill_grid(
+                    static_cast<unsigned>(div_up(fill_units, static_cast<std::int64_t>(FillWarps))),
+                    batch);
                 kv_cache_append_full_i8_kernel<Geometry, PackedV, RotateK, RotateV, PackedK,
                                                E8Lattice, E8Root, Metadata>
                     <<<fill_grid, kBlock, 0, stream>>>(
@@ -110,7 +113,8 @@ void launch_full(const Tensor& k, const Tensor& v, const Tensor& positions, Cach
     constexpr int VecElems      = 8;
     const std::int64_t elements = static_cast<std::int64_t>(tokens) * Geometry::KVHeads *
                                   (kKVCacheAppendFullHeadDim / VecElems);
-    const int fill_grid = static_cast<int>(div_up(elements, static_cast<std::int64_t>(Block)));
+    const dim3 fill_grid(
+        static_cast<unsigned>(div_up(elements, static_cast<std::int64_t>(Block))), batch);
     kv_cache_append_full_bf16_kernel<Geometry, Metadata><<<fill_grid, Block, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(k.data), static_cast<const __nv_bfloat16*>(v.data),
         static_cast<const std::int32_t*>(positions.data), metadata,

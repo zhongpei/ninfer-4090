@@ -18,6 +18,26 @@
 
 namespace ninfer::ops {
 
+// Full append grids pack the batch row into y, after the head dimension for page tiles.
+template <typename Geometry>
+__device__ __forceinline__ void kv_cache_append_select_batch(
+    const __nv_bfloat16* __restrict__&, const __nv_bfloat16* __restrict__&,
+    const std::int32_t* __restrict__&, PagedKVDirectMetadata&, int, int) {}
+
+template <typename Geometry, bool Masked>
+__device__ __forceinline__ void kv_cache_append_select_batch(
+    const __nv_bfloat16* __restrict__& k, const __nv_bfloat16* __restrict__& v,
+    const std::int32_t* __restrict__& positions, PagedKVBatchMetadata<Masked>& metadata,
+    int width, int batch) {
+    const std::int64_t input_offset =
+        static_cast<std::int64_t>(kKVCacheAppendFullHeadDim) * Geometry::KVHeads * width * batch;
+    k += input_offset;
+    v += input_offset;
+    positions += static_cast<std::int64_t>(width) * batch;
+    if constexpr (Masked) { metadata.valid_columns += batch; }
+    metadata.table_rows += batch;
+}
+
 template <typename Geometry>
 __device__ __forceinline__ void
 kv_cache_append_full_fp8_row(const __nv_bfloat16* __restrict__ k,
@@ -77,6 +97,8 @@ __global__ void kv_cache_append_full_bf16_kernel(const __nv_bfloat16* __restrict
                                                  __nv_bfloat16* __restrict__ cache_v,
                                                  std::int32_t width) {
     constexpr int VecElems = 8;
+    kv_cache_append_select_batch<Geometry>(k, v, positions, metadata, width,
+                                          static_cast<int>(blockIdx.y));
     const int tokens       = metadata.valid_tokens(width);
     const std::int64_t idx = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const std::int64_t n   = static_cast<std::int64_t>(tokens) * Geometry::KVHeads *
@@ -116,6 +138,8 @@ __launch_bounds__(256) __global__
                                          std::int32_t width) {
     constexpr int Warps         = 8;
     constexpr unsigned FullMask = 0xffffffffU;
+    kv_cache_append_select_batch<Geometry>(k, v, positions, metadata, width,
+                                          static_cast<int>(blockIdx.y));
     const int tokens            = metadata.valid_tokens(width);
     const int warp              = static_cast<int>(threadIdx.x) >> 5;
     const int lane              = static_cast<int>(threadIdx.x) & 31;
@@ -144,10 +168,12 @@ __launch_bounds__(256) __global__
                                               __half* __restrict__ scale_v, std::int32_t width) {
     constexpr int TokensPerTile = 8;
     constexpr unsigned FullMask = 0xffffffffU;
+    kv_cache_append_select_batch<Geometry>(k, v, positions, metadata, width,
+                                          static_cast<int>(blockIdx.y) / Geometry::KVHeads);
     const int tokens            = metadata.valid_tokens(width);
     const int warp              = static_cast<int>(threadIdx.x) >> 5;
     const int lane              = static_cast<int>(threadIdx.x) & 31;
-    const int kv_head           = static_cast<int>(blockIdx.y);
+    const int kv_head           = static_cast<int>(blockIdx.y) % Geometry::KVHeads;
     const int tile_delta        = static_cast<int>(blockIdx.x);
     const int base_position     = positions[0];
     const int tile_position     = (base_position / TokensPerTile + tile_delta) * TokensPerTile;
@@ -180,6 +206,8 @@ __launch_bounds__(256) __global__
                                               __half* __restrict__ scale_v, std::int32_t width) {
     constexpr int Warps         = 8;
     constexpr unsigned FullMask = 0xffffffffu;
+    kv_cache_append_select_batch<Geometry>(k, v, positions, metadata, width,
+                                          static_cast<int>(blockIdx.y));
     const int tokens            = metadata.valid_tokens(width);
     const int warp              = static_cast<int>(threadIdx.x) >> 5;
     const int lane              = static_cast<int>(threadIdx.x) & 31;
@@ -315,10 +343,12 @@ __launch_bounds__(256) __global__ void kv_cache_append_full_i8_page_kernel(
     __half* __restrict__ scale_k, __half* __restrict__ scale_v, std::int32_t width) {
     constexpr int TokensPerTile = 8;
     constexpr unsigned FullMask = 0xffffffffu;
+    kv_cache_append_select_batch<Geometry>(k, v, positions, metadata, width,
+                                          static_cast<int>(blockIdx.y) / Geometry::KVHeads);
     const int tokens            = metadata.valid_tokens(width);
     const int warp              = static_cast<int>(threadIdx.x) >> 5;
     const int lane              = static_cast<int>(threadIdx.x) & 31;
-    const int kv_head           = static_cast<int>(blockIdx.y);
+    const int kv_head           = static_cast<int>(blockIdx.y) % Geometry::KVHeads;
     const int group             = static_cast<int>(blockIdx.z);
     const int tile_delta        = static_cast<int>(blockIdx.x);
     const int base_position     = positions[0];

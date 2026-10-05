@@ -114,8 +114,11 @@ serialization.
 Append-and-attend now publishes the complete compact batch with one existing batch append launch
 instead of invoking that batch launcher once per row.
 
-These are unqualified schedule changes. No throughput, latency or quality improvement is claimed
-until the RTX 4090 kernel/end-to-end and long-history perplexity gates are run.
+The [PR #25 RTX 4090 qualification](../performance/bonsai-fp8-pr25-4090-2026-10-05.md)
+records the required batch-append repair, passing independent numerical checks, fixed-depth
+perplexity and C1 Fixed K7 generation measurements. Performance is mixed: short-input decode
+improves, while long-input decode regresses. No general throughput improvement or individual
+kernel speedup is claimed.
 
 ## Long-history quality gate
 

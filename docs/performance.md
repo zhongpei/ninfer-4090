@@ -19,6 +19,11 @@
 
 ## RTX 4090 (`sm_89`) chain qualification
 
+The [PR #25 single-direction FP8 report](performance/bonsai-fp8-pr25-4090-2026-10-05.md)
+compares the repaired new implementation with stored PR #24 results. Numerical checks pass;
+C1 Fixed K7 short-input decode improves 2.12%, while long-input decode regresses 7.19%.
+It does not establish a general speedup or change the INT8 product default.
+
 The final 2026-10-04 fixed-route campaign passes all 84 correctness
 comparisons and qualifies 71 performance comparisons across seven workloads,
 C1/C2/C4/C8 and K7/K11/K15. The subsequent
