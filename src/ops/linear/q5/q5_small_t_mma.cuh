@@ -359,7 +359,6 @@ __launch_bounds__(256, (KWarps < 8 || XCols >= 32 ? 2 : (XCols >= 16 || Stages =
         }
     }
 }
-}
 
 // Launches q5_small_t_mma_kernel over Rows / SmallTLayout::kRowsPerCta CTAs.
 template <int Rows, int K, int XCols, int Stages, class Epilogue, int KWarps = 8,
