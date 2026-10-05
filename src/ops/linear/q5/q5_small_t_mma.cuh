@@ -21,8 +21,16 @@
 #include <cuda_fp16.h>
 
 #include <cstdint>
+#include <type_traits>
 
 namespace ninfer::ops::detail {
+
+template <class Epilogue, class = void>
+struct Q5SmallTTileEpilogue : std::false_type {};
+
+template <class Epilogue>
+struct Q5SmallTTileEpilogue<Epilogue, std::void_t<decltype(Epilogue::kIsTileEpilogue)>>
+    : std::bool_constant<Epilogue::kIsTileEpilogue> {};
 
 // Per-row staging of one K slab for the layout SmallTLayout<KWarps> (ops/common/small_t_layout.cuh).
 template <int KWarps, int TilesPerWarp = 1>
@@ -292,12 +300,52 @@ __launch_bounds__(256, (KWarps < 8 || XCols >= 32 ? 2 : (XCols >= 16 || Stages =
         }
     }
     if constexpr (kKWarps > 2) { __syncthreads(); }
-    if (k_split == 0) {
+    if constexpr (Q5SmallTTileEpilogue<Epilogue>::value) {
+        static_assert(static_cast<std::size_t>(kRowsPerCta) * XCols * sizeof(float) <=
+                          sizeof(shared.partial),
+                      "tile epilogue scratch must fit the retired K-reduction arena");
+        float* dense = shared.partial;
+        if (k_split == 0) {
+#pragma unroll
+            for (int t = 0; t < kTpw; ++t) {
+                const int local_tile = first_tile + t;
+#pragma unroll
+                for (int nt = 0; nt < kNt; ++nt) {
+                    float4 sum =
+                        make_float4(acc[t][nt][0], acc[t][nt][1], acc[t][nt][2], acc[t][nt][3]);
+#pragma unroll
+                    for (int split = 2; split < kKWarps; split += 2) {
+                        const float4 value = load_vec<float4>(slot(warp + split, t, nt));
+                        sum.x += value.x;
+                        sum.y += value.y;
+                        sum.z += value.z;
+                        sum.w += value.w;
+                    }
+                    const int col0 = nt * 8 + 2 * lid;
+                    const int row0 = local_tile * 16 + gid;
+                    const int row1 = row0 + 8;
+                    if (col0 < columns) {
+                        dense[row0 * XCols + col0] = sum.x;
+                        dense[row1 * XCols + col0] = sum.z;
+                    }
+                    if (col0 + 1 < columns) {
+                        dense[row0 * XCols + col0 + 1] = sum.y;
+                        dense[row1 * XCols + col0 + 1] = sum.w;
+                    }
+                }
+            }
+        }
+        __syncthreads();
+        if (tid < kRowsPerCta) {
+            epilogue.template store_tile<XCols, kRowsPerCta>(dense, cta_row0, tid, columns);
+        }
+    } else if (k_split == 0) {
 #pragma unroll
         for (int t = 0; t < kTpw; ++t) {
 #pragma unroll
             for (int nt = 0; nt < kNt; ++nt) {
-                float4 sum = make_float4(acc[t][nt][0], acc[t][nt][1], acc[t][nt][2], acc[t][nt][3]);
+                float4 sum =
+                    make_float4(acc[t][nt][0], acc[t][nt][1], acc[t][nt][2], acc[t][nt][3]);
 #pragma unroll
                 for (int split = 2; split < kKWarps; split += 2) {
                     const float4 value = load_vec<float4>(slot(warp + split, t, nt));
@@ -310,6 +358,7 @@ __launch_bounds__(256, (KWarps < 8 || XCols >= 32 ? 2 : (XCols >= 16 || Stages =
             }
         }
     }
+}
 }
 
 // Launches q5_small_t_mma_kernel over Rows / SmallTLayout::kRowsPerCta CTAs.
