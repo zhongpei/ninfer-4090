@@ -56,3 +56,37 @@ Do not promote a one-run winner mechanically. A production route change should s
 
 This keeps architecture-specific tuning measurable while avoiding a runtime autotuner or per-request
 hardware probing.
+
+## RTX 4090 measurement, 2026-10-05 (PR #17)
+
+Decision: retain the production routes. The new `sm89_occ_k7` candidate did not establish a
+consistent advantage over the inherited routes. PR #17 adds benchmark candidates and separate
+architecture catalogs; it does not establish a production throughput improvement.
+
+The specified benchmark target built successfully on the merged code at `020d704`. Device 0 was
+an NVIDIA GeForce RTX 4090 (24 GB), driver 610.57.04, with CUDA compiler 12.8.61 and `sm_89`.
+The command above used `/home/fofo/.local/bin/python3.11`, 31 timed repetitions and five warmups.
+This was one cold-cache sweep of the synthetic 27B Q8 fixtures at T8/T16/T32/T64.
+
+Median kernel time in microseconds (lower is better):
+
+| Extent / K7 concurrency | Attention production | Attention new candidate | SwiGLU production | SwiGLU new candidate |
+|---|---:|---:|---:|---:|
+| T8 / C1 | 56.3 | 59.4 | 258.0 | 257.1 |
+| T16 / C2 | 58.4 | 57.3 | 262.1 | 261.1 |
+| T32 / C4 | 73.7 | 73.7 | 269.3 | 269.3 |
+| T64 / C8 | 81.9 | 81.9 | 337.9 | 343.0 |
+
+The small apparent T8/T16 gains overlap the measured min..p95 distributions. At T64, an existing
+alternative, `mma_r32_c64_k128`, measured 298.0 us for SwiGLU versus 337.9 us for the production
+route (11.8% less time); their distributions were 295.9..299.1 and 334.8..341.0 us. This is a
+candidate for further qualification, not a route promotion. Attention's existing C32 alternative
+also measured 78.9 us at T64 versus production's 81.9 us, with overlapping distributions.
+
+The comparison measures the original production kernels and candidate kernels in the same binary;
+the pre-PR commit was not independently rebuilt and timed. Build and timing completion do not
+qualify numerical correctness. No independent oracle, repeated sweep, real-model output gate,
+end-to-end throughput test or CI check was run in this pass.
+
+Committed evidence: [compact report](../../profiles/bench/sm89-dflash2-k7-routes.json) and
+[full min/median/p95 log](../../profiles/bench/sm89-dflash2-k7-routes.json.log).

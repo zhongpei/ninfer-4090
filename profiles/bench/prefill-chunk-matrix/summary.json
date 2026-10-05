@@ -1,0 +1,304 @@
+{
+  "schema_version": 1,
+  "artifact_type": "ninfer_prefill_chunk_matrix",
+  "scope": "isolated single-request ninfer_bench; not serving-cache/interleave qualification",
+  "model": "/opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer",
+  "device": 0,
+  "max_context": 32768,
+  "rungs": [
+    {
+      "requested": "1024",
+      "auto": false,
+      "resolved_chunk": 1024,
+      "runtime_reservation_bytes": 1974435840,
+      "workspace_capacity_bytes": 185393152,
+      "tests": [
+        {
+          "label": "pp1024",
+          "n_prompt": 1024,
+          "prefill_tok_s_mean": 3603.196344,
+          "prefill_tok_s_stddev": 28.61139573
+        },
+        {
+          "label": "pp4096",
+          "n_prompt": 4096,
+          "prefill_tok_s_mean": 3306.475591,
+          "prefill_tok_s_stddev": 30.73656819
+        },
+        {
+          "label": "pp16384",
+          "n_prompt": 16384,
+          "prefill_tok_s_mean": 2865.648917,
+          "prefill_tok_s_stddev": 10.14530839
+        },
+        {
+          "label": "pp32768",
+          "n_prompt": 32768,
+          "prefill_tok_s_mean": 2440.82051,
+          "prefill_tok_s_stddev": 14.40765584
+        }
+      ],
+      "report": "/opt/ninfer-4090/profiles/bench/prefill-chunk-matrix/00-1024.json"
+    },
+    {
+      "requested": "1536",
+      "auto": false,
+      "resolved_chunk": 1536,
+      "runtime_reservation_bytes": 2044696576,
+      "workspace_capacity_bytes": 224194560,
+      "tests": [
+        {
+          "label": "pp1024",
+          "n_prompt": 1024,
+          "prefill_tok_s_mean": 3533.275558,
+          "prefill_tok_s_stddev": 88.70644558
+        },
+        {
+          "label": "pp4096",
+          "n_prompt": 4096,
+          "prefill_tok_s_mean": 3294.565319,
+          "prefill_tok_s_stddev": 182.4434732
+        },
+        {
+          "label": "pp16384",
+          "n_prompt": 16384,
+          "prefill_tok_s_mean": 2968.353948,
+          "prefill_tok_s_stddev": 9.21949772
+        },
+        {
+          "label": "pp32768",
+          "n_prompt": 32768,
+          "prefill_tok_s_mean": 2453.330741,
+          "prefill_tok_s_stddev": 6.803601961
+        }
+      ],
+      "report": "/opt/ninfer-4090/profiles/bench/prefill-chunk-matrix/01-1536.json"
+    },
+    {
+      "requested": "2048",
+      "auto": false,
+      "resolved_chunk": 2048,
+      "runtime_reservation_bytes": 2144595968,
+      "workspace_capacity_bytes": 292634624,
+      "tests": [
+        {
+          "label": "pp1024",
+          "n_prompt": 1024,
+          "prefill_tok_s_mean": 3524.080093,
+          "prefill_tok_s_stddev": 78.51884724
+        },
+        {
+          "label": "pp4096",
+          "n_prompt": 4096,
+          "prefill_tok_s_mean": 3438.715623,
+          "prefill_tok_s_stddev": 13.77971426
+        },
+        {
+          "label": "pp16384",
+          "n_prompt": 16384,
+          "prefill_tok_s_mean": 2894.857238,
+          "prefill_tok_s_stddev": 24.90292138
+        },
+        {
+          "label": "pp32768",
+          "n_prompt": 32768,
+          "prefill_tok_s_mean": 2474.476623,
+          "prefill_tok_s_stddev": 9.529172713
+        }
+      ],
+      "report": "/opt/ninfer-4090/profiles/bench/prefill-chunk-matrix/02-2048.json"
+    },
+    {
+      "requested": "3072",
+      "auto": false,
+      "resolved_chunk": 3072,
+      "runtime_reservation_bytes": 2353831936,
+      "workspace_capacity_bytes": 438951936,
+      "tests": [
+        {
+          "label": "pp1024",
+          "n_prompt": 1024,
+          "prefill_tok_s_mean": 3507.760714,
+          "prefill_tok_s_stddev": 92.13786167
+        },
+        {
+          "label": "pp4096",
+          "n_prompt": 4096,
+          "prefill_tok_s_mean": 3394.289909,
+          "prefill_tok_s_stddev": 21.18419145
+        },
+        {
+          "label": "pp16384",
+          "n_prompt": 16384,
+          "prefill_tok_s_mean": 2931.411461,
+          "prefill_tok_s_stddev": 18.58162937
+        },
+        {
+          "label": "pp32768",
+          "n_prompt": 32768,
+          "prefill_tok_s_mean": 2474.3645,
+          "prefill_tok_s_stddev": 22.05527715
+        }
+      ],
+      "report": "/opt/ninfer-4090/profiles/bench/prefill-chunk-matrix/03-3072.json"
+    },
+    {
+      "requested": "4096",
+      "auto": false,
+      "resolved_chunk": 4096,
+      "runtime_reservation_bytes": 2563067904,
+      "workspace_capacity_bytes": 585269248,
+      "tests": [
+        {
+          "label": "pp1024",
+          "n_prompt": 1024,
+          "prefill_tok_s_mean": 3487.472351,
+          "prefill_tok_s_stddev": 116.587466
+        },
+        {
+          "label": "pp4096",
+          "n_prompt": 4096,
+          "prefill_tok_s_mean": 3388.54773,
+          "prefill_tok_s_stddev": 89.51814939
+        },
+        {
+          "label": "pp16384",
+          "n_prompt": 16384,
+          "prefill_tok_s_mean": 2913.238319,
+          "prefill_tok_s_stddev": 75.84404665
+        },
+        {
+          "label": "pp32768",
+          "n_prompt": 32768,
+          "prefill_tok_s_mean": 2485.963927,
+          "prefill_tok_s_stddev": 18.1459898
+        }
+      ],
+      "report": "/opt/ninfer-4090/profiles/bench/prefill-chunk-matrix/04-4096.json"
+    },
+    {
+      "requested": "6144",
+      "auto": false,
+      "resolved_chunk": 6144,
+      "runtime_reservation_bytes": 2981539840,
+      "workspace_capacity_bytes": 877903872,
+      "tests": [
+        {
+          "label": "pp1024",
+          "n_prompt": 1024,
+          "prefill_tok_s_mean": 3502.286765,
+          "prefill_tok_s_stddev": 122.1147349
+        },
+        {
+          "label": "pp4096",
+          "n_prompt": 4096,
+          "prefill_tok_s_mean": 3547.600337,
+          "prefill_tok_s_stddev": 18.44366783
+        },
+        {
+          "label": "pp16384",
+          "n_prompt": 16384,
+          "prefill_tok_s_mean": 2908.222804,
+          "prefill_tok_s_stddev": 31.04230818
+        },
+        {
+          "label": "pp32768",
+          "n_prompt": 32768,
+          "prefill_tok_s_mean": 2447.079436,
+          "prefill_tok_s_stddev": 31.20043957
+        }
+      ],
+      "report": "/opt/ninfer-4090/profiles/bench/prefill-chunk-matrix/05-6144.json"
+    },
+    {
+      "requested": "8192",
+      "auto": false,
+      "resolved_chunk": 8192,
+      "runtime_reservation_bytes": 3400011776,
+      "workspace_capacity_bytes": 1170538496,
+      "tests": [
+        {
+          "label": "pp1024",
+          "n_prompt": 1024,
+          "prefill_tok_s_mean": 3487.932167,
+          "prefill_tok_s_stddev": 120.5448703
+        },
+        {
+          "label": "pp4096",
+          "n_prompt": 4096,
+          "prefill_tok_s_mean": 3550.441107,
+          "prefill_tok_s_stddev": 32.70498649
+        },
+        {
+          "label": "pp16384",
+          "n_prompt": 16384,
+          "prefill_tok_s_mean": 2919.347342,
+          "prefill_tok_s_stddev": 25.67807949
+        },
+        {
+          "label": "pp32768",
+          "n_prompt": 32768,
+          "prefill_tok_s_mean": 2511.610247,
+          "prefill_tok_s_stddev": 16.31699511
+        }
+      ],
+      "report": "/opt/ninfer-4090/profiles/bench/prefill-chunk-matrix/06-8192.json"
+    },
+    {
+      "requested": "auto",
+      "auto": true,
+      "resolved_chunk": 8192,
+      "runtime_reservation_bytes": 3400011776,
+      "workspace_capacity_bytes": 1170538496,
+      "tests": [
+        {
+          "label": "pp1024",
+          "n_prompt": 1024,
+          "prefill_tok_s_mean": 3472.568571,
+          "prefill_tok_s_stddev": 127.2157965
+        },
+        {
+          "label": "pp4096",
+          "n_prompt": 4096,
+          "prefill_tok_s_mean": 3478.603318,
+          "prefill_tok_s_stddev": 48.96134009
+        },
+        {
+          "label": "pp16384",
+          "n_prompt": 16384,
+          "prefill_tok_s_mean": 2927.512271,
+          "prefill_tok_s_stddev": 36.83016099
+        },
+        {
+          "label": "pp32768",
+          "n_prompt": 32768,
+          "prefill_tok_s_mean": 2498.538892,
+          "prefill_tok_s_stddev": 19.05259734
+        }
+      ],
+      "report": "/opt/ninfer-4090/profiles/bench/prefill-chunk-matrix/07-auto.json"
+    }
+  ],
+  "observed_fastest": {
+    "pp1024": {
+      "requested": "1024",
+      "resolved_chunk": 1024,
+      "prefill_tok_s_mean": 3603.196344
+    },
+    "pp4096": {
+      "requested": "8192",
+      "resolved_chunk": 8192,
+      "prefill_tok_s_mean": 3550.441107
+    },
+    "pp16384": {
+      "requested": "1536",
+      "resolved_chunk": 1536,
+      "prefill_tok_s_mean": 2968.353948
+    },
+    "pp32768": {
+      "requested": "8192",
+      "resolved_chunk": 8192,
+      "prefill_tok_s_mean": 2511.610247
+    }
+  }
+}

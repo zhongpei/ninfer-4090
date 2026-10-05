@@ -101,3 +101,57 @@ Production promotion requires:
 5. device-memory peak inside the deployment margin.
 
 The feature is deliberately not the default until those RTX 4090 measurements are complete.
+
+## RTX 4090 measurement, 2026-10-05 (PR #18)
+
+Decision: keep Auto opt-in and retain the fixed-1024 default. Auto successfully selected 8192
+without reducing explicit KV capacity. Its long-prompt gains were modest and its memory reservation
+was substantially larger; the largest safe chunk was not the fastest at every prompt length.
+
+The specified `ninfer_bench` target initially failed to compile because the new runtime helper used
+an unqualified `execution::Parameters` type. Commit `49217d4` qualified it as
+`models::qwen3_5::execution::Parameters`; the same target then built successfully. That code was used
+for the complete matrix below. The commit also corrected the local Python 3.11 path in `AGENTS.md`.
+
+Environment: device 0, NVIDIA GeForce RTX 4090 (24 GB), driver 610.57.04, CUDA compiler 12.8.61,
+`sm_89`, Python 3.11.15. The command above used the explicit artifact
+`/opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer`, INT8 group64 KV, DFlash2 K7, CUDA Graphs,
+context 32768, and prompts 1024/4096/16384/32768. Each arm had one warmup and three measured
+repetitions. All eight arms completed successfully. This measures isolated single-request prefill;
+no decode workload was included.
+
+Mean prefill throughput in tokens/s (higher is better):
+
+| Requested chunk | 1K prompt | 4K prompt | 16K prompt | 32K prompt |
+|---|---:|---:|---:|---:|
+| 1024 | 3603.2 | 3306.5 | 2865.6 | 2440.8 |
+| 1536 | 3533.3 | 3294.6 | 2968.4 | 2453.3 |
+| 2048 | 3524.1 | 3438.7 | 2894.9 | 2474.5 |
+| 3072 | 3507.8 | 3394.3 | 2931.4 | 2474.4 |
+| 4096 | 3487.5 | 3388.5 | 2913.2 | 2486.0 |
+| 6144 | 3502.3 | 3547.6 | 2908.2 | 2447.1 |
+| 8192 | 3487.9 | 3550.4 | 2919.3 | 2511.6 |
+| Auto -> 8192 | 3472.6 | 3478.6 | 2927.5 | 2498.5 |
+
+Relative to fixed 1024 in this matrix, Auto changed throughput by -3.6%, +5.2%, +2.2% and +2.4%
+at the four prompt lengths. These are observed means from one sequential matrix, not repeated
+interleaved A/B evidence; the reports retain standard deviations. Fixed 1536 had the highest
+observed 16K throughput, whereas fixed 8192 had the highest 4K and 32K throughput.
+
+| Startup resource | Fixed 1024 | Auto -> 8192 |
+|---|---:|---:|
+| Main KV capacity (tokens / page groups) | 32768 / 512 | 32768 / 512 |
+| Runtime reservation (MiB) | 1883.0 | 3242.5 |
+| Workspace capacity (MiB) | 176.8 | 1116.3 |
+
+Reservation and workspace are reported capacities, not measured peak VRAM. The baseline is fixed
+1024 in the same post-merge binary; the pre-PR commit was not independently timed. This pass did
+not test `kv-capacity auto`, pressure-driven rung fallback, serving context-cache reservations,
+C2/C4/C8 decode interleave, greedy response equality or CI. It therefore supports successful
+startup and isolated prefill performance at this configuration, not default promotion or a claim
+about concurrent decode latency.
+
+Committed evidence: [matrix summary](../../profiles/bench/prefill-chunk-matrix/summary.json).
+Its eight per-arm JSON reports are committed beside it and include the memory/configuration and
+timing statistics. Absolute paths in reports identify the measurement host; the relative links
+here locate the committed evidence.

@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "artifact_type": "ninfer_sm89_dflash2_k7_route_qualification",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "compute_capability": 89,
+  "cold_cache": true,
+  "repeat": 31,
+  "warmup": 5,
+  "extents": [
+    8,
+    16,
+    32,
+    64
+  ],
+  "results": {
+    "attn_input": [
+      {
+        "client_concurrency": 1,
+        "columns": 8,
+        "public_op_median_us": 56.32,
+        "routed_schedule": "attn_input_proj.q8.dflash2.small_t",
+        "measured_winner": "small_t"
+      },
+      {
+        "client_concurrency": 2,
+        "columns": 16,
+        "public_op_median_us": 57.344,
+        "routed_schedule": "attn_input_proj.q8.dflash2.small_t",
+        "measured_winner": "sm89_occ_k7"
+      },
+      {
+        "client_concurrency": 4,
+        "columns": 32,
+        "public_op_median_us": 73.728,
+        "routed_schedule": "attn_input_proj.q8.dflash2.mma.r32.c32.k128",
+        "measured_winner": "mma_r32_c32_k128"
+      },
+      {
+        "client_concurrency": 8,
+        "columns": 64,
+        "public_op_median_us": 81.92,
+        "routed_schedule": "attn_input_proj.q8.dflash2.mma.r32.c64.k128",
+        "measured_winner": "mma_r32_c32_k128"
+      }
+    ],
+    "linear_swiglu": [
+      {
+        "client_concurrency": 1,
+        "columns": 8,
+        "public_op_median_us": 257.024,
+        "routed_schedule": "linear_swiglu.q8.dflash2.small_t",
+        "measured_winner": "sm89_occ_k7"
+      },
+      {
+        "client_concurrency": 2,
+        "columns": 16,
+        "public_op_median_us": 262.144,
+        "routed_schedule": "linear_swiglu.q8.dflash2.small_t",
+        "measured_winner": "sm89_occ_k7"
+      },
+      {
+        "client_concurrency": 4,
+        "columns": 32,
+        "public_op_median_us": 269.312,
+        "routed_schedule": "linear_swiglu.q8.dflash2.small_t",
+        "measured_winner": "small_t"
+      },
+      {
+        "client_concurrency": 8,
+        "columns": 64,
+        "public_op_median_us": 337.92,
+        "routed_schedule": "linear_swiglu.q8.dflash2.mma.r64.c64.k128",
+        "measured_winner": "mma_r32_c64_k128"
+      }
+    ]
+  },
+  "raw_log": "/opt/ninfer-4090/profiles/bench/sm89-dflash2-k7-routes.json.log",
+  "decision_rule": "Use this as candidate evidence only. Retune the sm89-only C++ route table after the winner clears its own min..p95 spread in repeated runs and the public Op matches the selected schedule."
+}
