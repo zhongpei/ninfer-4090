@@ -165,7 +165,7 @@ int main() {
     const ServeOptions rotor = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk8v4"});
     failures += check(rotor.kv_cache == ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64,
                       "--kv-dtype rk8v4 did not select rotated K8/V4 storage");
-    failures += check(defaults.kv_cache == ninfer::KvCacheStorage::BFloat16,
+    failures += check(defaults.kv_cache == ninfer::kDefaultKvCacheStorage,
                       "rk8v4 unexpectedly changed the default KV storage");
 
     const ServeOptions model_alias =

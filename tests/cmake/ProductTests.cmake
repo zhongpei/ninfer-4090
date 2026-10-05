@@ -24,6 +24,16 @@ ninfer_add_test(ninfer_cli_options_test
 
 target_include_directories(ninfer_cli_options_test PRIVATE ${PROJECT_SOURCE_DIR}/apps/cli)
 
+ninfer_add_test(ninfer_product_kv_defaults_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_product_kv_defaults.cpp"
+          ${PROJECT_SOURCE_DIR}/apps/cli/options.cpp
+          ${PROJECT_SOURCE_DIR}/bench/inference/ninfer_bench_support.cpp
+  LIBRARIES ninfer_serve ninfer::json)
+
+target_include_directories(ninfer_product_kv_defaults_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/apps/cli
+  ${PROJECT_SOURCE_DIR}/bench/inference)
+
 ninfer_add_test(ninfer_openai_schema_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_openai_schema.cpp"
   LIBRARIES ninfer_serve)

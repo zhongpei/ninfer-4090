@@ -60,6 +60,12 @@ enum class KvCacheStorage : std::uint8_t {
     Fp8KeyNvfp4Value,
 };
 
+#if defined(NINFER_SM89)
+inline constexpr KvCacheStorage kDefaultKvCacheStorage = KvCacheStorage::Int8Group64;
+#else
+inline constexpr KvCacheStorage kDefaultKvCacheStorage = KvCacheStorage::BFloat16;
+#endif
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
@@ -333,7 +339,7 @@ struct EngineOptions {
     // quantum when decode work is active so a long prompt does not monopolize the GPU.
     std::uint32_t prefill_chunk        = kDefaultPrefillChunk;
     bool prefill_chunk_auto            = false;
-    KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
+    KvCacheStorage kv_cache            = kDefaultKvCacheStorage;
     SpeculativeOptions speculative;
     DFlashTeacherOptions dflash_teacher;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;

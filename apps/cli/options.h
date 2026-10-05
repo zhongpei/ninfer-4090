@@ -29,7 +29,7 @@ struct Options {
     // rank 1 holds the offloaded mlp/expert blocks. Empty means use `device`.
     std::vector<int> devices;
 
-    KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
+    KvCacheStorage kv_cache = kDefaultKvCacheStorage;
     SpeculativeOptions speculative;
     std::filesystem::path dflash_teacher_out;
     bool enable_vision  = false;

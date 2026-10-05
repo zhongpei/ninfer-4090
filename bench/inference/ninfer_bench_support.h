@@ -62,7 +62,7 @@ struct BenchOptions {
     std::optional<std::uint32_t> max_context;
     std::uint32_t prefill_chunk = kDefaultPrefillChunk;
     bool prefill_chunk_auto = false;
-    KvCacheStorage kv_cache     = KvCacheStorage::BFloat16;
+    KvCacheStorage kv_cache     = kDefaultKvCacheStorage;
     SpeculativeOptions speculative;
     int device            = 0;
     bool use_cuda_graph   = true;

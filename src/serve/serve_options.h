@@ -51,7 +51,7 @@ struct ServeOptions {
     // Ordered CUDA devices for model-parallel execution: primary first. Empty keeps the
     // single-device route selected by `device`. Mutually exclusive with --device.
     std::vector<int> devices;
-    KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
+    KvCacheStorage kv_cache                = kDefaultKvCacheStorage;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
     bool enable_vision      = false;
