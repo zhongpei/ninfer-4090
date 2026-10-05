@@ -334,7 +334,7 @@ void causal_attention_small_t_fp8_sm89_kernel(
     }
     __syncthreads();
 
-    auto issue_tile =    auto issue_tile = [&](int stage, int tile_k0, int physical_page) {
+    auto issue_tile = [&](int stage, int tile_k0, int physical_page) {
         std::uint8_t* stage_base = dynamic_raw + stage * 2 * TileBytes;
         std::uint8_t* k_fp8 = stage_base;
         std::uint8_t* v_raw = stage_base + TileBytes;
