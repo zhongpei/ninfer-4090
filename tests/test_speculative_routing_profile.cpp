@@ -73,6 +73,33 @@ int main() {
                     loaded.select(8, 8193) == 15 && loaded.select(2, 1024) == 0,
                     "compute mode must not mutate route selection or uncovered skips");
         }
+        {
+            auto baseline = fixture.document;
+            baseline["schema_version"] = 3;
+            baseline["proposal_compute"] = "selected";
+            baseline["default_action"] = 7;
+            baseline["cells"] = Json::array({
+                {{"active_batch", 1}, {"frontier_upper", 8192}, {"draft_tokens", 11}},
+                {{"active_batch", 8}, {"frontier_upper", 32768}, {"draft_tokens", 0}},
+            });
+            const auto loaded = fixture.load(baseline);
+            require(loaded.default_action == 7, "schema3 must publish K7 baseline");
+            require(loaded.select(1, 0) == 7 && loaded.select(2, 1024) == 7 &&
+                    loaded.select(8, 8192) == 7, "schema3 uncovered cells must inherit K7");
+            require(loaded.select(1, 1025) == 11, "schema3 K11 override");
+            require(loaded.select(8, 8193) == 0, "schema3 explicit K0 override");
+            require(loaded.proposal_compute == ninfer::runtime::DFlashProposalCompute::Selected &&
+                    loaded.proposal_width(7) == 8 && loaded.proposal_width(11) == 12,
+                    "schema3 selected proposal widths");
+
+            auto invalid = baseline;
+            invalid["default_action"] = 0; fixture.rejects(invalid);
+            invalid = baseline; invalid["default_action"] = 11; fixture.rejects(invalid);
+            invalid = baseline; invalid["cells"][0]["draft_tokens"] = 7; fixture.rejects(invalid);
+            invalid = baseline; invalid["cells"][0]["draft_tokens"] = 15; fixture.rejects(invalid);
+            invalid = baseline; invalid.erase("default_action"); fixture.rejects(invalid);
+            invalid = baseline; invalid.erase("proposal_compute"); fixture.rejects(invalid);
+        }
         for (const Json invalid_mode : {Json("auto"), Json(""), Json(true), Json(8), Json(nullptr)}) {
             auto versioned = fixture.document;
             versioned["schema_version"] = 2; versioned["proposal_compute"] = invalid_mode;
@@ -175,7 +202,7 @@ int main() {
         changed = options; changed.routing.scope = ninfer::SpeculativeRouterScope::Engine; reject_options(changed);
         changed = options; changed.routing.widths[0] = 7; reject_options(changed);
         changed = options; changed.routing.state_path = "state"; reject_options(changed);
-        std::cout << "ok calibrated profile: interval boundaries, strict schema/identity, configuration, proposal compute\n";
+        std::cout << "ok calibrated profile: legacy K0 fallback, schema3 K7 baseline/overrides, strict identity and proposal compute\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

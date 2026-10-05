@@ -78,7 +78,29 @@ def triple(wall=9000, latency=6000):
             for arm in ('none', 'fixed', 'auto')}
 
 
+def baseline_profile():
+    return {'schema_version': 3, 'artifact_type': 'ninfer_spec_router_profile',
+            'identity': identity(), 'proposal_compute': 'selected', 'default_action': 7,
+            'cells': [
+                {'active_batch': 2, 'frontier_upper': 8192, 'draft_tokens': 11},
+                {'active_batch': 8, 'frontier_upper': 32768, 'draft_tokens': 0}]}
+
+
 class AutoComparisonTest(unittest.TestCase):
+    def test_schema3_sparse_table_expands_missing_cells_to_k7(self):
+        table = bench.profile_table(baseline_profile())
+        actions = {(c['active_batch'], c['frontier_upper']): c['draft_tokens'] for c in table}
+        self.assertEqual(len(table), 24)
+        self.assertEqual(actions[2, 1024], 7)
+        self.assertEqual(actions[2, 8192], 11)
+        self.assertEqual(actions[8, 32768], 0)
+        bad = baseline_profile(); bad['default_action'] = 0
+        with self.assertRaisesRegex(ValueError, 'default action'):
+            bench.profile_table(bad)
+        bad = baseline_profile(); bad['cells'][0]['draft_tokens'] = 15
+        with self.assertRaisesRegex(ValueError, 'unsupported'):
+            bench.profile_table(bad)
+
     def test_sparse_table_normalized_and_mixed_actual_actions(self):
         table = bench.profile_table(profile())
         self.assertEqual(len(table), 24)

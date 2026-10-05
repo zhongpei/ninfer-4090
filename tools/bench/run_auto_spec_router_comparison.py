@@ -30,9 +30,12 @@ ARMS = ('none', 'fixed', 'auto')
 
 def profile_table(profile):
     proposal_compute_mode(profile)
+    version = profile.get('schema_version')
     required = {'schema_version', 'artifact_type', 'identity', 'cells'}
-    if profile['schema_version'] == 2:
+    if version >= 2:
         required.add('proposal_compute')
+    if version == 3:
+        required.add('default_action')
     if set(profile) not in (required, required | {'provenance'}):
         raise ValueError('invalid profile fields')
     if profile['artifact_type'] != 'ninfer_spec_router_profile':
@@ -40,6 +43,11 @@ def profile_table(profile):
     if 'provenance' in profile and not isinstance(profile['provenance'], dict):
         raise ValueError('invalid profile provenance')
     validate_identity(profile['identity'])
+    default_action = 0
+    if version == 3:
+        default_action = integer(profile['default_action'], 'profile default action')
+        if default_action != 7:
+            raise ValueError('schema3 profile default action must be K7')
     if not isinstance(profile['cells'], list):
         raise ValueError('profile cells must be an array')
     actions = {}
@@ -48,10 +56,12 @@ def profile_table(profile):
         batch = integer(cell['active_batch'], 'profile batch', 1, 8)
         upper = integer(cell['frontier_upper'], 'profile upper')
         action = integer(cell['draft_tokens'], 'profile action')
-        if upper not in UPPERS or action not in (0, 7, 11, 15) or (batch, upper) in actions:
+        allowed = (0, 11) if version == 3 else (0, 7, 11, 15)
+        if upper not in UPPERS or action not in allowed or (batch, upper) in actions:
             raise ValueError('unsupported or duplicate profile cell')
         actions[batch, upper] = action
-    return [{'active_batch': b, 'frontier_upper': upper, 'draft_tokens': actions.get((b, upper), 0)}
+    return [{'active_batch': b, 'frontier_upper': upper,
+             'draft_tokens': actions.get((b, upper), default_action)}
             for b in range(1, 9) for upper in UPPERS]
 
 

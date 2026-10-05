@@ -15,9 +15,12 @@ enum class DFlashProposalCompute : std::uint8_t {
     Selected,
 };
 
-// Immutable after startup. Zero-initialized uncovered cells execute target-only.
+// Immutable after startup. Legacy schema1/2 tables default uncovered cells to K0. Schema3
+// explicitly fills uncovered cells from default_action (currently K7) before applying measured
+// overrides, so "no evidence" cannot silently become target-only.
 struct CalibratedRoutingTable {
     std::array<std::array<std::uint32_t, 3>, kMaximumConcurrency> draft_tokens{};
+    std::uint32_t default_action = 0;
     DFlashProposalCompute proposal_compute = DFlashProposalCompute::Full;
 
     [[nodiscard]] std::uint32_t proposal_width(std::uint32_t action) const noexcept {

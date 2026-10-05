@@ -30,24 +30,46 @@ uses resolved sampling values.
 After the previous round has completely committed, Program selects one action
 for the actual compact batch. The table key is active batch 1–8 and the maximum
 execution frontier across its lanes: ≤1024, 1025–8192 or 8193–32768. Client
-concurrency is not the table key. Missing cells and out-of-domain frontiers
-select target-only.
+concurrency is not the table key.
 
-Actions are target-only or K7/K11/K15 with physical target widths 1/8/12/16.
-The maximum drafter remains resident. Target-only skips its neural proposal;
-speculative actions retain the maximum proposal width. Committed target
-features and DFlash context must be caught up before returning to speculation.
-Pending replay, KV and recurrent state use the preceding round's actual width,
-including when the next action is narrower. Cache restore, terminal commits
-and later continuation preserve the same committed prefix.
+Newly generated schema-3 profiles use **K7 as the safe baseline**. Missing cells,
+uncovered cells and candidates that fail qualification remain K7. A cell is
+serialized only when measured evidence shows that K0 or K11 should override K7.
+K15 remains available as a standalone fixed validation arm but is not selected
+by schema-3 Auto. This deliberately turns calibration into Baseline + Override
+instead of treating lack of evidence as target-only.
+
+The maximum K15 drafter remains resident in this version. K0 skips its neural
+proposal. K7/K11 use either full or selected proposal compute according to the
+profile. Committed target features and DFlash context must be caught up before
+returning to speculation. Pending replay, KV and recurrent state use the
+preceding round's actual width, including when the next action is narrower.
+Cache restore, terminal commits and later continuation preserve the same
+committed prefix.
 
 ### Profile contract
 
-Profiles are local JSON artifacts with `schema_version: 1`,
-`artifact_type: "ninfer_spec_router_profile"`, `identity`, `cells` and optional
-`provenance`. Each cell contains `active_batch`, `frontier_upper`
-(1024/8192/32768) and `draft_tokens` (0/7/11/15). Repeated or invalid cells,
-unknown fields and malformed JSON are errors.
+Schema 1/2 are retained only so historical measurements keep their original
+K0-default semantics. New qualification emits schema 3:
+
+```json
+{
+  "schema_version": 3,
+  "artifact_type": "ninfer_spec_router_profile",
+  "identity": {},
+  "proposal_compute": "selected",
+  "default_action": 7,
+  "cells": [
+    {"active_batch": 1, "frontier_upper": 8192, "draft_tokens": 11}
+  ]
+}
+```
+
+Schema-3 `default_action` must be 7. `cells` is sparse and contains only
+measured overrides; the only override actions are K0 and K11. Repeated cells,
+K7/K15 override entries, invalid bounds, unknown fields and malformed JSON are
+errors. The loader expands missing cells to K7 before execution and before the
+native benchmark publishes its normalized 24-cell audit.
 
 Identity binds the model artifact ID and prefill signature, hardware class,
 backend, KV format, proposal head, startup draft count, CUDA Graph mode,
@@ -56,14 +78,14 @@ and effective execution options. Startup rejects a missing profile or any
 identity mismatch. Copying a profile from another artifact or startup
 configuration is not a fallback mechanism.
 
-Performance qualification must measure actual resident-K15 control actions,
-including target-only's feature/context maintenance. Standalone fixed K7/K11
-measurements and Stair masking do not establish these costs. Retain AB/BA pairs
-with exact greedy outputs and complete responses. Every retained pair must
-beat target-only throughput; median improvement must be at least 2%, and each
-pair's request p95 regression must not exceed 5%. Select the highest qualified
-end-to-end throughput; actions within 1% of the highest throughput prefer the
-smaller K. No qualified benefit or coverage selects target-only.
+Schema-3 performance qualification measures K7 as the baseline. K0 or K11 may
+override a cell only when every represented workload has retained AB/BA pairs
+with exact greedy outputs, every pair beats K7 throughput, median improvement is
+at least 2%, and each pair's request-p95 regression is at most 5%. If neither
+candidate qualifies, the cell remains K7. If both qualify, the higher
+end-to-end throughput wins; candidates within 1% prefer the smaller K. This is
+intentionally different from schema 1/2, which compared candidates with K0 and
+used K0 for uncovered cells.
 
 The profile generator attributes an end-to-end comparison to an actual cell
 only when that same cell accounts for at least 95% of full round elapsed time

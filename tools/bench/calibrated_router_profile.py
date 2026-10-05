@@ -1,9 +1,9 @@
 """Build an audited resident-K15 routing profile from paired public Engine measurements.
 
-Input schema1 uses full-width proposals. Schema2 additionally requires proposal_compute
-(full or selected); the physical width of every raw round must match that mode.
-Each comparison is {workload, candidate_action, pairs}; each pair is
-{pair_id, order: [0,K] or [K,0], baseline, candidate}. A record contains the complete
+Input schema1/2 preserve the historical K0-baseline qualification contract. Schema3 uses K7 as
+the safe baseline and permits only measured K0/K11 overrides; uncovered or unqualified cells stay
+K7. Schema2/3 require proposal_compute (full or selected), and raw physical widths must match it.
+Each comparison carries paired baseline/candidate records. A record contains the complete
 public identity, requested_action, configuration {prompt, max_tokens,
 client_concurrency, repeats, sampling {temperature, presence_penalty,
 frequency_penalty}}, requests (native complete responses), raw rounds and
@@ -81,7 +81,7 @@ def proposal_compute_mode(document):
     if not isinstance(document, dict):
         raise ValueError("proposal compute document must be an object")
     version = document.get("schema_version")
-    if type(version) is not int or version not in (1, 2):
+    if type(version) is not int or version not in (1, 2, 3):
         raise ValueError("unsupported proposal compute schema")
     if version == 1:
         if "proposal_compute" in document:
@@ -89,7 +89,7 @@ def proposal_compute_mode(document):
         return "full"
     mode = document.get("proposal_compute")
     if not isinstance(mode, str) or mode not in ("full", "selected"):
-        raise ValueError("schema2 requires proposal_compute=full or selected")
+        raise ValueError("schema2/3 requires proposal_compute=full or selected")
     return mode
 
 
@@ -284,14 +284,22 @@ def analyse_record(record, identity, action, proposal_compute="full"):
             "cells": stats}
 
 
-def analyse_comparison(comparison, identity, proposal_compute="full"):
-    fields(comparison, ("workload", "candidate_action", "pairs"), "comparison")
+def analyse_comparison(comparison, identity, proposal_compute="full", *,
+                       baseline_action=0, candidate_actions=(7, 11, 15),
+                       require_baseline_field=False):
+    expected_fields = ("workload", "candidate_action", "pairs", "baseline_action") if require_baseline_field \
+        else ("workload", "candidate_action", "pairs")
+    fields(comparison, expected_fields, "comparison")
     text(comparison["workload"], "workload", True)
+    if require_baseline_field:
+        measured_baseline = integer(comparison["baseline_action"], "baseline_action")
+        if measured_baseline != baseline_action:
+            raise ValueError(f"comparison baseline action must be K{baseline_action}")
     action = integer(comparison["candidate_action"], "candidate_action")
-    if action not in (7, 11, 15):
-        raise ValueError("comparison candidate action must be 7/11/15")
-    audit = {"workload": comparison["workload"], "candidate_action": action,
-             "qualified": False, "reasons": [], "pairs": []}
+    if action not in candidate_actions:
+        raise ValueError("comparison candidate action is outside the profile contract")
+    audit = {"workload": comparison["workload"], "baseline_action": baseline_action,
+             "candidate_action": action, "qualified": False, "reasons": [], "pairs": []}
     pairs = comparison["pairs"]
     if not isinstance(pairs, list):
         raise ValueError("pairs must be an array")
@@ -308,15 +316,16 @@ def analyse_comparison(comparison, identity, proposal_compute="full"):
             audit["reasons"].append("duplicate pair_id")
         ids.add(pair["pair_id"])
         order = pair["order"]
-        if order not in ([0, action], [action, 0]) or any(type(a) is not int for a in order):
+        valid_orders = ([baseline_action, action], [action, baseline_action])
+        if order not in valid_orders or any(type(a) is not int for a in order):
             audit["reasons"].append("invalid AB/BA order")
             orientation = None
         else:
-            orientation = order[0] == 0
+            orientation = order[0] == baseline_action
             orientations.add(orientation)
         entry = {"pair_id": pair["pair_id"], "order": order}
         arm_data = {}
-        for arm, selected in (("baseline", 0), ("candidate", action)):
+        for arm, selected in (("baseline", baseline_action), ("candidate", action)):
             try:
                 run = analyse_record(pair[arm], identity, selected, proposal_compute)
                 arm_data[arm] = run
@@ -342,7 +351,7 @@ def analyse_comparison(comparison, identity, proposal_compute="full"):
             p95_ratio = candidate["request_p95_ns"] / base["request_p95_ns"]
             entry["speedup"], entry["p95_ratio"] = speedup, p95_ratio
             if speedup <= 1:
-                audit["reasons"].append("retained pair does not beat target-only")
+                audit["reasons"].append(f"retained pair does not beat K{baseline_action}")
             if p95_ratio > 1.05:
                 audit["reasons"].append("retained pair p95 regression exceeds 5%")
         analysed.append((pair["pair_id"], orientation, arm_data))
@@ -365,22 +374,35 @@ def analyse_comparison(comparison, identity, proposal_compute="full"):
             "baseline_signatures": baseline_signatures,
             "pattern": tuple(sorted(((pid, orientation) for pid, orientation, _ in analysed), key=lambda item: item[0]))}
 
-
 def build_profile(document, source=None):
     compute = proposal_compute_mode(document)
-    extra = ("proposal_compute",) if document["schema_version"] == 2 else ()
-    fields(document, ("schema_version", "artifact_type", "identity", "comparisons", *extra), "input")
+    version = document["schema_version"]
+    if version == 1:
+        expected = ("schema_version", "artifact_type", "identity", "comparisons")
+    else:
+        expected = ("schema_version", "artifact_type", "identity", "comparisons", "proposal_compute")
+    fields(document, expected, "input")
     if document["artifact_type"] != "ninfer_resident_router_measurements":
         raise ValueError("resident router measurements required")
     identity = document["identity"]
     validate_identity(identity)
     if not isinstance(document["comparisons"], list):
         raise ValueError("comparisons must be an array")
-    comparisons = [analyse_comparison(c, identity, compute) for c in document["comparisons"]]
+
+    k7_baseline = version == 3
+    baseline_action = 7 if k7_baseline else 0
+    candidate_actions = (0, 11) if k7_baseline else (7, 11, 15)
+    comparisons = [
+        analyse_comparison(c, identity, compute, baseline_action=baseline_action,
+                           candidate_actions=candidate_actions,
+                           require_baseline_field=k7_baseline)
+        for c in document["comparisons"]
+    ]
     groups = defaultdict(list)
     for comparison in comparisons:
         if comparison["cell"]:
             groups[comparison["cell"]].append(comparison)
+
     choices = {}
     selection_audit = []
     for cell, group in sorted(groups.items()):
@@ -391,9 +413,10 @@ def build_profile(document, source=None):
         conflicting = [w for w, signatures in baseline_by_workload.items() if len(signatures) > 1]
         cell_audit = {"active_batch": cell[0], "frontier_upper": cell[1],
                       "required_workloads": sorted(workloads), "candidates": [],
-                      "selected_action": 0, "baseline_conflicts": sorted(conflicting)}
+                      "selected_action": baseline_action, "baseline_action": baseline_action,
+                      "baseline_conflicts": sorted(conflicting)}
         scores = {}
-        for action in (7, 11, 15):
+        for action in candidate_actions:
             members = [c for c in group if c["audit"]["candidate_action"] == action]
             reasons = []
             represented = [c["audit"]["workload"] for c in members]
@@ -423,6 +446,7 @@ def build_profile(document, source=None):
             choices[cell] = min(action for action, score in scores.items() if score >= best * 0.99)
             cell_audit["selected_action"] = choices[cell]
         selection_audit.append(cell_audit)
+
     raw_hash = hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     provenance = {
         "input": source or {"canonical_input_sha256": raw_hash},
@@ -438,18 +462,29 @@ def build_profile(document, source=None):
                                      "minimum_retained_pairs": 2},
         "comparisons": [c["audit"] for c in comparisons],
         "selection": selection_audit,
-        "uncovered_action": 0,
+        "baseline_action": baseline_action,
+        "uncovered_action": baseline_action,
     }
-    profile = {"schema_version": document["schema_version"], "artifact_type": "ninfer_spec_router_profile",
-               "identity": copy.deepcopy(identity),
-               "cells": [{"active_batch": batch, "frontier_upper": upper,
-                          "draft_tokens": choices.get((batch, upper), 0)}
-                         for batch in range(1, 9) for upper in UPPERS],
-               "provenance": provenance}
-    if document["schema_version"] == 2:
-        profile["proposal_compute"] = compute
-    return profile
 
+    if k7_baseline:
+        # Schema3 is Baseline + Override. Sparse cells are intentional: only an action that
+        # qualifies against K7 is serialized. No evidence and failed qualification both remain K7.
+        profile = {"schema_version": 3, "artifact_type": "ninfer_spec_router_profile",
+                   "identity": copy.deepcopy(identity), "proposal_compute": compute,
+                   "default_action": 7,
+                   "cells": [{"active_batch": batch, "frontier_upper": upper, "draft_tokens": action}
+                             for (batch, upper), action in sorted(choices.items())],
+                   "provenance": provenance}
+    else:
+        profile = {"schema_version": version, "artifact_type": "ninfer_spec_router_profile",
+                   "identity": copy.deepcopy(identity),
+                   "cells": [{"active_batch": batch, "frontier_upper": upper,
+                              "draft_tokens": choices.get((batch, upper), 0)}
+                             for batch in range(1, 9) for upper in UPPERS],
+                   "provenance": provenance}
+        if version == 2:
+            profile["proposal_compute"] = compute
+    return profile
 
 def unique_object(pairs):
     result = {}

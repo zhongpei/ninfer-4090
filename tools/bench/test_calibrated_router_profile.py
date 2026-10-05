@@ -67,7 +67,81 @@ def selected(profile, batch=2, upper=1024):
                 if (c["active_batch"], c["frontier_upper"]) == (batch, upper))
 
 
+def baseline_comparison(action=11, speed=1.1, workload="chat"):
+    pairs = []
+    for i, order in enumerate(((7, action), (action, 7))):
+        pairs.append({"pair_id": str(i), "order": list(order),
+                      "baseline": record(7), "candidate": record(action, wall=int(10000 / speed))})
+    return {"workload": workload, "baseline_action": 7,
+            "candidate_action": action, "pairs": pairs}
+
+
+def baseline_document(*comparisons, mode="full"):
+    return {"schema_version": 3, "artifact_type": "ninfer_resident_router_measurements",
+            "identity": identity(), "proposal_compute": mode, "comparisons": list(comparisons)}
+
+
+def selected_v3(profile, batch=2, upper=1024):
+    for cell in profile["cells"]:
+        if (cell["active_batch"], cell["frontier_upper"]) == (batch, upper):
+            return cell["draft_tokens"]
+    return profile["default_action"]
+
+
 class ProfileTest(unittest.TestCase):
+    def test_schema3_no_evidence_defaults_to_k7(self):
+        profile = build_profile(baseline_document())
+        self.assertEqual(profile["schema_version"], 3)
+        self.assertEqual(profile["default_action"], 7)
+        self.assertEqual(profile["proposal_compute"], "full")
+        self.assertEqual(profile["cells"], [])
+        self.assertEqual(selected_v3(profile), 7)
+        self.assertEqual(profile["provenance"]["baseline_action"], 7)
+        self.assertEqual(profile["provenance"]["uncovered_action"], 7)
+
+    def test_schema3_k11_override_must_beat_k7(self):
+        winning = build_profile(baseline_document(baseline_comparison(11, 1.10)))
+        self.assertEqual(selected_v3(winning), 11)
+        self.assertEqual(len(winning["cells"]), 1)
+        losing = build_profile(baseline_document(baseline_comparison(11, 0.99)))
+        self.assertEqual(selected_v3(losing), 7)
+        self.assertEqual(losing["cells"], [])
+
+    def test_schema3_k0_can_override_only_with_measured_gain(self):
+        winning = build_profile(baseline_document(baseline_comparison(0, 1.08)))
+        self.assertEqual(selected_v3(winning), 0)
+        losing = build_profile(baseline_document(baseline_comparison(0, 1.01)))
+        self.assertEqual(selected_v3(losing), 7)
+
+    def test_schema3_rejects_non_override_actions_and_wrong_baseline(self):
+        with self.assertRaises(ValueError):
+            build_profile(baseline_document(baseline_comparison(15, 1.5)))
+        bad = baseline_comparison(11)
+        bad["baseline_action"] = 0
+        with self.assertRaises(ValueError):
+            build_profile(baseline_document(bad))
+        bad = baseline_comparison(11)
+        bad.pop("baseline_action")
+        with self.assertRaises(ValueError):
+            build_profile(baseline_document(bad))
+
+    def test_schema3_selected_mode_checks_physical_width(self):
+        c = baseline_comparison(11)
+        for pair in c["pairs"]:
+            pair["baseline"]["rounds"] = [
+                {**event, "proposal_width": 8} for event in pair["baseline"]["rounds"]]
+            pair["candidate"]["rounds"] = [
+                {**event, "proposal_width": 12} for event in pair["candidate"]["rounds"]]
+        profile = build_profile(baseline_document(c, mode="selected"))
+        self.assertEqual(selected_v3(profile), 11)
+        bad = baseline_comparison(11)
+        for pair in bad["pairs"]:
+            for event in pair["baseline"]["rounds"]:
+                event["proposal_width"] = 8
+            for event in pair["candidate"]["rounds"]:
+                event["proposal_width"] = 16
+        self.assertEqual(selected_v3(build_profile(baseline_document(bad, mode="selected"))), 7)
+
     def test_gain_selects_actual_cell_and_emits_full_runtime_schema(self):
         profile = build_profile(document(comparison()))
         self.assertEqual(selected(profile), 7)
