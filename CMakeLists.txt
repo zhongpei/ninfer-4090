@@ -21,6 +21,15 @@ project(ninfer LANGUAGES C CXX CUDA)
 if(CMAKE_CUDA_ARCHITECTURES MATCHES "^(86|89)$")
   add_compile_definitions(NINFER_SM8X_COMPAT=1)
 endif()
+# Keep architecture-specific schedule tuning separate. sm_86 and sm_89 share the compatibility
+# kernel set, but Ada's 128-SM occupancy/L2 behaviour must not inherit Ampere route boundaries by
+# accident. Host-side plan files use these definitions; CUDA translation units may also use them
+# when a candidate needs an architecture-specific launch configuration.
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "86")
+  add_compile_definitions(NINFER_SM86=1)
+elseif(CMAKE_CUDA_ARCHITECTURES STREQUAL "89")
+  add_compile_definitions(NINFER_SM89=1)
+endif()
 
 # --- Global settings ---------------------------------------------------------
 option(NINFER_BUILD_APPS "Build the NInfer CLI, server and perplexity evaluator" ON)

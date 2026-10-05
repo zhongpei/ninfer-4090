@@ -59,4 +59,9 @@ void q8_dflash2_attn_input_mma_r32_c32_k128_launch(const Tensor&, const Weight&,
 void q8_dflash2_attn_input_mma_r32_c64_k128_launch(const Tensor&, const Weight&, Tensor&, Tensor&,
                                                    Tensor&, cudaStream_t);
 
+// Ada occupancy candidates for K7's exact T8/T16/T32/T64 extents. They are intentionally not
+// routed by production plans until the sm89 sweep qualifies them against the inherited winner.
+void q8_dflash2_attn_input_sm89_occ_launch(const Tensor&, const Weight&, Tensor&, Tensor&, Tensor&,
+                                           cudaStream_t);
+
 } // namespace ninfer::ops::detail
