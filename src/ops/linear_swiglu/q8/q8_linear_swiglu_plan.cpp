@@ -58,7 +58,7 @@ constexpr std::array<RouteSpec, 18> kCompanionRoutes{{
 // DFlash2MmaR32C64K128 is no longer selected at any width. It is kept rather than deleted: it ties
 // R64C64K128 at 33..44 and removing an upstream schedule makes the next catch-up merge harder for
 // no measured gain.
-constexpr std::array<RouteSpec, 8> kDFlash2Routes{{
+constexpr std::array<RouteSpec, 8> kDFlash2RoutesSm86{{
     {1, 32, Q8LinearSwiGluScheduleId::DFlash2SmallT},
     {33, 64, Q8LinearSwiGluScheduleId::DFlash2MmaR64C64K128},
     {65, 80, Q8LinearSwiGluScheduleId::DFlash2MmaR64C80K128},
@@ -68,6 +68,27 @@ constexpr std::array<RouteSpec, 8> kDFlash2Routes{{
     {176, 207, Q8LinearSwiGluScheduleId::DFlash2MmaR64C64K128},
     {208, kAnyCols, Q8LinearSwiGluScheduleId::DFlash2MmaR64C128},
 }};
+
+// Separate Ada routing even while its initial winners match the sm_86 table. K7 lands at
+// T8/T16/T32/T64: the first three use the exact/capacity small-T family and T64 uses the K128
+// C64 MMA family.  The sm89 sweep keeps r32/r64 C64 competitors visible at T64 because Ada's
+// 128 SMs can move the occupancy crossover without changing arithmetic.
+constexpr std::array<RouteSpec, 8> kDFlash2RoutesSm89{{
+    {1, 32, Q8LinearSwiGluScheduleId::DFlash2SmallT},
+    {33, 64, Q8LinearSwiGluScheduleId::DFlash2MmaR64C64K128},
+    {65, 80, Q8LinearSwiGluScheduleId::DFlash2MmaR64C80K128},
+    {81, 96, Q8LinearSwiGluScheduleId::DFlash2MmaR64C96K128},
+    {97, 128, Q8LinearSwiGluScheduleId::DFlash2MmaR64C128},
+    {129, 175, Q8LinearSwiGluScheduleId::DFlash2MmaR64C80K128},
+    {176, 207, Q8LinearSwiGluScheduleId::DFlash2MmaR64C64K128},
+    {208, kAnyCols, Q8LinearSwiGluScheduleId::DFlash2MmaR64C128},
+}};
+
+#if defined(NINFER_SM89)
+constexpr const auto& kDFlash2Routes = kDFlash2RoutesSm89;
+#else
+constexpr const auto& kDFlash2Routes = kDFlash2RoutesSm86;
+#endif
 
 template <std::size_t N>
 constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes) {

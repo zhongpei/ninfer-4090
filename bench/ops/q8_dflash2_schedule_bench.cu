@@ -69,6 +69,7 @@ void sweep_attn_input(const ninfer::bench::SweepOptions& base) {
         {"mma_r32_c64_k128", make(&detail::q8_dflash2_attn_input_mma_r32_c64_k128_launch), 0},
         {"mma_r32_c64", make(&detail::q8_dflash2_attn_input_mma_r32_c64_launch), 0},
         {"mma_r64_c128", make(&detail::q8_dflash2_attn_input_mma_r64_c128_launch), 0},
+        {"sm89_occ_k7", make(&detail::q8_dflash2_attn_input_sm89_occ_launch), 64},
     };
 
     ninfer::bench::SweepOptions options = base;
@@ -116,6 +117,7 @@ void sweep_linear_swiglu(const ninfer::bench::SweepOptions& base) {
         {"mma_r64_c96_k128", make(&detail::q8_dflash2_linear_swiglu_mma_r64_c96_k128_launch), 0},
         // What DFlash2MmaR64C128 resolves to: the shared non-DFlash2 kernel, not a k128 variant.
         {"mma_r64_c128", make(&detail::q8_linear_swiglu_mma_r64_c128_launch), 0},
+        {"sm89_occ_k7", make(&detail::q8_dflash2_linear_swiglu_sm89_occ_launch), 64},
     };
 
     ninfer::bench::SweepOptions options = base;
@@ -141,7 +143,9 @@ void sweep_linear_swiglu(const ninfer::bench::SweepOptions& base) {
 
 int main(int argc, char** argv) {
     ninfer::bench::SweepOptions options;
-    options.tokens = {1, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 96, 112, 128, 160, 192, 256, 384};
+    // K7's production extents are deliberately first so an sm89 qualification can run the
+    // minimal --tokens 8,16,32,64 sweep without losing the broader route-boundary tool.
+    options.tokens = {8, 16, 32, 64, 1, 24, 40, 48, 56, 72, 80, 96, 112, 128, 160, 192, 256, 384};
     if (!ninfer::bench::parse_sweep_args(argc, argv, options)) {
         std::fprintf(stderr, "usage: %s [--tokens T,...] [--repeat N] [--warmup N] [--spread]\n", argv[0]);
         return 2;

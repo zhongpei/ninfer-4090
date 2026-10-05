@@ -48,4 +48,8 @@ void q8_dflash2_linear_swiglu_mma_r64_c80_k128_launch(const Tensor&, const Weigh
 void q8_dflash2_linear_swiglu_mma_r64_c96_k128_launch(const Tensor&, const Weight&, Tensor&,
                                                       cudaStream_t);
 
+// Ada occupancy candidates for the K7 T8/T16/T32/T64 hot extents. Benchmark-only until the
+// sm89 qualification demonstrates an end-to-end gain and the route table is changed explicitly.
+void q8_dflash2_linear_swiglu_sm89_occ_launch(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+
 } // namespace ninfer::ops::detail
