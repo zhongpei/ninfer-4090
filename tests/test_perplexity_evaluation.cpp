@@ -61,6 +61,53 @@ int main() {
                             "window boundaries match the protocol");
     }
 
+    const std::array<std::uint32_t, 4> depths{{4, 8, 16, 32}};
+    const auto depth_windows = ninfer::perplexity::plan_depth_windows(20, depths, 3);
+    failures += require(depth_windows.size() == 3,
+                        "long-history planner omits depths beyond the stream");
+    const std::array<ninfer::perplexity::WindowPlan, 3> expected_depths{{
+        {.input_begin = 0, .input_end = 7, .target_begin = 4, .target_end = 7, .first_target = 4},
+        {.input_begin = 0, .input_end = 11, .target_begin = 8, .target_end = 11, .first_target = 8},
+        {.input_begin = 0, .input_end = 19, .target_begin = 16, .target_end = 19, .first_target = 16},
+    }};
+    for (std::size_t index = 0; index < depth_windows.size(); ++index) {
+        const auto& actual = depth_windows[index];
+        const auto& wanted = expected_depths[index];
+        failures += require(actual.input_begin == wanted.input_begin &&
+                                actual.input_end == wanted.input_end &&
+                                actual.target_begin == wanted.target_begin &&
+                                actual.target_end == wanted.target_end &&
+                                actual.first_target == wanted.first_target,
+                            "long-history window preserves the complete prefix");
+    }
+
+    // A short final tail scores its available targets, but a depth at the stream end has none.
+    const std::array<std::uint32_t, 2> boundary_depths{{19, 20}};
+    const auto boundary = ninfer::perplexity::plan_depth_windows(20, boundary_depths, 2048);
+    failures += require(boundary.size() == 1 && boundary[0].input_begin == 0 &&
+                            boundary[0].input_end == 20 && boundary[0].first_target == 19 &&
+                            boundary[0].target_begin == 19 && boundary[0].target_end == 20,
+                        "partial tail scores the final successor with its entire history");
+    for (const auto invalid : {std::vector<std::uint32_t>{8, 8},
+                              std::vector<std::uint32_t>{8, 4},
+                              std::vector<std::uint32_t>{0},
+                              std::vector<std::uint32_t>{}}) {
+        bool rejected = false;
+        try {
+            (void)ninfer::perplexity::plan_depth_windows(20, invalid, 3);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        failures += require(rejected, "invalid depth sequence is rejected");
+    }
+    bool rejected_tail = false;
+    try {
+        (void)ninfer::perplexity::plan_depth_windows(20, depths, 0);
+    } catch (const std::invalid_argument&) {
+        rejected_tail = true;
+    }
+    failures += require(rejected_tail, "zero-length depth tail is rejected");
+
     const std::vector<float> first{-1.0F, -2.0F};
     const std::vector<float> second{-3.0F};
     ninfer::perplexity::ScoreAggregate a;

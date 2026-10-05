@@ -80,8 +80,8 @@ __device__ __forceinline__ __half2 kv_cache_fp8_dequant_code2_to_half2(std::uint
     return __hmul2(kv_cache_fp8_code2_to_half2(storage), __halves2half2(scale, scale));
 }
 
-// Dequantizes 8 contiguous E4M3 codes (16 bytes) to FP16, for PV MMA operands on hardware with
-// no FP8 tensor-core path (sm_86/sm_89): the row's scale is a single value shared by every code.
+// Dequantizes 8 contiguous E4M3 codes to FP16 for legacy/widened PV paths. sm_89 native FP8
+// attention consumes the stored codes directly and does not call this helper.
 __device__ __forceinline__ int4 kv_cache_fp8_dequant_f16x8(const std::uint8_t* codes,
                                                            __half scale) {
     const int2 raw         = load_vec<int2>(codes);
@@ -96,9 +96,8 @@ __device__ __forceinline__ int4 kv_cache_fp8_dequant_f16x8(const std::uint8_t* c
                      static_cast<int>(packed[2]), static_cast<int>(packed[3]));
 }
 
-// Dequantizes 8 contiguous E4M3 codes (16 bytes) to BF16, for QK MMA operands on hardware with
-// no FP8 tensor-core path: sm_86/sm_89 must run QK on ordinary BF16 Tensor Cores instead of the
-// Blackwell-only mma.sync...kind::f8f6f4, so K needs a real (not just reinterpreted) wide copy.
+// Dequantizes 8 contiguous E4M3 codes to BF16 for legacy/widened QK paths. sm_89 uses the native
+// mma.sync.m16n8k32 E4M3 instruction; Blackwell uses its own block-scaled family.
 __device__ __forceinline__ int4 kv_cache_fp8_dequant_bf16x8(const std::uint8_t* codes,
                                                              __half scale) {
     const int2 raw         = load_vec<int2>(codes);

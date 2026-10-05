@@ -4,7 +4,7 @@
 // geometry, 6 on the 16-head one -- both reach the same 48-row tile bound). A CTA owns one KV head
 // and all of its GQA query heads, so every persistent K/V byte is streamed once. Unlike this
 // fork's INT8 path (which keeps QK on native s8 Tensor Cores, since Ampere/Ada have INT8
-// tensor-core support), sm_86/sm_89 have no FP8 tensor-core path at all, so both K and V are
+// tensor-core support), this legacy widen path is retained for sm_86; sm_89 production dispatch uses native FP8 Tensor Core QK/PV, so both K and V are
 // dequantized to wide types before any MMA: K to BF16 for QK, V to FP16 for PV, both with FP32
 // accumulation. Q is never quantized -- only the cache is FP8, so Q needs no codec at all -- but
 // it still gets the same D256 Hadamard rotation as cached K, since the cache stores K

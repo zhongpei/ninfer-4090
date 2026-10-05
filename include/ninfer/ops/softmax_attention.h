@@ -59,13 +59,14 @@ struct ContextAttentionExecutionEnvelope {
  * The qualified BFloat16 compute profile keeps Q/K and persistent K at BF16 and uses native BF16
  * QK plus FP16 P/V MMA. INT8-family profiles use native signed-INT8 Q/K MMA with independently scaled main
  * and residual Q terms per G64, and use FP16 P/V MMA. sm_100a/sm_120a use native E4M3FN QK MMA for FP8
- * and K8V4's key plane; this fork's sm_86/sm_89 build has no FP8 tensor-core path at all (unlike
- * INT8), so FP8, K8V4, and NVFP4 instead dequantize both K and V to BF16/FP16 up front and run QK
- * on native BF16 MMA, exactly as the BFloat16 profile does. NVFP4 and K8V4 never quantize Q to
- * FP4 or FP8 on any target. INT8 QK accumulates each main/residual group in INT32 and combines represented group
- * products in FP32; the other QK profiles accumulate in FP32. Every profile retains FP32
- * accumulation for PV, split state, merge, normalization, and applicable Hadamard reductions. P is
- * never quantized to FP8/FP4, and only the final public output is stored as BF16. These arithmetic
+ * and K8V4's key plane. sm_89 uses native E4M3FN QK and PV for the FP8 cache: transient rotated Q
+ * and P*VScale operands use independently scaled main and residual E4M3 terms. sm_86 retains the
+ * widened FP8 path. NVFP4 and K8V4 on sm_86/sm_89 widen K/V for BF16/FP16 MMA and never quantize Q
+ * to FP4 or FP8. INT8 QK accumulates each main/residual group in INT32 and combines represented
+ * group products in FP32; the other QK profiles accumulate in FP32. Every profile retains FP32
+ * accumulation for PV, split state, merge, normalization, and applicable Hadamard reductions.
+ * sm_89 FP8 quantizes the private PV contraction operands, while softmax statistics retain the
+ * unquantized FP32 probabilities. Only the final public output is stored as BF16. These arithmetic
  * paths are implementation profiles rather than extra public tensor boundaries. Every cache route
  * has one named numerical criterion and is checked directly against its independent oracle;
  * route-to-route parity is only supplementary evidence.
