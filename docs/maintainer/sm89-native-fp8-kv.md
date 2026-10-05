@@ -1,7 +1,10 @@
 # RTX 4090 native FP8 KV attention
 
-Status: **experimental, opt-in through `--kv-dtype fp8`**. INT8 remains the product baseline until
-the long-history quality and throughput gates are run on Bonsai 27B.
+Status: **opt-in through `--kv-dtype fp8`**. Bonsai 27B qualification on 2026-10-05
+selects INT8 as the sm89 product default. Native-FP8 passes 25 focused numerical cases and has
+measured quality through a 258048-token history. It improves decode on the tested 29K synthetic
+input while reducing prefill throughput. See the [four-format report](../performance/bonsai-kv-4090-2026-10-05.md)
+for measurements and their limits.
 
 ## Why this path exists
 
@@ -66,9 +69,9 @@ published once through the canonical paged-cache append Op, and all query widths
 the native small-T implementation. This gives decode, speculative verify and causal-scoring
 prefill the same FP8 arithmetic.
 
-The first implementation chooses correctness/one implementation over a specialized wide-prompt
-tile. Wide prompt throughput may therefore need a later native FP8 prompt kernel after the quality
-gate establishes that the arithmetic is acceptable.
+The implementation uses the same arithmetic for wide prompts and small query widths.
+The measured prefill penalty is recorded in the report; a specialized wide-prompt tile would need
+its own numerical and performance qualification.
 
 sm86 retains the legacy widened implementation.
 
@@ -90,8 +93,8 @@ python3 -m tools.bench.run_kv_long_context_perplexity \
 INT8 is the default baseline. Evaluate the per-depth `delta_mean_nll_vs_baseline` and
 `ppl_change_percent_vs_baseline`; do not use only the aggregate row.
 
-No quality or performance result is claimed by this implementation PR. Local RTX 4090 measurement
-is authoritative.
+Local RTX 4090 measurements in the linked report are authoritative for the tested workload;
+they do not qualify other architectures or extended YaRN contexts.
 
 The input must reach every requested depth. The bundled corpus has approximately 64K tokens per
 stream; for deeper measurements explicitly construct a longer stream and record its source order.

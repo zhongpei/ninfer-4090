@@ -6,8 +6,8 @@ NInfer-4090 是面向 **NVIDIA GeForce RTX 4090（24 GB，`sm_89`）** 的 C++/C
 主要模型为 [WaveCut/Ternary-Bonsai-2-27B-NInfer-v3](https://huggingface.co/WaveCut/Ternary-Bonsai-2-27B-NInfer-v3)，
 支持三值权重、MTP/DFlash2 推测解码、分页 KV、前缀复用、Vision 和 YaRN 风格的长上下文位置缩放。
 
-当前实测推荐是：**原生上下文使用 Fixed K7；扩展上下文使用 MTP3 + YaRN，并优先考虑 `rk4v4-e8`。**
-Fixed K7 的性能结论来自 INT8 KV、原生 RoPE、关闭 Vision 的测试配置；不能直接用于其他 KV 或长上下文配置。
+当前实测推荐是：**原生上下文默认 INT8 KV + Fixed K7；扩展上下文使用 MTP3 + YaRN，并优先考虑 `rk4v4-e8`。**
+Fixed K7 的完整并发矩阵来自 INT8 KV、原生 RoPE、关闭 Vision 的测试配置；其他 KV 的 C1 比较见下文专项报告。
 Auto Selected 已通过对应正确性验证，但尚未证明比最佳 Fixed 策略稳定快至少 2%，因此仍为可选功能。
 
 本文汇总截至 **2026-10-05** 的功能和已有测量。历史测试说明其执行版本的结果，本次文档重写没有重新运行这些测试。
@@ -156,12 +156,15 @@ python3.11 -m tools.bench.run_dflash_gpu_campaign \
 
 生成程序接受 `bf16`、`int8`、`fp8`、`rk8v4`、`rk4v4`、`rk4v4-e8`、`rk2v4-e8`、`nvfp4`、`k8v4`。
 这是 KV 存储选择，不表示 RTX 4090 可执行 Blackwell 专用的权重/激活 kernel。
+sm89 构建的 Engine、CLI、Serving 和 inference benchmark 在省略 KV 选项时统一使用 INT8；其他架构保持原有默认值。
+native-FP8、RK8V4 和 RK4V4-E8 均可显式选择。选择依据见 [Bonsai 四格式报告](docs/performance/bonsai-kv-4090-2026-10-05.md)。
 下面的选择依据分别是实测推荐与当前长上下文产品设计：
 
 | 使用目标 | 配置 | 证据范围 |
 |---|---|---|
 | 已测原生上下文吞吐 | INT8 KV + Fixed K7 | 本文 DFlash2 真实模型矩阵 |
-| 原生上下文节省 KV | `rk8v4` 或 `rk4v4-e8` | 已有实现；本文 INT8 性能表不覆盖它们 |
+| 长输入且解码占主导 | `fp8`（sm89 native-FP8） | 29K 合成输入 decode +16.5%，prefill −30.8%；不是通用吞吐优势 |
+| 原生上下文节省 KV | `rk8v4` 或 `rk4v4-e8` | 同容量 payload 比 INT8 少约 24.2% / 48.5%；质量与 C1 吞吐见四格式专项报告 |
 | 超过原生 262144 tokens | MTP3 + YaRN + `rk4v4-e8` | 支持路径；512K/658176 的完整容量与质量验收不能由 INT8 矩阵代替 |
 | 图像/视频输入 | `--vision --vision-residency overlay` | 需要 Vision 组件；本文最新 DFlash2 性能矩阵关闭 Vision |
 
@@ -251,6 +254,25 @@ RTX 4090 cold-cache 测量采用 5 次 warmup、31 次测量：
 [PR #19](https://github.com/zhongpei/ninfer-4090/pull/19)；
 本地证据目录为 `profiles/bench/pr19-t64-2026-10-05/`，含数值日志、kernel 测量、A/B JSON 与 `summary.json`。
 
+### Bonsai 27B 四格式 KV 专项比较（2026-10-05）
+
+PR #24 的 native-FP8 修复后，独立 FP64 attention oracle 数值测试 **25/25 通过**，评分比较工具测试 **9 passed**；没有放宽误差门限。
+质量测试使用完整历史 KV，再评分后续 2048 tokens，覆盖四领域 8K/32K 和拼接长文本的 64K/128K/192K/258048 深度。
+方法、逐深度 PPL、显存和范围限制见 [四格式测试报告](docs/performance/bonsai-kv-4090-2026-10-05.md)。
+
+下面是实际 29141-token prompt、C1 Fixed K7、256-token 输出、三次重复的中位数。
+输入要求连续输出整数，接受率为 100%；这是合成任务，不能外推为普通对话吞吐。
+
+| KV | Prefill（k tok/s） | Decode（tok/s） | 32768-token KV payload |
+|---|---:|---:|---:|
+| INT8 | 2.60 | 415.7 | 1056 MiB |
+| native-FP8 | 1.80 | 484.1 | 1032 MiB |
+| RK8V4 | 2.56 | 404.7 | 800 MiB |
+| RK4V4-E8 | 2.56 | 405.5 | 544 MiB |
+
+native-FP8 的长输入 decode 提高约 16.5%，但 prefill 降低约 30.8%；实际 6847-token prompt 的 decode 则降低约 3.6%。
+四领域 8K/32K 的 PPL 相对 INT8 变化分别为：native-FP8 +0.018%/+0.051%，RK8V4 +0.027%/+0.060%，RK4V4-E8 +0.411%/+0.247%。
+
 ### 早期 Qwen3.8 INT8 兼容性结果（2026-08-15）
 
 这是 **Qwen3.8-27B INT8 工件的历史基线**，不是 Bonsai 或当前构建的性能。
@@ -294,7 +316,7 @@ PR #19 按范围只测试新增 T64 路由，旧路径仅比对源码，没有�
 后续 Fixed/Resident 矩阵在状态与数值修复后重新建立了上面列出的精确输出证据。
 这些历史记录保留在本地 `profiles/bench/final-ab-2026-10-02/final-summary.json`，不作为当前版本的完整测试通过声明。
 
-**尚未由本文数据完成验证的范围：** Bonsai 的 `rk4v4-e8`/`rk2v4-e8` 全面质量与性能、
+**尚未由本文数据完成验证的范围：** Bonsai 的 `rk2v4-e8` 质量与性能、四格式的 C8 吞吐与业务准确率、
 YaRN 512K/658176 的完整容量与质量、开启 Vision 的最新 DFlash2 矩阵，以及其他硬件和 Windows 当前版本。
 不使用其他模型或历史硬件的困惑度、准确率、显存数字替代这些结论。
 

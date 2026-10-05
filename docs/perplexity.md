@@ -26,6 +26,8 @@ KV representations are `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `rk4v4-e8`,
 Historical fixed-window measurements for selected formats are in
 [`docs/config-calculator.html`](config-calculator.html). They do not qualify the new sm89 native
 FP8 arithmetic or every format listed above on Bonsai 27B.
+The [Bonsai 27B four-format report](performance/bonsai-kv-4090-2026-10-05.md) separately qualifies
+INT8, native-FP8, RK8V4, and RK4V4-E8 with complete histories through depth 258048.
 
 ```bash
 ./build/apps/ninfer-perplexity models/qwen3_8_27b.ninfer \

@@ -228,13 +228,17 @@ ninfer_bench --weights <artifact.ninfer>
           [-pg, --prompt-gen <P,G;P,G...>]
           [-r, --repetitions <n>] [--warmup <n>]
           [--max-ctx <tokens>] [--prefill-chunk <tokens|auto>]
-          [--kv-dtype <bf16|int8|fp8|nvfp4|k8v4>]
+          [--kv-dtype <bf16|int8|fp8|rk8v4|rk4v4-e8|nvfp4|k8v4>]
           [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--lm-head-draft]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
           [-o, --output <table|json|csv>] [--output-file <path>]
 ```
 
 With no `-p`, `-n`, or `-pg`, the matrix is `pp512` and `tg128`.
+
+The inference benchmark defaults to INT8 KV on sm89 builds and BF16 on other builds.
+Explicit `--kv-dtype` selections override that default. See the
+[Bonsai four-format report](../docs/performance/bonsai-kv-4090-2026-10-05.md) for the measured tradeoffs.
 
 `--prefill-chunk` defaults to fixed 1024. Numeric values keep the existing behavior; `auto`
 selects the largest safe physical chunk at startup from 8192/6144/4096/3072/2048/1536/1024

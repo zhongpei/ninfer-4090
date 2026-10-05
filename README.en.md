@@ -7,8 +7,8 @@ Its primary model is [WaveCut/Ternary-Bonsai-2-27B-NInfer-v3](https://huggingfac
 It supports ternary weights, MTP/DFlash2 speculative decoding, paged KV, prefix reuse, Vision,
 and YaRN-style position scaling for extended contexts.
 
-The current recommendation is **Fixed K7 for native contexts; MTP3 + YaRN with `rk4v4-e8` as the preferred option for extended contexts**.
-The Fixed K7 performance evidence uses INT8 KV, native RoPE, and Vision disabled; it does not qualify other KV or extended-context configurations.
+The current recommendation is **INT8 KV + Fixed K7 by default for native contexts; MTP3 + YaRN with `rk4v4-e8` as the preferred option for extended contexts**.
+The full Fixed K7 concurrency matrix uses INT8 KV, native RoPE, and Vision disabled; the focused report below separately compares other KV formats at C1.
 Auto Selected has passed the applicable correctness checks, but has not demonstrated a repeatable gain of at least 2%
 over the best fixed policy, so it remains opt-in.
 
@@ -167,12 +167,15 @@ See [calibrated routing](docs/maintainer/speculative-routing.md#calibrated-dflas
 
 Generation accepts `bf16`, `int8`, `fp8`, `rk8v4`, `rk4v4`, `rk4v4-e8`, `rk2v4-e8`, `nvfp4`, and `k8v4`.
 These select KV storage; they do not imply that RTX 4090 can execute Blackwell-only weight/activation kernels.
+On sm89 builds, Engine, CLI, Serving, and inference benchmarks consistently default to INT8 when the KV option is omitted; other architectures retain their existing defaults.
+native-FP8, RK8V4, and RK4V4-E8 remain explicit choices. See the [Bonsai four-format report](docs/performance/bonsai-kv-4090-2026-10-05.md) for the decision.
 The choices below distinguish measured recommendations from the current extended-context product design:
 
 | Goal | Configuration | Evidence scope |
 |---|---|---|
 | Measured native-context throughput | INT8 KV + Fixed K7 | DFlash2 real-model matrices below |
-| Reduce native-context KV storage | `rk8v4` or `rk4v4-e8` | Implemented; not covered by the INT8 performance tables |
+| Long input with decode dominating | `fp8` (sm89 native-FP8) | At a synthetic 29K input: decode +16.5%, prefill −30.8%; not a general throughput advantage |
+| Reduce native-context KV storage | `rk8v4` or `rk4v4-e8` | At equal capacity, payload is about 24.2% / 48.5% smaller than INT8; see the four-format report for quality and C1 throughput |
 | Beyond the native 262144 tokens | MTP3 + YaRN + `rk4v4-e8` | Supported path; INT8 matrices do not replace full capacity and quality qualification at 512K/658176 |
 | Image/video input | `--vision --vision-residency overlay` | Requires Vision components; the latest DFlash2 performance matrices disable Vision |
 
@@ -277,6 +280,25 @@ See [PR #19](https://github.com/zhongpei/ninfer-4090/pull/19).
 Local evidence is under `profiles/bench/pr19-t64-2026-10-05/`, including numerical logs,
 kernel measurements, A/B JSON reports, and `summary.json`.
 
+### Bonsai 27B four-format KV comparison (2026-10-05)
+
+After the native-FP8 fixes in PR #24, **25/25** numerical cases pass against an independent FP64 attention oracle, and the scoring comparison tool has **9 passing tests**. Error limits were not relaxed.
+Quality tests materialize the complete KV history before scoring the next 2048 tokens: four domains at 8K/32K and a concatenated stream at depths 64K/128K/192K/258048.
+See the [four-format test report](docs/performance/bonsai-kv-4090-2026-10-05.md) for methodology, per-depth PPL, memory, and limitations.
+
+The table gives medians of three repetitions with an actual 29141-token prompt, C1 Fixed K7, and 256 output tokens.
+The task requests consecutive integers and achieves 100% draft acceptance; this synthetic workload does not establish ordinary conversation throughput.
+
+| KV | Prefill (k tok/s) | Decode (tok/s) | 32768-token KV payload |
+|---|---:|---:|---:|
+| INT8 | 2.60 | 415.7 | 1056 MiB |
+| native-FP8 | 1.80 | 484.1 | 1032 MiB |
+| RK8V4 | 2.56 | 404.7 | 800 MiB |
+| RK4V4-E8 | 2.56 | 405.5 | 544 MiB |
+
+native-FP8 improves decode by about 16.5% at the longer input but reduces prefill by about 30.8%; at an actual 6847-token prompt, decode is about 3.6% slower.
+Four-domain PPL changes versus INT8 at 8K/32K are +0.018%/+0.051% for native-FP8, +0.027%/+0.060% for RK8V4, and +0.411%/+0.247% for RK4V4-E8.
+
 ### Early Qwen3.8 INT8 compatibility results (2026-08-15)
 
 This is a **historical Qwen3.8-27B INT8 artifact baseline**, not a Bonsai or current-build measurement.
@@ -324,7 +346,7 @@ Later fixed/resident matrices re-established the exact-output evidence listed ab
 These historical records remain locally in `profiles/bench/final-ab-2026-10-02/final-summary.json`;
 they are not a current-version full-suite pass claim.
 
-**Not fully qualified by the data here:** comprehensive Bonsai quality/performance with `rk4v4-e8`/`rk2v4-e8`,
+**Not qualified by the data here:** Bonsai quality/performance with `rk2v4-e8`, C8 throughput and task accuracy across the four KV formats,
 full capacity and quality at YaRN 512K/658176, the latest DFlash2 matrix with Vision enabled,
 and other hardware or the current Windows version.
 Perplexity, accuracy, and VRAM numbers from other models or historical hardware do not substitute for these results.

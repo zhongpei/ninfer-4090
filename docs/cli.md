@@ -246,7 +246,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--prefill-chunk N\|auto` | fixed positive text-prefill chunk in multiples of 128, or startup-selected physical chunk | `1024` |
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
-| `--kv-dtype bf16\|int8\|fp8\|rk8v4\|nvfp4\|k8v4` | KV-cache storage. `rk8v4` is opt-in RotorQuant; all six are accepted on this fork's sm_86/sm_89 targets | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|rk8v4\|rk4v4\|rk4v4-e8\|rk2v4-e8\|nvfp4\|k8v4` | KV-cache storage; see the [Bonsai comparison](performance/bonsai-kv-4090-2026-10-05.md) for the sm89 default decision | `int8` on sm89; `bf16` otherwise |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--spec-router fixed\|stair\|calibrated` | fixed execution, Stair licensed extent, or calibrated DFlash2 physical action | `fixed` |
