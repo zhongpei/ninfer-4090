@@ -51,43 +51,6 @@ std::int32_t causal_small_t_split_count(std::int32_t window, std::int32_t tokens
             return Geometry::SmallTMaximumSplits;
         }
     }
-    // A 64-key default split just above a 32-key boundary makes the partial kernel execute a
-    // nearly empty second tile. T=5 uses one 32-key tile per split; the short T>=6 profile keeps
-    // all newly appended rows in one tail split while retaining a useful B=8 grid.
-    if (kv_storage_is_int8_family(storage) && tokens == 5 && window > 128 && window <= 512) {
-        return div_up(window, 32 / Geometry::SmallTSplitScale);
-    }
-    if (kv_storage_is_int8_family(storage) && tokens >= 6 && window > 128 && window <= 160) {
-        constexpr std::int32_t kKeysPerSplit = Geometry::SmallTSplitScale == 2 ? 17 : 24;
-        return div_up(window, kKeysPerSplit);
-    }
-#if defined(NINFER_SM89)
-    // Bc=64 is one CTA/SM on the Ada model shapes. Keep the 4K-8K INT8 grid at or
-    // below one physical RTX 4090 wave after accounting for this geometry's KV-head
-    // count. The old 42*scale cap encoded a 170-SM Blackwell assumption and left a
-    // trailing partial wave on the 128-SM target. UDPSendToFailed/ninfer-4090
-    // qualified the same policy for T1/T5/T6, so apply it to every small width that
-    // shares this kernel rather than only T>=6.
-    if (kv_storage_is_int8_family(storage) && tokens >= 1 && tokens <= 6 &&
-        window > 4096 && window <= 8198) {
-        const std::int32_t splits   = div_up(window, 192 / Geometry::SmallTSplitScale);
-        constexpr std::int32_t kMin = 4 * Geometry::SmallTSplitScale;
-        constexpr std::int32_t kRtx4090SmCount = 128;
-        constexpr std::int32_t kMax =
-            (kRtx4090SmCount / Geometry::KVHeads) * Geometry::SmallTSplitScale;
-        const std::int32_t clamped = (splits > kMin) ? splits : kMin;
-        return (clamped < kMax) ? clamped : kMax;
-    }
-#else
-    // Compatibility targets retain their previously qualified partitioning.
-    if (kv_storage_is_int8_family(storage) && tokens >= 6 && window > 5000 && window <= 8198) {
-        const std::int32_t splits   = div_up(window, 192 / Geometry::SmallTSplitScale);
-        constexpr std::int32_t kMin = 4 * Geometry::SmallTSplitScale;
-        constexpr std::int32_t kMax = 42 * Geometry::SmallTSplitScale;
-        const std::int32_t clamped  = (splits > kMin) ? splits : kMin;
-        return (clamped < kMax) ? clamped : kMax;
-    }
-#endif
     return causal_small_t_split_upper_bound<Geometry>(window);
 }
 
