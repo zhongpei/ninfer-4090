@@ -15,6 +15,13 @@ namespace ninfer::ops::detail {
 
 struct Q4KSplitStoreEpilogue {};
 
+template <class Epilogue, class = void>
+struct Q4KSplitTileEpilogue : std::false_type {};
+
+template <class Epilogue>
+struct Q4KSplitTileEpilogue<Epilogue, std::void_t<decltype(Epilogue::kIsTileEpilogue)>>
+    : std::bool_constant<Epilogue::kIsTileEpilogue> {};
+
 struct Q4KSplitIdentityRows {
     static constexpr int kOutputRowsPerTile = 16;
     static constexpr int kOutputRowsPerCta  = kOutputRowsPerTile;
@@ -276,13 +283,63 @@ __launch_bounds__(256, MinBlocks) __global__
     }
     if constexpr (kKWarps > 2) { __syncthreads(); }
 
-    if (k_split == 0) {
+    if constexpr (Q4KSplitTileEpilogue<Epilogue>::value) {
+        // After the K reduction the partial arena is dead. Reuse it as a dense FP32 tile so the
+        // epilogue can consume every token of one output row without materializing a BF16 matrix
+        // in global memory. Only k_split==0 owns the completed sums; all CTA warps rendezvous
+        // before one thread per output row runs the sequential epilogue.
+        static_assert(RowPolicy::kOutputRowsPerTile == 16,
+                      "tile epilogue requires one physical 16-row MMA tile per output tile");
+        static_assert(static_cast<std::size_t>(kRowsPerCta) * kTileCols * sizeof(float) <=
+                          sizeof(shared.partial),
+                      "tile epilogue scratch must fit the retired K-reduction arena");
+        float* dense = shared.partial;
+        if (k_split == 0) {
+#pragma unroll
+            for (int t = 0; t < kTpw; ++t) {
+                const int local_tile = first_tile + t;
+#pragma unroll
+                for (int nt = 0; nt < kNt; ++nt) {
+                    float4 sum =
+                        make_float4(acc[t][nt][0], acc[t][nt][1], acc[t][nt][2], acc[t][nt][3]);
+#pragma unroll
+                    for (int split = 2; split < kKWarps; split += 2) {
+                        const float4 value = load_vec<float4>(slot(warp + split, t, nt));
+                        sum.x += value.x;
+                        sum.y += value.y;
+                        sum.z += value.z;
+                        sum.w += value.w;
+                    }
+                    const int col0 = nt * 8 + 2 * lid;
+                    const int row0 = local_tile * 16 + gid;
+                    const int row1 = row0 + 8;
+                    if (col0 < live_columns) {
+                        dense[row0 * kTileCols + col0] = sum.x;
+                        dense[row1 * kTileCols + col0] = sum.z;
+                    }
+                    if (col0 + 1 < live_columns) {
+                        dense[row0 * kTileCols + col0 + 1] = sum.y;
+                        dense[row1 * kTileCols + col0 + 1] = sum.w;
+                    }
+                }
+            }
+        }
+        __syncthreads();
+        if (tid < kRowsPerCta) {
+            constexpr int kOutputRowsPerCta = kRowsPerCta;
+            const int global_row0 =
+                static_cast<int>(blockIdx.x) * RowPolicy::kOutputRowsPerTile * kRowTiles;
+            epilogue.template store_tile<ActiveCols, kTileCols, kOutputRowsPerCta>(
+                dense, global_row0, tid, live_columns);
+        }
+    } else if (k_split == 0) {
 #pragma unroll
         for (int t = 0; t < kTpw; ++t) {
             const int row0 = (tile0 + first_tile + t) * RowPolicy::kOutputRowsPerTile;
 #pragma unroll
             for (int nt = 0; nt < kNt; ++nt) {
-                float4 sum = make_float4(acc[t][nt][0], acc[t][nt][1], acc[t][nt][2], acc[t][nt][3]);
+                float4 sum =
+                    make_float4(acc[t][nt][0], acc[t][nt][1], acc[t][nt][2], acc[t][nt][3]);
 #pragma unroll
                 for (int split = 2; split < kKWarps; split += 2) {
                     const float4 value = load_vec<float4>(slot(warp + split, t, nt));
@@ -312,6 +369,7 @@ __launch_bounds__(256, MinBlocks) __global__
             }
         }
     }
+}
 }
 
 // Launches q4_ksplit_mma_kernel over `blocks` CTAs.
