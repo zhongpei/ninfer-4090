@@ -83,6 +83,17 @@ route (11.8% less time); their distributions were 295.9..299.1 and 334.8..341.0 
 candidate for further qualification, not a route promotion. Attention's existing C32 alternative
 also measured 78.9 us at T64 versus production's 81.9 us, with overlapping distributions.
 
+### Follow-up route promotion
+
+The T64 SwiGLU result is qualitatively different from the occupancy candidates: the existing
+`mma_r32_c64_k128` distribution (295.9..299.1 us) is fully separated from the production
+`mma_r64_c64_k128` distribution (334.8..341.0 us), with an 11.8% lower median. The sm_89 route
+therefore promotes **only T64** to R32/C64/BK128. Widths 33..63 stay on R64/C64/BK128 because this
+measurement did not qualify them. sm_86 remains unchanged.
+
+The public Q8 DFlash2 conformance test covers every width 1..128, including T64, so this exact
+route point participates in the final numerical gate before merge.
+
 The comparison measures the original production kernels and candidate kernels in the same binary;
 the pre-PR commit was not independently rebuilt and timed. Build and timing completion do not
 qualify numerical correctness. No independent oracle, repeated sweep, real-model output gate,
