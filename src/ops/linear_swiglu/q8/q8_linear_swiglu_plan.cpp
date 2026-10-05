@@ -73,9 +73,14 @@ constexpr std::array<RouteSpec, 8> kDFlash2RoutesSm86{{
 // T8/T16/T32/T64: the first three use the exact/capacity small-T family and T64 uses the K128
 // C64 MMA family.  The sm89 sweep keeps r32/r64 C64 competitors visible at T64 because Ada's
 // 128 SMs can move the occupancy crossover without changing arithmetic.
-constexpr std::array<RouteSpec, 8> kDFlash2RoutesSm89{{
+constexpr std::array<RouteSpec, 9> kDFlash2RoutesSm89{{
     {1, 32, Q8LinearSwiGluScheduleId::DFlash2SmallT},
-    {33, 64, Q8LinearSwiGluScheduleId::DFlash2MmaR64C64K128},
+    // RTX 4090 cold sweep, 2026-10-05: at the production K7/C8 extent T64 the existing
+    // R32/C64/BK128 tile measured 298.0 us (295.9..299.1) versus 337.9 us
+    // (334.8..341.0) for R64/C64/BK128. Keep 33..63 unchanged because that sweep did not
+    // qualify those widths; promote only the measured exact point instead of extrapolating.
+    {33, 63, Q8LinearSwiGluScheduleId::DFlash2MmaR64C64K128},
+    {64, 64, Q8LinearSwiGluScheduleId::DFlash2MmaR32C64K128},
     {65, 80, Q8LinearSwiGluScheduleId::DFlash2MmaR64C80K128},
     {81, 96, Q8LinearSwiGluScheduleId::DFlash2MmaR64C96K128},
     {97, 128, Q8LinearSwiGluScheduleId::DFlash2MmaR64C128},

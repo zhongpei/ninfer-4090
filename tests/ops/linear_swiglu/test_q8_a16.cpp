@@ -11,7 +11,9 @@ int dflash2_conformance() {
     using namespace ninfer::test::linear_swiglu;
     std::vector<std::int32_t> tokens;
     for (int t = 1; t <= 128; ++t) tokens.push_back(t);
-    // 175/176 and 207/208 are the sm_86 DFlash2 route boundaries (q8_linear_swiglu_plan.cpp).
+    // 64 is an sm_89-only exact route point; 175/176 and 207/208 are the sm_86 boundaries.
+    // Keeping 64 in the full numerical sweep protects the Ada R32/C64 promotion independently
+    // from the surrounding 33..63 R64 route.
     for (int t : {129, 175, 176, 207, 208, 256, 1024}) tokens.push_back(t);
     constexpr std::array graphs{1,  16, 32, 40, 41, 51, 52, 63,  64,
                                 65, 80, 81, 88, 89, 96, 97, 128, 129};
