@@ -507,7 +507,9 @@ Shared prefix 的三个状态不能混为一谈：
 
 外部协议或 C++ `PromptInput` 每个请求最多提交四个显式 markers。Frontend 还可以生成最多三个 Engine
 candidates：全部 tools 之后、连续 leading System/Developer 之后，以及 full prompt。相同 frontier 合并，
-因此每个请求最多七个 prepared candidates。这个固定上限不是启动配置。
+未启用 prefix grid 时每个请求最多七个 prepared candidates；启用后的总上限为十五个。协议 marker、
+Engine candidate 和 grid candidate 的上限由公共常量共同定义，Frontend 和 ResourceManager 使用同一合同，
+不是启动配置。
 
 这三个 Engine candidates 由 `ContextCacheHints::allow_engine_automatic_shared_prefixes` 控制，默认开启。
 自带写入策略的协议（例如显式请求了 Anthropic 顶层 `cache_control` 的请求）可以关闭它们，但只应在该协议
@@ -561,6 +563,19 @@ Shared candidate 必须在 prefill 前决定是否增加 split，而物理状态
 
 实际 planner 的 baseline 是同一 frontier 的 private-only policy。Shared publication 是可选投资：没有可行
 且严格正收益的 target 时执行 private baseline 或 Skip。
+
+候选子集选择采用有界精确搜索。已有 portfolio 的 demand saving 与显式 credit 只计算一次；搜索增量更新
+每条 demand 的最大 saving、候选 credit 和数量限制，并在回退时恢复状态。剩余候选的乐观收益上界可以
+剪掉无法胜出的分支，只有仍可能胜出的可行子集才调用 Program 的精确 split-cost 接口。该接口不要求成本
+可按 frontier 相加，因此不能用只看最后一个 frontier 的动态规划替代，也不能按长度截断合法候选。
+
+搜索保留严格正净收益、饱和时不发布，以及收益相同时先选较少 frontier、再按 frontier 字典序选择的规则。
+单请求最多十五个候选，最坏仍有 `2^15 - 1` 个非空子集；增量估值和剪枝减少工作，不构成多项式复杂度保证。
+规划耗时的证据只适用于候选规划，不能据此宣称端到端推理加速。
+
+2026-10-06 的 Release / GCC 13.3.0 CPU 微测用 7 和 15 个候选构造全部子集均须评估、split-cost
+全部拒绝的场景，十次平均增量搜索分别约 115 微秒和 27.25 毫秒，完整 portfolio 重算对照分别约
+229 微秒和 99.10 毫秒。该微测使用固定标量 split-cost，不包含真实模型 split 计算，也不是规划延迟上限。
 
 ### 7.3 Target
 
@@ -653,7 +668,7 @@ Transfer 系数按硬件选择，prefill 系数按硬件与实际 Text/Vision co
 
 ### 8.3 Portfolio value 与 future loss
 
-ResourceManager 保存最近 32 个成功 materialize 为 Active 的请求。每条 demand record 保存 reuse domain
+ResourceManager 保存最近 64 个成功 materialize 为 Active 的请求。每条 demand record 保存 reuse domain
 以及该请求 exact-matched、selected 或可创建的 prefix keys；不保存 prompt、媒体内容、session 原文或 API
 cache key。有 Engine session key 的请求使用其稳定 digest 作为 domain；无 session key 的每个请求形成独立
 domain。

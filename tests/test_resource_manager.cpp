@@ -1951,6 +1951,85 @@ void test_portfolio_demand_and_owner_aggregation() {
     }
 }
 
+void test_shared_capture_exact_search_matches_complete_portfolios() {
+    using namespace ninfer::runtime;
+    // The oracle folds each complete portfolio from scratch; it shares no incremental state
+    // or bounds with the production search. Irregular masks represent overlapping requests.
+    for (std::uint32_t count = 7; count <= 15; ++count) {
+        for (std::uint32_t scenario = 0; scenario < 5; ++scenario) {
+            ContextPortfolioValue value;
+            std::vector<ContextPortfolioOwnerPolicy> owners{
+                {.owner = PlanningOwnerId{.value = 0}, .explicit_shared_credit = true}};
+            std::vector<ContextPortfolioCheckpointValue> checkpoints{
+                {.owner = PlanningOwnerId{.value = 0}, .demand_mask = 0x25,
+                 .rebuild_ns = 47, .baseline_recovery_ns = 12, .target_recovery_ns = 12}};
+            ContextPortfolioProjection projection;
+            const auto baseline = value.fold(owners, checkpoints, &projection);
+            std::vector<SharedCaptureValue> candidates;
+            for (std::uint32_t index = 0; index < count; ++index) {
+                candidates.push_back({
+                    .frontier = (count - index) * 32,
+                    .demand_mask = (((index * 73ULL + 19ULL) ^ (index << 3U)) & 0xff) |
+                                   (index % 2 ? 1ULL << 63 : 0),
+                    .rebuild_ns = scenario == 4 && index % 3 == 0
+                                      ? std::numeric_limits<std::uint64_t>::max() / 2
+                                      : (scenario == 3 ? 100U : 30U + (index * 29U) % 151U),
+                    .explicit_credit = scenario != 3 && index % 3 == 0,
+                    .pressure_capable = index % 4 != 0,
+                });
+            }
+            const std::uint32_t slots = scenario == 1 ? 3U : count;
+            const std::uint32_t vacant = scenario == 2 ? 0U : count;
+            const auto cost = [&](const std::vector<std::uint32_t>& frontiers) {
+                // A bundle can be cheaper than either singleton: no monotonicity assumed.
+                return scenario == 0 && frontiers.size() >= 3 ? 0ULL :
+                    static_cast<unsigned long long>(frontiers.size() * 11U +
+                                                     frontiers.front() % 23U);
+            };
+            std::vector<std::uint32_t> expected;
+            std::uint64_t best_gain = 0;
+            for (std::uint32_t mask = 1; mask < (1U << count); ++mask) {
+                if (std::popcount(mask) > slots) { continue; }
+                auto full_owners = owners;
+                auto full_checkpoints = checkpoints;
+                std::vector<std::uint32_t> frontiers;
+                std::uint32_t surplus = 0;
+                for (std::uint32_t index = 0; index < count; ++index) {
+                    if (!(mask & (1U << index))) { continue; }
+                    const auto& candidate = candidates[index];
+                    surplus += !candidate.pressure_capable;
+                    frontiers.push_back(candidate.frontier);
+                    const PlanningOwnerId owner{.value = index + 1};
+                    full_owners.push_back({.owner = owner,
+                                          .explicit_shared_credit = candidate.explicit_credit});
+                    full_checkpoints.push_back({.owner = owner,
+                        .demand_mask = candidate.demand_mask, .rebuild_ns = candidate.rebuild_ns,
+                        .baseline_recovery_ns = candidate.rebuild_ns, .target_recovery_ns = 0});
+                }
+                if (surplus > vacant) { continue; }
+                const auto result = value.fold(full_owners, full_checkpoints);
+                if (result.saturated) { continue; }
+                std::sort(frontiers.begin(), frontiers.end());
+                const auto schedule_cost = cost(frontiers);
+                if (result.target_public_value <= result.baseline_public_value ||
+                    schedule_cost >= result.target_public_value - result.baseline_public_value) {
+                    continue;
+                }
+                const auto gain = result.target_public_value - result.baseline_public_value - schedule_cost;
+                if (gain > best_gain || (gain == best_gain && (expected.empty() ||
+                    frontiers.size() < expected.size() ||
+                    (frontiers.size() == expected.size() && frontiers < expected)))) {
+                    best_gain = gain;
+                    expected = frontiers;
+                }
+            }
+            const auto selected = ContextPortfolioValue::select_shared_captures(
+                baseline, projection, candidates, slots, vacant, cost);
+            require(selected == expected, "incremental capture search differs from complete portfolio oracle");
+        }
+    }
+}
+
 void test_shared_capture_subtracts_private_transition_loss() {
     using Planner = ninfer::runtime::SharedCapturePlanner<FakeModelContract>;
 
@@ -2907,6 +2986,38 @@ void test_projected_nested_shared_candidates_use_marginal_value() {
     (void)finish_active(manager, program, active);
 }
 
+void test_grid_sized_candidates_preserve_active_requests() {
+    FakeManager manager = make_manager(2, 4, 16);
+    FakeProgram program;
+    FakeRequestBasePlan base = make_base(902);
+    base.value.prompt_tokens = 512;
+    base.value.service_work_quanta = 512;
+    for (std::uint32_t index = 1; index <= 15; ++index) {
+        const auto evidence = index <= 4 ? ninfer::SharedCandidateEvidence::ExplicitBoundary :
+                              index <= 6 ? ninfer::SharedCandidateEvidence::EngineStructural :
+                                           ninfer::SharedCandidateEvidence::EngineObserved;
+        base.cache.opportunities.push_back(FakeContextCache::Opportunity{
+            .kind = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+            .evidence = evidence,
+            .frontier = index * 32,
+        });
+    }
+    auto observed = base;
+    observed.cache.opportunities.erase(observed.cache.opportunities.begin(),
+                                       observed.cache.opportunities.begin() + 6);
+    // An independent active request supplies the first observation for the endpoint and all eight grid keys.
+    const ActiveRequest first = start_active(manager, program, 902, observed, 1);
+    require(program.selected_shared_capture_frontiers.empty(),
+            "first grid observation was speculatively captured");
+    const ActiveRequest second = start_active(manager, program, 902, base, 2);
+    require(!program.selected_shared_capture_frontiers.empty(),
+            "grid sized admission did not select a profitable capture");
+    (void)finish_active(manager, program, second);
+    (void)finish_active(manager, program, first);
+    const ActiveRequest third = start_active(manager, program, 903, make_base(903), 3);
+    (void)finish_active(manager, program, third);
+}
+
 void test_observed_shared_candidate_requires_independent_domains() {
     const auto observed_base = [](std::optional<FakeCacheSessionKey> session) {
         FakeRequestBasePlan base = make_base(71, session);
@@ -3746,6 +3857,7 @@ int main() {
              test_publication_only_pressure_constructs_adoptable_target);
     run_test("private checkpoint identity loss",
              test_private_portfolio_loss_keeps_checkpoint_identity_fixed);
+    run_test("exact capture search complete portfolio oracle", test_shared_capture_exact_search_matches_complete_portfolios);
     run_test("portfolio demand and owner aggregation", test_portfolio_demand_and_owner_aggregation);
     run_test("shared capture private transition loss",
              test_shared_capture_subtracts_private_transition_loss);
@@ -3788,6 +3900,7 @@ int main() {
     run_test("combined target exact repricing",
              test_combined_target_reprices_cancelled_pressure_copy);
     run_test("in-progress and capture", test_in_progress_adoption_and_private_capture);
+    run_test("grid sized admission with active request", test_grid_sized_candidates_preserve_active_requests);
     run_test("projected shared marginal value",
              test_projected_nested_shared_candidates_use_marginal_value);
     run_test("observed shared independent domains",

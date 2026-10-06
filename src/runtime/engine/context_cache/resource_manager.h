@@ -1889,73 +1889,28 @@ private:
             append_existing(owner, *entry.handle, entry.summary.checkpoint);
         }
 
-        std::vector<std::uint32_t> selected_frontiers;
-        std::uint64_t selected_gain = 0;
         ContextPortfolioValue projected_value;
-        if (shared_candidates.size() > 7U) {
-            throw std::logic_error("prepared shared candidates exceeded the fixed subset bound");
-        }
-        const std::uint32_t subset_count = 1U << shared_candidates.size();
-        for (std::uint32_t mask = 1; mask < subset_count; ++mask) {
-            const std::uint32_t selected_count = std::popcount(mask);
-            if (selected_count > shared_catalog_count_) { continue; }
-            std::uint32_t surplus_only_count = 0;
-            std::vector<std::uint32_t> frontiers;
-            frontiers.reserve(selected_count);
-            std::vector<ContextPortfolioOwnerPolicy> owners          = projected_owners;
-            std::vector<ContextPortfolioCheckpointValue> checkpoints = projected_checkpoints;
-            for (std::size_t index = 0; index < shared_candidates.size(); ++index) {
-                if ((mask & (1U << index)) == 0) { continue; }
-                const ProjectedSharedCandidate& candidate = shared_candidates[index];
-                if (!candidate.pressure_capable) { ++surplus_only_count; }
-                frontiers.push_back(candidate.frontier);
-                const PlanningOwnerId owner{.value = next_projected_owner +
-                                                     static_cast<std::uint32_t>(index)};
-                const bool credit =
+        ContextPortfolioProjection projection;
+        const auto baseline = projected_value.fold(projected_owners, projected_checkpoints,
+                                                   &projection);
+        std::vector<SharedCaptureValue> capture_values;
+        capture_values.reserve(shared_candidates.size());
+        for (const auto& candidate : shared_candidates) {
+            capture_values.push_back(SharedCaptureValue{
+                .frontier = candidate.frontier,
+                .demand_mask = candidate.demand_mask,
+                .rebuild_ns = candidate.rebuild_ns,
+                .explicit_credit =
                     has_shared_candidate_evidence(candidate.evidence,
                                                   SharedCandidateEvidence::ExplicitBoundary) ||
                     has_shared_candidate_evidence(candidate.evidence,
-                                                  SharedCandidateEvidence::RequestedAutomatic);
-                owners.push_back(ContextPortfolioOwnerPolicy{
-                    .owner                  = owner,
-                    .explicit_shared_credit = credit,
-                });
-                checkpoints.push_back(ContextPortfolioCheckpointValue{
-                    .owner                = owner,
-                    .demand_mask          = candidate.demand_mask,
-                    .rebuild_ns           = candidate.rebuild_ns,
-                    .baseline_recovery_ns = candidate.rebuild_ns,
-                    .target_recovery_ns   = 0,
-                });
-            }
-            if (surplus_only_count > vacant_shared_slots) { continue; }
-            std::sort(frontiers.begin(), frontiers.end());
-            const ContextPortfolioValueResult value = projected_value.fold(owners, checkpoints);
-            const std::uint64_t schedule_cost       = split_cost(frontiers);
-            if (value.saturated ||
-                value.private_transition_loss >
-                    std::numeric_limits<std::uint64_t>::max() - value.baseline_public_value) {
-                continue;
-            }
-            std::uint64_t threshold = value.baseline_public_value + value.private_transition_loss;
-            if (schedule_cost > std::numeric_limits<std::uint64_t>::max() - threshold) { continue; }
-            threshold += schedule_cost;
-            if (value.target_public_value <= threshold) { continue; }
-            const std::uint64_t gain = value.target_public_value - threshold;
-            const bool better =
-                gain > selected_gain ||
-                (gain == selected_gain &&
-                 (selected_frontiers.empty() || frontiers.size() < selected_frontiers.size() ||
-                  (frontiers.size() == selected_frontiers.size() &&
-                   std::lexicographical_compare(frontiers.begin(), frontiers.end(),
-                                                selected_frontiers.begin(),
-                                                selected_frontiers.end()))));
-            if (better) {
-                selected_gain      = gain;
-                selected_frontiers = std::move(frontiers);
-            }
+                                                  SharedCandidateEvidence::RequestedAutomatic),
+                .pressure_capable = candidate.pressure_capable,
+            });
         }
-        return selected_frontiers;
+        return ContextPortfolioValue::select_shared_captures(
+            baseline, projection, capture_values, shared_catalog_count_, vacant_shared_slots,
+            std::forward<SplitCostFn>(split_cost));
     }
 
     [[nodiscard]] std::optional<Choice>

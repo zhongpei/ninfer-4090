@@ -1345,6 +1345,63 @@ int test_image_resize_rejection_policy() {
     return failures;
 }
 
+int test_grid_combined_candidate_contract() {
+    const Frontend frontend = make_frontend(resources(), false);
+    const auto input_for = [](std::size_t user_bytes, bool duplicate) {
+        ninfer::PromptInput input;
+        ninfer::ChatMessage system;
+        system.role = ninfer::ChatRole::System;
+        system.parts.push_back({.kind = ninfer::MessagePartKind::Text,
+                                .text = std::string(300, 'z'), .media = {}});
+        ninfer::ChatMessage user;
+        user.role = ninfer::ChatRole::User;
+        user.parts.push_back({.kind = ninfer::MessagePartKind::Text,
+                              .text = std::string(user_bytes, 'y'), .media = {}});
+        input.messages = {system, user};
+        input.options.tool_jsons.push_back(
+            R"({"type":"function","function":{"name":"inspect","parameters":{"type":"object"}}})");
+        input.context_cache.allow_engine_prefix_grid = true;
+        for (const auto bytes : {31U, 57U, 93U, 127U}) {
+            input.context_cache.markers.push_back({
+                .kind = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+                .location = ninfer::PromptCacheMarkerLocation::LeadingInstructionBoundary,
+                .leading_instruction_bytes = duplicate ? 31U : bytes});
+        }
+        return input;
+    };
+    const auto sizing = frontend.prepare(input_for(1000, false));
+    const auto initial = FrontendFactory::inspect(sizing).token_ids.size();
+    const std::size_t bytes = 1000 + 2157 - initial;
+    const auto prepared = frontend.prepare(input_for(bytes, false));
+    const auto& data = FrontendFactory::inspect(prepared);
+    int failures = check(data.context_cache.opportunities.size() ==
+                             ninfer::kMaximumSharedPrefixCandidates,
+                         "grid plus protocol and structural candidates did not reach the legal bound");
+    const auto duplicate = frontend.prepare(input_for(bytes, true));
+    const auto& deduplicated = FrontendFactory::inspect(duplicate);
+    failures += check(deduplicated.context_cache.opportunities.size() ==
+                          data.context_cache.opportunities.size() - 3,
+                      "same-frontier protocol candidates were not merged");
+    const auto longer = frontend.prepare(input_for(bytes + 5, false));
+    const auto& next = FrontendFactory::inspect(longer);
+    std::size_t grids = 0;
+    for (const auto& candidate : data.context_cache.opportunities) {
+        if (candidate.frontier % ninfer::kPrefixGridPageTokens != 0) { continue; }
+        ++grids;
+        const auto found = std::find_if(next.context_cache.opportunities.begin(),
+            next.context_cache.opportunities.end(), [&](const auto& item) {
+                return item.frontier == candidate.frontier;
+            });
+        failures += check(found != next.context_cache.opportunities.end() &&
+            std::equal(data.token_ids.begin(), data.token_ids.begin() + candidate.frontier,
+                       next.token_ids.begin()),
+            "shared text with a different ending did not retain matching grid prefixes");
+    }
+    failures += check(grids == ninfer::kPrefixGridCandidates,
+                      "long prompt did not supply all eight grid candidates");
+    return failures;
+}
+
 int test_explicit_leading_instruction_cache_boundary() {
     const Frontend frontend           = make_frontend(resources(), false);
     constexpr std::string_view stable = "stable cache section.";
@@ -2275,6 +2332,7 @@ int main() {
     failures += test_template_media_contract();
     failures += test_image_resize_rejection_policy();
     failures += test_explicit_leading_instruction_cache_boundary();
+    failures += test_grid_combined_candidate_contract();
     failures += test_media_admission_uses_aggregate_resources(frontend);
     failures += test_multimodal_prompt_over_removed_32k_cap(frontend);
     failures += test_attention_pairs_are_diagnostic(frontend);

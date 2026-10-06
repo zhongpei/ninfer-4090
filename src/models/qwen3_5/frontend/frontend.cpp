@@ -493,7 +493,8 @@ PreparedContextCache prepare_context_cache(
         }
     }
 
-    out.opportunities.reserve(7U + (hints.allow_engine_prefix_grid ? kPrefixGridCandidates : 0U));
+    out.opportunities.reserve(kMaximumDefaultPrefixCandidates +
+                              (hints.allow_engine_prefix_grid ? kPrefixGridCandidates : 0U));
     const auto add_opportunity = [&](PromptCacheMarkerKind kind, SharedCandidateEvidence evidence,
                                      std::uint32_t frontier, std::uint32_t input_order) {
         if (frontier == 0 || !exact_vision_frontier(frontier, vision_items)) { return; }

@@ -128,6 +128,8 @@ curl http://127.0.0.1:8001/v1/chat/completions \
 CPU 缓存包含 64 GiB pinned KV 和 64 个完整状态槽；当前模型的状态槽合计约 11.7 GiB，因此缓存 payload 约为 75.7 GiB。
 `--device-state-slots 0` 不额外预留 GPU 检查点状态槽；8 路活动状态仍由并发配置保证，历史检查点可保留到 CPU。原先额外预留 8 槽时，启用 Vision 和 262144 上下文后的最低运行时预算超过显存；取消额外槽释放约 1.46 GiB。
 私有续接容量为 16、共享前缀容量为 16，实际保留数量还受 KV 和状态容量限制。`--auto-prefix-grid` 提供公共 token 栅格候选，命中观测和收益策略决定是否发布缓存。
+启用 grid 后，每个请求最多有 15 个去重后的缓存候选；资源规划器对完整合法候选集合执行增量精确搜索和剪枝，嵌套前缀的收益不重复计分。`--max-shared-prefixes` 控制已发布缓存的目录容量，与单请求候选上限不同。实现合同见 [资源调度与上下文缓存](docs/maintainer/resource-scheduling-and-context-cache.md#72-shared-publication-candidate)。
+2026-10-06 已验证合法 15 候选的 CPU 回归、完整组合收益对照，以及 RTX 4090 上 OpenAI/Anthropic 的真实 grid 命中、流式并发接纳和后续请求可用性；两个协议的重复前缀请求均复用 7168 tokens，完整 State/KV 的 Host 压力恢复测试也通过。
 CPU 缓存保存不活跃的完整检查点，命中后恢复到 GPU；它不增加活动请求的 GPU KV 容量。请求命中和搬运记录写入 `profiles/bench/serve-cache.jsonl`。
 此服务开启图片输入，视觉塔使用 Host overlay，单项媒体最多 16384 merged tokens。图片请求格式及整体媒体预算见 [多模态请求](docs/serving.md#multimodal-request)。
 2026-10-06 在本机 RTX 4090 / CUDA 编译与运行时 12.8（驱动报告 13.3）上已验证此配置启动、模型查询和一次最小文本生成；共享 KV 自动解析为 269120 tokens。启动约 3 分 19 秒，其中 64 GiB pinned KV 分配约 2 分 38 秒。图片推理和长上下文生成尚未验证，269120 是多路共享容量，不代表八路都能同时使用 262144 tokens。
