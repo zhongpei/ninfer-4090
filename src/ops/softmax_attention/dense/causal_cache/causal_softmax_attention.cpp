@@ -278,7 +278,8 @@ SmallTWorkspace allocate_small_t_workspace(Allocator& workspace, std::int32_t q_
 #if defined(NINFER_SM89)
     // Main/residual E4M3 codes plus two FP32 row scales. The prepass is worthwhile only once
     // enough split CTAs would otherwise repeat the same Hadamard/quantization work.
-    if (cache_storage == KvCacheStorage::Fp8E4M3Row256 && splits >= 16) {
+    if (cache_storage == KvCacheStorage::Fp8E4M3Row256 &&
+        detail::causal_attention_fp8_sm89_uses_prepared_q(splits)) {
         const std::size_t rows = static_cast<std::size_t>(q_heads) * tokens * batch_size;
         const std::size_t bytes =
             rows * (2u * static_cast<std::size_t>(kHeadDim) + 2u * sizeof(float));
@@ -407,6 +408,27 @@ CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::i
         envelope.max_visible_keys > prompt_visible_keys)
         return CausalAttentionRoute::ChunkedSmallT;
     return CausalAttentionRoute::Prompt;
+}
+
+std::uint32_t causal_attention_graph_topology(std::int32_t q_heads, std::int32_t width,
+                                             std::int32_t batch_size, KvCacheStorage storage,
+                                             CausalAttentionExecutionEnvelope envelope) {
+    const auto route = causal_attention_resolve_route(q_heads, width, batch_size, storage, envelope);
+    std::uint32_t key = static_cast<std::uint32_t>(route);
+    if (route == CausalAttentionRoute::Prompt) { return key; }
+    const auto chunk = route == CausalAttentionRoute::SmallT ? width :
+        causal_attention_chunk_tokens(q_heads, width, batch_size, storage, envelope);
+    // Each host chunk contributes its own partial/reduce nodes; cache publication follows the
+    // fixed storage route. Producer splits only change launch parameters, not node topology.
+    key |= static_cast<std::uint32_t>((width + chunk - 1) / chunk) << 2;
+#if defined(NINFER_SM89)
+    if (storage == KvCacheStorage::Fp8E4M3Row256 &&
+        causal_attention_fp8_sm89_uses_prepared_q(causal_attention_split_capacity(
+            q_heads, std::min(width, chunk), storage, envelope, batch_size))) {
+        key |= 1U << 16;
+    }
+#endif
+    return key;
 }
 
 const char* causal_attention_route_name(CausalAttentionRoute route) {

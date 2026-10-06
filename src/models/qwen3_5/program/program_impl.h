@@ -183,6 +183,7 @@ struct RequestBasePlanImpl {
     detail::PhysicalDemand root_demand;
     runtime::PrefillWork root_rebuild_work;
     std::uint32_t root_rebuild_tail_begin = 0;
+    std::uint32_t root_rebuild_grid_begin = 0;
     qwen3_5::PreparedContextCache context_cache;
     ops::SamplingConfig sampling;
     std::uint32_t text_kv_page_entitlement    = 0;
@@ -255,6 +256,7 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
     std::uint64_t destination_epoch = 0;
     runtime::PrefillWork root_rebuild_work;
     std::uint32_t root_rebuild_tail_begin = 0;
+    std::uint32_t root_rebuild_grid_begin = 0;
     bool text_retained_tail_release       = false;
     bool backend_retained_tail_release    = false;
 };
@@ -376,6 +378,7 @@ struct SequenceState {
     std::vector<std::uint32_t> shared_prefix_references;
     runtime::PrefillWork rebuild_work;
     std::uint32_t rebuild_tail_begin = 0;
+    std::uint32_t rebuild_grid_begin = 0;
 };
 
 struct SharedPrefixState {

@@ -132,8 +132,6 @@ Sm89PreparedQView prepare_sm89_q(const Tensor& q, const CausalSmallTInvocation& 
     return view;
 }
 
-inline constexpr std::int32_t kSm89PreparedQMinSplits = 16;
-
 template <typename Geometry>
 void dispatch_sm89(const Tensor& q, const Tensor& positions, float scale,
                    PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
@@ -150,7 +148,7 @@ void dispatch_sm89(const Tensor& q, const Tensor& positions, float scale,
                 invocation, envelope, splits, partial_acc, partial_m, partial_l, stream);
         };
     const auto metadata = [&]<int Tokens>() {
-        const bool use_prepared_q = splits >= kSm89PreparedQMinSplits;
+        const bool use_prepared_q = causal_attention_fp8_sm89_uses_prepared_q(splits);
         Sm89PreparedQView pq;
         if (use_prepared_q) {
             pq = prepare_sm89_q<Geometry, Tokens>(q, invocation, prepared_q_workspace, stream);

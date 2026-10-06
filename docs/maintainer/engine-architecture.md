@@ -385,6 +385,11 @@ Scheduler 保证：
 Program 接收紧凑的 `SequenceHandle[B]` 和每行预算。Prefix reuse 只减少 materialization 或 suffix
 prefill，不创建另一条调度路径。
 
+Program 为 admission 提供的服务量预算必须覆盖实际 prefill 结算和后续输出提交。固定 prefill
+模式按执行分块边界计账：capture offer 结束当前步骤并重置下一块的起点，rewrite frontier
+只切分当前块。自动模式的预算须覆盖物理块与 decode 交错小块之间的切换。Engine 按 Program
+返回的 prefill 服务量和实际接受的输出 token 扣账；预算不足仍视为内部合同错误。
+
 ### 5.4 Admission invalidation
 
 只有会改变 admission 结论的事实才重新触发检查：
@@ -540,7 +545,10 @@ ResourceManager 与完成所有 request response。内部不变量错误不能�
 - Program 在启动时建立固定数量的 control/state/table resources；
 - growing KV 由共享 paged pools 支持，active request 持有完整增长 reservation；
 - 一个 GPU execution unit 内 State/KV mapping 保持稳定；
-- CUDA Graph 按合法 exact-`B` topology 建立，request identity 和 page IDs 是稳定输入数据，不是 graph key；
+- CUDA Graph 按合法 exact-`B` 和完整 Op 捕获拓扑建立；attention 的 target、batch 与 AR 调用
+  都须保持可更新的节点结构。Op 提供与实际 launcher 同源的拓扑信息，Program 组合 profile，
+  并在启动时为不同拓扑建立独立 executable。request identity 和 page IDs 是稳定输入数据，
+  不是 graph key；
 - calibrated DFlash2 的物理 target width 是执行 topology 的一部分；Program 在上一轮完整提交后
   为整个 compact batch 按实际 `B` 和最大 execution frontier 选动作，pending replay/commit 保留
   前一轮实际宽度，不能用下一轮的较窄 view 截断尚未折叠的 features；

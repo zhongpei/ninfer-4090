@@ -71,7 +71,8 @@ void validate_long_anchor_ordinals(std::span<const LongAnchorCheckpoint> anchors
 void advance_rebuild_work(SequenceState& sequence, std::uint32_t frontier,
                           std::uint32_t prefill_chunk) {
     runtime_support::advance_segmented_rebuild_work(
-        sequence.rebuild_work, sequence.rebuild_tail_begin, sequence.execution_frontier, frontier,
+        sequence.rebuild_work, sequence.rebuild_tail_begin, sequence.rebuild_grid_begin,
+        sequence.execution_frontier, frontier,
         prefill_chunk);
 }
 

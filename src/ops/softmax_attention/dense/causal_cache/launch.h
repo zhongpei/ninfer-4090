@@ -14,6 +14,16 @@ namespace ninfer::ops::detail {
 
 enum class CausalAttentionRoute { SmallT, ChunkedSmallT, Prompt };
 
+// Shared by native FP8 launch selection and graph-topology description.
+inline constexpr bool causal_attention_fp8_sm89_uses_prepared_q(std::int32_t splits) {
+    return splits >= 16;
+}
+
+// Opaque key for node topology, excluding launch grids and runtime input data.
+std::uint32_t causal_attention_graph_topology(std::int32_t q_heads, std::int32_t width,
+                                             std::int32_t batch_size, KvCacheStorage storage,
+                                             CausalAttentionExecutionEnvelope envelope);
+
 struct CausalSmallTInvocation {
     const Tensor* valid_columns = nullptr;
     const Tensor* table_rows    = nullptr;

@@ -6,6 +6,7 @@
 
 #include "models/qwen3_5/program/prefix_identity.h"
 #include "models/qwen3_5/program/planning/rebuild_work.h"
+#include "models/qwen3_5/program/planning/prefill_work.h"
 
 #include <algorithm>
 #include <array>
@@ -416,13 +417,34 @@ void test_rebuild_work_prompt_frontier_boundary() {
 
     ninfer::runtime::PrefillWork work =
         ninfer::runtime::make_prefill_work(0, prompt_tokens, 0, 0, prefill_chunk);
-    q36::runtime_support::advance_segmented_rebuild_work(work, tail_begin, prompt_tokens,
+    q36::runtime_support::advance_segmented_rebuild_work(work, tail_begin, 0, prompt_tokens,
                                                          prompt_tokens + 1, prefill_chunk);
     const ninfer::runtime::PrefillWork exact =
         ninfer::runtime::make_prefill_work(0, prompt_tokens + 1, 0, 0, prefill_chunk);
     expect(work.chunks == 2 && work.tokens == exact.tokens &&
                work.attention_pairs == exact.attention_pairs,
            "continuation growth did not preserve the prompt-frontier rebuild split");
+}
+
+void test_rebuild_work_capture_grid() {
+    struct Capture { std::uint32_t frontier; };
+    const std::array<Capture, 1> captures{{{300}}};
+    const std::array<std::uint32_t, 2> rewrites{{300, 700}};
+    constexpr std::uint32_t chunk = 1024;
+    const auto full_chunks = [&](std::uint32_t end) {
+        return q36::runtime_support::segmented_prefill_units(
+            0, end, chunk, chunk, std::span<const Capture>(captures),
+            std::span<const std::uint32_t>(rewrites));
+    };
+    auto work = ninfer::runtime::make_prefill_work(0, 1700, 0, 0, chunk);
+    work.chunks = full_chunks(1700);
+    expect(work.chunks == 4, "rewrite split lost the capture-relative nominal boundary");
+    q36::runtime_support::advance_segmented_rebuild_work(work, 700, 300, 1700, 2050, chunk);
+    expect(work.chunks == 4 && work.chunks == full_chunks(2050),
+           "continuation growth reset the nominal grid at a rewrite boundary");
+    q36::runtime_support::advance_segmented_rebuild_work(work, 700, 300, 2050, 2350, chunk);
+    expect(work.chunks == 5 && work.chunks == full_chunks(2350),
+           "continuation growth lost the next capture-relative nominal boundary");
 }
 
 } // namespace
@@ -434,6 +456,7 @@ int main() {
     test_vision_control();
     test_prefix_identity();
     test_rebuild_work_prompt_frontier_boundary();
+    test_rebuild_work_capture_grid();
     if (failures != 0) {
         std::cerr << failures << " Qwen3.6 runtime mechanism checks failed\n";
         return 1;

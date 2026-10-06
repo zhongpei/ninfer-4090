@@ -21,9 +21,9 @@ using ninfer::ops::CausalAttentionExecutionEnvelope;
 using ninfer::ops::detail::causal_attention_resolve_route;
 using ninfer::ops::detail::causal_attention_route_name;
 using ninfer::ops::detail::CausalAttentionRoute;
-// The official Qwen3.6-35B-A3B MoE attention geometry, whose verify route table the predicate
-// in graph_profiles.cpp mirrors.
-constexpr std::int32_t kQueryHeads = 16;
+// Both registered D256 geometries and exact batch sizes exercise the actual Op selector.
+std::int32_t query_heads = 16;
+std::uint32_t batch_size = 1;
 
 // Every KV storage the engine can be configured with. The route table branches on storage, so a
 // planner that is right for one of them is not thereby right for the rest.
@@ -38,15 +38,30 @@ CausalAttentionRoute route_at(std::uint32_t capacity, std::uint32_t draft_window
     const std::uint64_t target =
         std::min<std::uint64_t>(capacity, static_cast<std::uint64_t>(frontier) + draft_window + 1);
     return causal_attention_resolve_route(
-        kQueryHeads, static_cast<std::int32_t>(draft_window) + 1, 1, storage,
+        query_heads, static_cast<std::int32_t>(draft_window) + 1, batch_size, storage,
         CausalAttentionExecutionEnvelope{1U, static_cast<std::uint32_t>(target)});
+}
+
+std::vector<std::uint32_t> topology_at(std::uint32_t capacity, std::uint32_t drafts,
+                                      std::uint32_t frontier, KvCacheStorage storage) {
+    const auto at = [&](std::uint32_t offset, std::int32_t width) {
+        const auto visible = static_cast<std::uint32_t>(std::min<std::uint64_t>(capacity,
+            static_cast<std::uint64_t>(frontier) + offset));
+        return ninfer::ops::detail::causal_attention_graph_topology(
+            query_heads, width, batch_size, storage, {1, visible});
+    };
+    std::vector<std::uint32_t> key{at(drafts + 1, drafts + 1)};
+    for (std::uint32_t step = 0; step + 1 < drafts; ++step) {
+        key.push_back(at(drafts + step + 2, 1));
+    }
+    return key;
 }
 
 int failures = 0;
 
 void check(std::uint32_t capacity, std::uint32_t draft_window, KvCacheStorage storage) {
     const int kv        = static_cast<int>(storage);
-    const auto profiles = ninfer::models::qwen3_5::detail::mtp_graph_profiles(capacity, draft_window);
+    const auto profiles = ninfer::models::qwen3_5::detail::mtp_graph_profiles(capacity, draft_window, query_heads, storage, batch_size);
     if (profiles.empty()) {
         std::cerr << "capacity=" << capacity << " k=" << draft_window << ": no profiles\n";
         ++failures;
@@ -84,6 +99,19 @@ void check(std::uint32_t capacity, std::uint32_t draft_window, KvCacheStorage st
         }
     }
 
+    std::map<std::uint32_t, std::vector<std::uint32_t>> topology_of_class;
+    for (const auto& profile : profiles) {
+        const auto lo = topology_at(capacity, draft_window, profile.min, storage);
+        const auto hi = topology_at(capacity, draft_window, profile.max, storage);
+        const auto [entry, inserted] = topology_of_class.emplace(profile.topology_class, hi);
+        if (lo != hi || (!inserted && entry->second != hi)) {
+            std::cerr << "MTP profile crosses attention node topology: heads=" << query_heads
+                      << " B=" << batch_size << " K=" << draft_window << " kv=" << kv
+                      << " frontier=" << profile.min << ".." << profile.max << '\n';
+            ++failures;
+        }
+    }
+
     // 2. one class per route: profiles of different routes must not share an executable.
     std::map<std::uint32_t, CausalAttentionRoute> route_of_class;
     for (const auto& profile : profiles) {
@@ -108,10 +136,14 @@ int main() {
     // the route-flip boundary is itself covered rather than trusted.
     constexpr std::uint32_t kSweptDraftWindows =
         ninfer::models::qwen3_5::kDFlashDecodeMaximumDrafts + 1U;
-    for (const std::uint32_t capacity : {2048U, 16384U, 65536U, 262144U}) {
-        for (std::uint32_t draft_window = 1; draft_window <= kSweptDraftWindows; ++draft_window) {
-            for (const KvCacheStorage storage : kStorages) {
-                check(capacity, draft_window, storage);
+    for (query_heads = 16; query_heads <= 24; query_heads += 8) {
+        for (batch_size = 1; batch_size <= 8; batch_size *= 2) {
+            for (const std::uint32_t capacity : {2048U, 16384U, 65536U, 262144U}) {
+                for (std::uint32_t draft_window = 1; draft_window <= kSweptDraftWindows; ++draft_window) {
+                    for (const KvCacheStorage storage : kStorages) {
+                        check(capacity, draft_window, storage);
+                    }
+                }
             }
         }
     }
@@ -119,6 +151,6 @@ int main() {
         std::cerr << failures << " MTP graph-profile contract violation(s)\n";
         return 1;
     }
-    std::cout << "MTP graph profiles keep one attention route per topology class\n";
+    std::cout << "MTP graph profiles keep one attention node topology per class\n";
     return 0;
 }

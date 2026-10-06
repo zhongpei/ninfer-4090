@@ -109,6 +109,8 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 
 void ProgramImpl::prepare_graphs() {
     if (!use_cuda_graph) { return; }
+    const auto query_heads = static_cast<std::int32_t>(
+        parameters.model.config().text.attention->num_attention_heads);
     const bool compact_proposal = calibrated_routing &&
         calibrated_routing->proposal_compute == runtime::DFlashProposalCompute::Selected;
     nvtx::ScopedRange prepare_range(nvtx::Name::CudaGraphPrepare, nvtx::Category::Graph);
@@ -326,7 +328,7 @@ void ProgramImpl::prepare_graphs() {
     };
 
     if (speculative_backend == SpeculativeBackend::None) {
-        const auto ordinary_profiles = ordinary_graph_profiles(capacity);
+        const auto ordinary_profiles = ordinary_graph_profiles(capacity, query_heads, kv_storage, 1);
         validate_graph_profiles(ordinary_profiles, capacity - 1, "ordinary");
         const std::uint32_t ordinary_batch_limit = max_concurrency;
         execution::OrdinaryBatchContext ordinary_state{
@@ -342,7 +344,8 @@ void ProgramImpl::prepare_graphs() {
 
         ordinary_graphs.profiles.reserve(ordinary_profiles.size() * ordinary_batch_limit);
         for (std::uint32_t batch_size = 1; batch_size <= ordinary_batch_limit; ++batch_size) {
-            for (const GraphExecutionProfile planned : ordinary_profiles) {
+            for (const GraphExecutionProfile planned :
+                 ordinary_graph_profiles(capacity, query_heads, kv_storage, batch_size)) {
                 ordinary_graphs.profiles.emplace_back();
                 DecodeGraphProfile& profile    = ordinary_graphs.profiles.back();
                 profile.batch_size             = batch_size;
@@ -360,7 +363,7 @@ void ProgramImpl::prepare_graphs() {
     }
 
     if (speculative_backend == SpeculativeBackend::Mtp) {
-        const auto planned_profiles = mtp_graph_profiles(capacity, draft_window);
+        const auto planned_profiles = mtp_graph_profiles(capacity, draft_window, query_heads, kv_storage, 1);
         validate_graph_profiles(planned_profiles, capacity - 1, "MTP");
         execution::MtpBatchContext mtp_state{execution_core(),
                                              decoder->text_kv,
@@ -379,7 +382,8 @@ void ProgramImpl::prepare_graphs() {
 
         mtp_graphs.profiles.reserve(planned_profiles.size() * max_concurrency);
         for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
-            for (const GraphExecutionProfile planned : planned_profiles) {
+            for (const GraphExecutionProfile planned :
+                 mtp_graph_profiles(capacity, draft_window, query_heads, kv_storage, batch_size)) {
                 mtp_graphs.profiles.emplace_back();
                 DecodeGraphProfile& profile    = mtp_graphs.profiles.back();
                 profile.batch_size             = batch_size;
@@ -404,7 +408,8 @@ void ProgramImpl::prepare_graphs() {
             DecodeGraphFamily& graphs = calibrated ? calibrated_dflash_graphs[action_index] : dflash_graphs;
             const auto selected_drafts = calibrated ? std::optional(capture_target_drafts) : std::nullopt;
             const auto batch_one_profiles =
-                dflash_graph_profiles(speculative_backend, capacity, draft_window, 1);
+                dflash_graph_profiles(speculative_backend, capacity, draft_window, 1,
+                                      query_heads, kv_storage);
             validate_graph_profiles(batch_one_profiles, capacity - 1, "DFlash");
             execution::DFlashBatchContext dflash_state{execution_core(),
                                                        decoder->text_kv,
@@ -430,7 +435,7 @@ void ProgramImpl::prepare_graphs() {
                 const auto planned_profiles = batch_size == 1
                                                   ? batch_one_profiles
                                                   : dflash_graph_profiles(speculative_backend, capacity,
-                                                                          draft_window, batch_size);
+                                                                          draft_window, batch_size, query_heads, kv_storage);
                 validate_graph_profiles(planned_profiles, capacity - 1, "DFlash");
                 for (const GraphExecutionProfile planned : planned_profiles) {
                     graphs.profiles.emplace_back();

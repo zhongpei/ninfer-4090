@@ -250,6 +250,7 @@ void ProgramImpl::retire_continuation_slot(std::uint32_t index) noexcept {
     sequence.rewrite_checkpoint      = {};
     sequence.rebuild_work            = {};
     sequence.rebuild_tail_begin      = 0;
+    sequence.rebuild_grid_begin      = 0;
     for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) {
         if (active_continuations[lane] == index) {
             active_continuations[lane] = continuation_capacity;

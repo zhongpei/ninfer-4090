@@ -987,39 +987,51 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->persistent          = persistent_layout(*impl);
     impl->workspace           = build_workspace_plan(*impl);
     if (impl->use_cuda_graph) {
+        const auto query_heads = dimension(
+            inputs.parameters->model.config().text.attention->num_attention_heads);
         // Definitions remain per execution profile, but only one executable is instantiated for
         // each reachable node-topology class. These bounds cover the largest profile installed in
         // each class and the driver/module state materialized while qualifying all definitions.
         if (impl->speculative_backend == SpeculativeBackend::None) {
-            impl->graph_allowance_bytes = checked_mul(12ULL * kMiB, impl->max_concurrency,
-                                                      "ordinary exact-b graph allowance");
+            for (std::uint32_t batch_size = 1; batch_size <= impl->max_concurrency; ++batch_size) {
+                const auto profiles = ordinary_graph_profiles(impl->capacity, query_heads,
+                                                               impl->kv_storage, batch_size);
+                impl->graph_allowance_bytes = checked_add(impl->graph_allowance_bytes,
+                    graph_topology_allowance(profiles,
+                        [](GraphExecutionProfile) { return 12ULL * kMiB; },
+                        "ordinary graph allowance"), "ordinary exact-b graph allowance");
+            }
         } else if (impl->speculative_backend == SpeculativeBackend::Mtp) {
-            const auto profiles = mtp_graph_profiles(impl->capacity, impl->draft_window);
-            const std::size_t per_batch_allowance = graph_topology_allowance(
-                profiles,
-                [&](GraphExecutionProfile profile) {
-                    const std::uint64_t final_visible = std::min<std::uint64_t>(
-                        impl->capacity,
-                        static_cast<std::uint64_t>(profile.max) + 2ULL * impl->draft_window);
+            for (std::uint32_t batch_size = 1; batch_size <= impl->max_concurrency; ++batch_size) {
+                const auto profiles = mtp_graph_profiles(impl->capacity, impl->draft_window,
+                    query_heads, impl->kv_storage, batch_size);
+                const std::size_t per_batch_allowance = graph_topology_allowance(
+                    profiles,
+                    [&](GraphExecutionProfile profile) {
+                        const std::uint64_t final_visible = std::min<std::uint64_t>(
+                            impl->capacity,
+                            static_cast<std::uint64_t>(profile.max) + 2ULL * impl->draft_window);
 #ifdef NINFER_SM8X_COMPAT
-                    if (final_visible <= 4096) {
-                        // The reduced-startup graph set still consumes 35.8 MiB at C1/K3 and
-                        // 43.1 MiB at C1/K4 on SM86. K2 retains the smaller qualified allowance;
-                        // reserve one 64 MiB class for K3 and deeper captures.
-                        return (impl->draft_window >= 3 ? 64ULL : 16ULL) * kMiB;
-                    }
-                    return 86ULL * kMiB;
+                        if (final_visible <= 4096) {
+                            // The reduced-startup graph set still consumes 35.8 MiB at C1/K3 and
+                            // 43.1 MiB at C1/K4 on SM86. K2 retains the smaller qualified allowance;
+                            // reserve one 64 MiB class for K3 and deeper captures.
+                            return (impl->draft_window >= 3 ? 64ULL : 16ULL) * kMiB;
+                        }
+                        return 86ULL * kMiB;
 #else
-                    return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
+                        return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
 #endif
-                },
-                "MTP graph allowance");
-            impl->graph_allowance_bytes = checked_mul(per_batch_allowance, impl->max_concurrency,
-                                                      "MTP exact-b graph allowance");
+                    },
+                    "MTP graph allowance");
+                impl->graph_allowance_bytes = checked_add(impl->graph_allowance_bytes,
+                    per_batch_allowance, "MTP exact-b graph allowance");
+            }
         } else {
             const auto class_allowance = [&](std::uint32_t batch_size) {
                 const auto profiles = dflash_graph_profiles(
-                    impl->speculative_backend, impl->capacity, impl->draft_window, batch_size);
+                    impl->speculative_backend, impl->capacity, impl->draft_window, batch_size,
+                    query_heads, impl->kv_storage);
                 return graph_topology_allowance(
                     profiles,
                     [&](GraphExecutionProfile profile) {

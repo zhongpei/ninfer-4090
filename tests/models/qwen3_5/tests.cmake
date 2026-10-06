@@ -209,3 +209,11 @@ endforeach()
 ninfer_add_test(ninfer_qwen3_5_resident_model_options_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_resident_model_options.cpp"
   LIBRARIES ninfer_model_loading)
+
+ninfer_add_test(ninfer_qwen3_5_prefill_work_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_prefill_work.cpp")
+
+ninfer_add_test(ninfer_qwen3_5_attention_graph_updates_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_attention_graph_updates.cpp"
+  LIBRARIES ninfer_model_runtime ninfer_ops ninfer_core)
+set_tests_properties(ninfer_qwen3_5_attention_graph_updates_test PROPERTIES SKIP_RETURN_CODE 77)

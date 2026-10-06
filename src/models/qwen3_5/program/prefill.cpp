@@ -684,6 +684,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         sequence.prefix_digests.swap(materialization_prefix_digests_);
         sequence.rebuild_work       = request_plan.root_rebuild_work;
         sequence.rebuild_tail_begin = request_plan.root_rebuild_tail_begin;
+        sequence.rebuild_grid_begin = request_plan.root_rebuild_grid_begin;
 
         if (is_masked_draft_backend(speculative_backend)) {
             if (!dflash || !io.dflash_decode || (backend_kv_cache() && !sequence.kv->backend)) {
