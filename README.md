@@ -97,31 +97,93 @@ Ternary-Bonsai-2-27B-ninfer-v3.ninfer
 
 ### Fixed K7 服务
 
-下面的 INT8 KV 配置可同时激活最多八个请求：
+下面的 INT8 KV 配置与仓库根目录的 `run.sh` 一致，最多同时激活八个请求，每路上下文上限为原生 262144 tokens。共享 GPU KV 容量在启动时按可用显存自动确定；能否同时接纳多个长请求取决于共享池容量。
 
 ```bash
+mkdir -p profiles/bench
 ./build/apps/ninfer-serve ./Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
-  --model-id bonsai2-27b --host 127.0.0.1 --port 8080 --device 0 \
-  --max-context 32768 --kv-capacity 131072 --max-concurrency 8 \
+  --model-id qwen3.5-35b-a3b --host 0.0.0.0 --port 8001 --device 0 \
+  --max-context 262144 --kv-capacity auto --max-concurrency 8 \
   --prefill-chunk 1024 --kv-dtype int8 \
+  --vision --vision-residency overlay --vision-max-merged 16384 \
   --spec dflash2 --draft-tokens 7 --spec-router fixed \
-  --device-state-slots 8 --host-state-slots 8 --host-kv-mib 8192 \
-  --max-private-continuations 16 --max-shared-prefixes 8 \
+  --device-state-slots 0 --host-state-slots 64 --host-kv-mib 65536 \
+  --max-private-continuations 16 --max-shared-prefixes 16 \
   --max-long-anchors-per-continuation 2 --max-cache-markers-per-request 4 \
+  --auto-prefix-grid --request-log-jsonl profiles/bench/serve-cache.jsonl \
   --greedy --presence-penalty 0 --frequency-penalty 0 \
-  --no-thinking --default-max-tokens 512
+  --default-max-tokens 512
 ```
 
-服务地址为 `http://127.0.0.1:8080/v1`。例如：
+服务监听所有网络接口，本机访问地址为 `http://127.0.0.1:8001/v1`。`--model-id` 是 API 使用的名称，不改变加载的 Bonsai 27B 模型。运行上述命令前应停止占用 GPU0 的旧模型服务。例如：
 
 ```bash
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl http://127.0.0.1:8001/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"bonsai2-27b","messages":[{"role":"user","content":"Hello"}],"max_tokens":128}'
+  -d '{"model":"qwen3.5-35b-a3b","messages":[{"role":"user","content":"Hello"}],"max_tokens":128}'
 ```
 
 `--max-context` 是每个请求的上限，`--kv-capacity` 是共享池容量，不按 lane 平均分配。
+`auto` 为完整运行时计算容量并保留 1 GiB 显存余量；实际解析的 KV 容量以启动日志为准。
+CPU 缓存包含 64 GiB pinned KV 和 64 个完整状态槽；当前模型的状态槽合计约 11.7 GiB，因此缓存 payload 约为 75.7 GiB。
+`--device-state-slots 0` 不额外预留 GPU 检查点状态槽；8 路活动状态仍由并发配置保证，历史检查点可保留到 CPU。原先额外预留 8 槽时，启用 Vision 和 262144 上下文后的最低运行时预算超过显存；取消额外槽释放约 1.46 GiB。
+私有续接容量为 16、共享前缀容量为 16，实际保留数量还受 KV 和状态容量限制。`--auto-prefix-grid` 提供公共 token 栅格候选，命中观测和收益策略决定是否发布缓存。
+CPU 缓存保存不活跃的完整检查点，命中后恢复到 GPU；它不增加活动请求的 GPU KV 容量。请求命中和搬运记录写入 `profiles/bench/serve-cache.jsonl`。
+此服务开启图片输入，视觉塔使用 Host overlay，单项媒体最多 16384 merged tokens。图片请求格式及整体媒体预算见 [多模态请求](docs/serving.md#multimodal-request)。
+2026-10-06 在本机 RTX 4090 / CUDA 编译与运行时 12.8（驱动报告 13.3）上已验证此配置启动、模型查询和一次最小文本生成；共享 KV 自动解析为 269120 tokens。启动约 3 分 19 秒，其中 64 GiB pinned KV 分配约 2 分 38 秒。图片推理和长上下文生成尚未验证，269120 是多路共享容量，不代表八路都能同时使用 262144 tokens。
 实际每轮 batch 随活动请求数量变化。请求完成后，等待请求可在安全边界进入执行。
+
+### 思考等级与输出预算
+
+当前 `run.sh` 没有设置 `--no-thinking`，因此默认开启思考；当前 Bonsai artifact 的内嵌模板在未指定等级时默认使用 `xhigh`。等级由每个请求设置，映射如下：
+
+| OpenAI 请求等级 | 当前模板行为 |
+|---|---|
+| `none` | 关闭思考 |
+| `minimal`、`low` | 使用 `low`，加入保持思考简短、聚焦的指令 |
+| `medium` | 开启思考，不附加等级指令 |
+| `high`、`xhigh`、`max` | 使用 `xhigh`，加入深入思考、验证假设和考虑替代方案的指令 |
+
+这些等级是模板提示，不是固定的思考 token 数，也不保证思考长度或回答质量。更换 `--chat-template` 后，应按新模板确认默认值和等级行为。
+
+Chat Completions 使用顶层 `reasoning_effort`。例如，下面请求使用高等级思考，总输出上限为 4096 tokens：
+
+```bash
+curl http://127.0.0.1:8001/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.5-35b-a3b","messages":[{"role":"user","content":"分析这个方案的主要取舍。"}],"reasoning_effort":"high","max_tokens":4096}'
+```
+
+改为 `"reasoning_effort":"none"` 可直接关闭该请求的思考。不要同时设置与等级冲突的 `enable_thinking`，否则请求返回 `conflicting_template_option`。
+
+Responses 使用 `reasoning.effort`，向 `/v1/responses` 提交：
+
+```json
+{
+  "model": "qwen3.5-35b-a3b",
+  "input": "分析这个方案的主要取舍。",
+  "reasoning": {"effort": "medium"},
+  "max_output_tokens": 4096
+}
+```
+
+Anthropic Messages 使用 `thinking` 开关和 `output_config.effort`，向 `/v1/messages` 提交：
+
+```json
+{
+  "model": "qwen3.5-35b-a3b",
+  "messages": [{"role": "user", "content": "分析这个方案的主要取舍。"}],
+  "thinking": {"type": "adaptive"},
+  "output_config": {"effort": "high"},
+  "max_tokens": 4096
+}
+```
+
+当前启动配置的 `--default-max-tokens 512` 是思考与正文合计的输出上限；请求中的 `max_tokens` 或 Responses 的 `max_output_tokens` 可覆盖它。高等级思考可能用完预算而尚未输出正文，需要长回答时应显式提高总输出上限。
+
+若要单独限制思考 token，可在启动参数中设置 `--default-thinking-budget N`；达到上限时 Engine 插入结束思考的引导并继续生成，插入内容也占总输出预算，因此需要为它和正文留出空间。Anthropic 请求还可用 `"thinking":{"type":"enabled","budget_tokens":2048}` 设置请求级预算，此时 `budget_tokens` 必须至少为 1024 且小于 `max_tokens`。当前 `run.sh` 未设置独立思考预算。
+
+Chat Completions 将思考放在 `reasoning_content`，正文放在 `content`。完整协议和预算边界见 [Serving 文档](docs/serving.md)。上述配置行为已按模板和服务代码核对，尚未实测不同等级的长度、质量或速度。
 
 ### 可选自动路由
 
