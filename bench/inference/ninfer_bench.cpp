@@ -105,15 +105,19 @@ ninfer::bench::RepTiming run_repetition(ninfer::Engine& engine,
     // Fingerprint every generated token, including the first prefill token.
     // The hash is computed AFTER Engine timing has ended, never inside the GPU timing.
     std::uint64_t digest = UINT64_C(14695981039346656037);
+    std::vector<std::uint64_t> rolling;
+    rolling.reserve(generated.generated_token_ids.size());
     for (const ninfer::TokenId id : generated.generated_token_ids) {
         const auto word = static_cast<std::uint32_t>(id);
         for (int byte = 0; byte < 4; ++byte) {
             digest ^= static_cast<std::uint8_t>(word >> (byte * 8));
             digest *= UINT64_C(1099511628211);
         }
+        rolling.push_back(digest);
     }
     ninfer::bench::RepTiming timing;
     timing.output_token_hash       = digest;
+    timing.output_token_prefix_hashes = std::move(rolling);
     timing.timings                 = generated.timings;
     timing.speculative             = std::move(generated.speculative);
     timing.generated_output_tokens = expected;
@@ -258,12 +262,19 @@ Json measure_resident_arm(ninfer::runtime::ResidentModelSession& resident,
     // An in-process AB/BA test can now detect token-level divergence without writing
     // prompt strings or sample completions to the audit log.
     Json hashes = Json::object();
+    Json prefix_hashes = Json::object();
     for (const auto& measured : results) {
         Json per_rep = Json::array();
-        for (const auto& rep : measured.reps) per_rep.push_back(rep.output_token_hash);
+        Json prefix_by_rep = Json::array();
+        for (const auto& rep : measured.reps) {
+            per_rep.push_back(rep.output_token_hash);
+            prefix_by_rep.push_back(rep.output_token_prefix_hashes);
+        }
         hashes[measured.test.label] = std::move(per_rep);
+        prefix_hashes[measured.test.label] = std::move(prefix_by_rep);
     }
     report["generated_token_hashes"] = std::move(hashes);
+    report["generated_token_prefix_hashes"] = std::move(prefix_hashes);
     report["residency"] = {
         {"scope", "single_process_weight_residency_fresh_program_per_arm"},
         {"model_load_count", resident.model_load_count()},

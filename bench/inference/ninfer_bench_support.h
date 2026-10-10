@@ -83,6 +83,9 @@ struct RepTiming {
     // FNV-1a digest of exact generated token IDs, independent of textual decoding.
     // Used by resident A/B to catch outputs that change under a route candidate.
     std::uint64_t output_token_hash = 0;
+    // Rolling hashes locate the earliest changed generation token without
+    // embedding raw decoded text in the benchmark artifact.
+    std::vector<std::uint64_t> output_token_prefix_hashes;
 };
 
 struct TestResult {
