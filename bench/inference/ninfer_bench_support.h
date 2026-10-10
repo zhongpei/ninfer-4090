@@ -80,6 +80,9 @@ struct RepTiming {
     GenerationTimings timings;
     SpeculativeStats speculative;
     std::uint32_t generated_output_tokens = 0;
+    // FNV-1a digest of exact generated token IDs, independent of textual decoding.
+    // Used by resident A/B to catch outputs that change under a route candidate.
+    std::uint64_t output_token_hash = 0;
 };
 
 struct TestResult {

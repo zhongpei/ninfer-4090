@@ -10,6 +10,7 @@
 #include <exception>
 #include <algorithm>
 #include <memory>
+#include <cstdint>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -101,7 +102,18 @@ ninfer::bench::RepTiming run_repetition(ninfer::Engine& engine,
         throw std::runtime_error(test.label + " did not finish at the requested output limit");
     }
 
+    // Fingerprint every generated token, including the first prefill token.
+    // The hash is computed AFTER Engine timing has ended, never inside the GPU timing.
+    std::uint64_t digest = UINT64_C(14695981039346656037);
+    for (const ninfer::TokenId id : generated.generated_token_ids) {
+        const auto word = static_cast<std::uint32_t>(id);
+        for (int byte = 0; byte < 4; ++byte) {
+            digest ^= static_cast<std::uint8_t>(word >> (byte * 8));
+            digest *= UINT64_C(1099511628211);
+        }
+    }
     ninfer::bench::RepTiming timing;
+    timing.output_token_hash       = digest;
     timing.timings                 = generated.timings;
     timing.speculative             = std::move(generated.speculative);
     timing.generated_output_tokens = expected;
@@ -236,6 +248,15 @@ Json measure_resident_arm(ninfer::runtime::ResidentModelSession& resident,
         results.push_back(std::move(result));
     }
     Json report = Json::parse(ninfer::bench::format_json(base_env, invocation, results));
+    // An in-process AB/BA test can now detect token-level divergence without writing
+    // prompt strings or sample completions to the audit log.
+    Json hashes = Json::object();
+    for (const auto& measured : results) {
+        Json per_rep = Json::array();
+        for (const auto& rep : measured.reps) per_rep.push_back(rep.output_token_hash);
+        hashes[measured.test.label] = std::move(per_rep);
+    }
+    report["generated_token_hashes"] = std::move(hashes);
     report["residency"] = {
         {"scope", "single_process_weight_residency_fresh_program_per_arm"},
         {"model_load_count", resident.model_load_count()},
