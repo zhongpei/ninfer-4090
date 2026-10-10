@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <utility>
 #include <cstdlib>
 
 using namespace ninfer;

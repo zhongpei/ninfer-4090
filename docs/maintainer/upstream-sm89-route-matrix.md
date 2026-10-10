@@ -213,7 +213,9 @@ python3 -m tools.bench.run_upstream_route_matrix \
 ```
 
 Inspect `residency.json` (`model_load_count: 1`), every
-`pair-*/bench.json` (`residency.model_load_count: 1` and
+`pair-*/bench.json` (`residency.model_load_count: 1`,
+`residency.artifact_bytes_read_this_arm: 0`,
+`residency.weight_bytes_uploaded_this_arm: 0` and
 `generated_token_hashes`), `records.jsonl`, `summary.json` and
 `session-stderr.log`. The owner remains alive across all six measured arms;
 a fresh Program and graph is intentionally created for each arm.

@@ -228,6 +228,12 @@ Json measure_resident_arm(ninfer::runtime::ResidentModelSession& resident,
         std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
     base_env.prefill_chunk = engine.options().prefill_chunk;
     base_env.load = engine.load_summary();
+    // The resident owner must not read artifact weights or upload them again per arm.
+    // The materialization counter alone would not catch an accidental hidden reload.
+    if (base_env.load.artifact_bytes_read != 0 ||
+        base_env.load.host_to_device_bytes != 0) {
+        throw std::logic_error("resident arm unexpectedly read or re-uploaded model weights");
+    }
     base_env.memory = engine.memory_summary();
     fill_cuda_environment(base_env, options.device);
     prime_decode_graph(engine, base_env, corpus);
@@ -263,6 +269,8 @@ Json measure_resident_arm(ninfer::runtime::ResidentModelSession& resident,
         {"resident_weight_bytes", resident.resident_weight_bytes()},
         {"program_create_seconds", program_create_seconds},
         {"program_recreated", true},
+        {"artifact_bytes_read_this_arm", base_env.load.artifact_bytes_read},
+        {"weight_bytes_uploaded_this_arm", base_env.load.host_to_device_bytes},
     };
     return report;
 }
