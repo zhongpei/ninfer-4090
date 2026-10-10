@@ -22,12 +22,10 @@ DEFAULT_CASES: dict[str, dict[str, str]] = {
     "prompt_fast": {
         "NINFER_DEVICE_ROUTE_MODE": "builtin",
         "NINFER_DEVICE_ROUTE_ONLY": "attn_prompt_fast",
-        "NINFER_PROMPT_FAST": "1",
     },
     "gdn_two_stage": {
         "NINFER_DEVICE_ROUTE_MODE": "builtin",
         "NINFER_DEVICE_ROUTE_ONLY": "gdn_two_stage/h32,gdn_two_stage/h48",
-        "NINFER_GDN_TWO_STAGE": "1",
     },
     "t2_upstream": {
         "NINFER_DEVICE_ROUTE_MODE": "builtin",
@@ -37,14 +35,11 @@ DEFAULT_CASES: dict[str, dict[str, str]] = {
     "sm_wave": {
         "NINFER_DEVICE_ROUTE_MODE": "builtin",
         "NINFER_DEVICE_ROUTE_ONLY": "prefill_align",
-        "NINFER_PREFILL_ALIGN": "1",
+        "NINFER_DEVICE_ROUTE_OVERRIDES": "prefill_align=on",
     },
     "all_candidates": {
         "NINFER_DEVICE_ROUTE_MODE": "builtin",
         "NINFER_DEVICE_ROUTE_OVERRIDES": "t2_a16=upstream;prefill_align=on",
-        "NINFER_PROMPT_FAST": "1",
-        "NINFER_GDN_TWO_STAGE": "1",
-        "NINFER_PREFILL_ALIGN": "1",
     },
 }
 CLEAN_ENV = (
@@ -124,9 +119,8 @@ def run_one(args: argparse.Namespace, case: str, override: dict[str, str],
     env = os.environ.copy()
     for key in CLEAN_ENV:
         env.pop(key, None)
-    env.update({"NINFER_PROMPT_FAST": "0", "NINFER_GDN_TWO_STAGE": "0",
-                "NINFER_PREFILL_ALIGN": "0"})
     env.update(override)
+    env["NINFER_DEVICE_ROUTE_TRACE"] = "1"
     (base / "invocation.json").write_text(json.dumps({
         "command": command, "route_env": {k: env[k] for k in CLEAN_ENV if k in env},
         "case": case, "pair": pair, "warmup": warmup,

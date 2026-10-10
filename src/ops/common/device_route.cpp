@@ -4,6 +4,11 @@
 
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <string_view>
+#include <unordered_set>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -50,6 +55,26 @@ int current_device() {
     return device;
 }
 
+// Opt-in route evidence, at most one line per device/key/schedule.
+// Never logs in normal production execution; recording runs on the host side only.
+void route_trace(int device, std::string_view key, std::int32_t width,
+                 std::string_view schedule) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("NINFER_DEVICE_ROUTE_TRACE");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled) return;
+    static std::mutex mutex;
+    static std::unordered_set<std::string> recorded;
+    const std::string actual = schedule.empty() ? "compiled_fallback" : std::string(schedule);
+    const std::string identity = std::to_string(device) + ":" + std::string(key) + "=" + actual;
+    const std::lock_guard guard(mutex);
+    if (recorded.size() < 512 && recorded.insert(identity).second) {
+        std::fprintf(stderr, "ninfer route applied device=%d key=%.*s width=%d schedule=%s\n",
+                     device, static_cast<int>(key.size()), key.data(), width, actual.c_str());
+    }
+}
+
 // A forced route is set only by the calibration tool, on one thread, around synchronous timings.
 Forced*& forced_route() {
     static Forced* forced = nullptr;
@@ -86,12 +111,22 @@ std::string_view device_route_schedule(std::string_view key, std::int32_t width)
     if (device < 0 || device >= kMaxDevices) { return {}; }
     const DeviceRouteProfile* profile =
         installed_pointers()[static_cast<std::size_t>(device)].load(std::memory_order_acquire);
-    if (profile == nullptr) { return {}; }
-    const auto entry = profile->routes.find(key);
-    if (entry == profile->routes.end()) { return {}; }
-    for (const DeviceRouteBand& band : entry->second) {
-        if (width <= band.last) { return band.schedule; }
+    if (profile == nullptr) {
+        route_trace(device, key, width, {});
+        return {};
     }
+    const auto entry = profile->routes.find(key);
+    if (entry == profile->routes.end()) {
+        route_trace(device, key, width, {});
+        return {};
+    }
+    for (const DeviceRouteBand& band : entry->second) {
+        if (width <= band.last) {
+            route_trace(device, key, width, band.schedule);
+            return band.schedule;
+        }
+    }
+    route_trace(device, key, width, {});
     return {};
 }
 

@@ -186,8 +186,19 @@ void configure_device_routes_from_environment() {
         install_device_route_profile(device, nullptr);
         return;
     }
-    restrict_to_keys(*profile, env("NINFER_DEVICE_ROUTE_ONLY"));
+    const std::string only = env("NINFER_DEVICE_ROUTE_ONLY");
+    restrict_to_keys(*profile, only);
     apply_overrides(*profile, env("NINFER_DEVICE_ROUTE_OVERRIDES"));
+    // Fail closed on typos: otherwise the experiment appears to enable a route
+    // that actually never gets registered.
+    for (std::size_t pos = 0; pos < only.size();) {
+        const auto last = only.find(',', pos);
+        const std::string key = trim(only.substr(pos, last - pos));
+        if (!key.empty() && !profile->routes.contains(key))
+            throw std::invalid_argument("device routes: unknown selected key " + key);
+        if (last == std::string::npos) break;
+        pos = last + 1;
+    }
     std::fprintf(stderr, "ninfer device routes: mode=%s device=%d gpu=%s source=%s keys=%zu\n",
                  mode.c_str(), device, hardware_class.c_str(), profile->origin.c_str(),
                  profile->routes.size());
