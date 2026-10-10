@@ -195,7 +195,10 @@ def calculate(rows: list[dict[str, Any]], name: str, pairs: int) -> dict[str, An
             m["paired_improvement_pct"]["median"] >= 2
             and m["paired_improvement_pct"]["p05"] >= -5 for m in results.values()
         ),
-        "quality_gate": "blocked_approx_state_semantics" if "approx" in name else "not_executed",
+        "quality_gate": ("blocked_approx_state_semantics"
+                         if any(r.get("route_env", {}).get("NINFER_GDN_TWO_STAGE_NUMERICS") == "approx"
+                                for r in candidate.values()) or "approx" in name
+                         else "not_executed"),
     }
 
 
@@ -366,6 +369,7 @@ def main(argv: list[str] | None = None) -> int:
                     (work_dir / "bench.json").write_text(json.dumps(report, indent=2) + "\n")
                     record = dict(item)
                     record.update(measurement)
+                    record["route_env"] = overrides
                     record["report"] = str((work_dir / "bench.json").relative_to(args.out))
                     (work_dir / "record.json").write_text(json.dumps(record, indent=2) + "\n")
                     records.append(record)
