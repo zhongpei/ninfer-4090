@@ -359,3 +359,130 @@ The performance-only screen passed, but the overall output-token gate failed bec
 A separate route-trace run confirmed `baseline: kernel=recurrent reason=exact_or_default` and `approximate candidate: kernel=two_stage reason=approx_aligned`. Trace timings are diagnostic only and are excluded from the A/B results. Perplexity, 131K context quality, and Agent-serving concurrency/latency remain unverified.
 
 Raw summaries and per-arm evidence are retained locally under `profiles/bench/sm89-resident-smoke-e80251a4`, `profiles/bench/sm89-gdn-fast-e80251a4`, and `profiles/bench/sm89-gdn-fast-trace-e80251a4`; those generated directories are git-ignored.
+
+
+## Follow-up: exact FP32 GDN pipeline after PR26-GDN-001
+
+The first RTX 4090 validation above is retained as historical evidence. It found
+**11.13% to 8.30% prefill uplift** from the upstream BF16/TF32 WY-like two-stage
+GDN, but **10/10 `4096+256` output-token mismatches**. Its 10/10 matching
+`16384+256` continuations do **not** establish bitwise state compatibility:
+the independent GDN state/split tests already proved otherwise.
+
+### Root cause and new candidate
+
+- The baseline recurrent kernel normalizes Q/K and updates/reduces the recurrent
+  state in FP32 per token, with the state kept in registers.
+- The upstream Two-stage kernel re-encodes normalized Q/K in BF16 and uses
+  mixed BF16/TF32 matrix reductions. This changes both the input precision
+  and the order of floating-point arithmetic. Repairing misaligned loads
+  alone cannot make this algorithm bitwise state- or token-identical.
+- The **new** `NINFER_GDN_EXACT_PREFETCH=1` candidate duplicates the existing
+  exact recurrent numeric body unchanged: same `normalize_qk_lane`,
+  `expf`, warp reduction, FP32 state transition and BF16 readout. Only the
+  global-to-shared copy schedule is replaced with a **two-slot asynchronous
+  ping-pong prefetch**, allowing the next 16-token tile's Q/K/V/gates to load
+  while the current tile computes.
+- Only aligned input Q/K/V and widths of at least 32 tokens use the candidate;
+  other shapes use the existing staged or scalar-safe fallback. No extra
+  global GDN workspace is required.
+- This is a **testable exact-numerics candidate**, not an assertion that
+  GPU validation has already succeeded or that it outperforms the baseline.
+  The original approximate WY two-stage remains separately opt-in and blocked
+  from production.
+
+### 1. Correctness first
+
+```bash
+git fetch origin pull/26/head:pr26-gdn-fp32
+git switch pr26-gdn-fp32
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_ARCHITECTURES=89 \
+  -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
+cmake --build build -j8 --target ninfer_gated_delta_net_test \
+  ninfer_bench ninfer_bench_support_test
+
+python3 -m unittest tools.bench.test_upstream_route_matrix -v
+python3 -m py_compile tools/bench/run_upstream_route_matrix.py
+ctest --test-dir build --output-on-failure \
+  -R 'ninfer_(gdn_exact_prefetch|bench_support)_test'
+
+NINFER_GDN_EXACT_PREFETCH=1 \
+  compute-sanitizer --tool memcheck --error-exitcode=99 \
+  ./build/tests/ninfer_gated_delta_net_test --exact-prefetch-only
+```
+
+The GDN test toggles the exact pipeline on and off within the same process,
+comparing BF16 outputs and the complete FP32 final states byte-for-byte. It
+also repeats full-vs-split frontiers for h32/h48, normalized/raw Q/K,
+31/32/33, 59+5, 64/65, 123+5, 128/129, graph replay, mixed FP16/FP32
+state layouts and unaligned operands. **Any mismatch, sanitizer error or
+CUDA failure is a hard stop; do not tune numerical tolerances.**
+
+### 2. Single-model resident performance and generation correctness
+
+Use a new output directory and the actual local 27B artifact path:
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/gdn-exact-prefetch-v3 \
+  --device 0 --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --prefill-chunk 1024 \
+  --prompts 1024,4096,16384,32768 \
+  --prompt-gen '4096,256;16384,256' \
+  --cases gdn_exact_prefetch \
+  --warmup 1 --arm-warmup 1 --pairs 10
+```
+
+The entire campaign loads model weights once, then creates a fresh Program
+per arm. The exact candidate is activated by an isolated environment override
+with the device profile otherwise **off**. The baseline never inherits this
+override.
+
+The new report uses correct primary metrics:
+
+- `pp`: Prefill tokens/sec.
+- `pp+tg`: **Complete-request throughput = 1 / total_seconds_mean**
+  (requests/sec). Previously the matrix scored these by Prefill tokens/sec
+  alone; that did **not** measure decode or the complete Agent request.
+- `tg`: decode output tokens/sec, when the corresponding test kind is run.
+
+Each repetition retains its exact 64-bit final generated-token hash and a
+rolling hash after **each generated token**. For any candidate that changes
+output, `first_divergent_token_by_pair` reports the earliest differing
+zero-based generation index (including the initial prefill output token).
+This is a diagnostic to distinguish immediate from late numerical drift;
+matching hashes do not replace full FP32 state verification.
+
+The full run is eligible for review **only if** the exact GDN op suite,
+compute-sanitizer, all paired output-token hashes and end-to-end performance
+pass. Even then, 131K/perplexity and C1/C2/C4/C8 Serving P95 remain separate
+promotion gates.
+
+### 3. Optional kernel-routing diagnostic
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/gdn-exact-trace-v3 \
+  --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 \
+  --prompts 4096 --cases gdn_exact_prefetch \
+  --pairs 3 --route-trace
+```
+
+Inspect `session-stderr.log` for
+`key=gdn_recurrent kernel=original_staged` and
+`key=gdn_recurrent kernel=exact_double_buffer`. With
+`NINFER_DEVICE_ROUTE_TRACE=1`, host-side logging may affect timings;
+**do not use the trace campaign for performance comparison**.
+
+The old `gdn_two_stage_approx` matrix remains available to diagnose
+approximate quality but is not a candidate for changing the default until
+its GDN FP32 state/split contract and long-context generation quality are
+resolved. Its earlier 8–11% speedup is not directly transferable to the
+new exact pipeline.
