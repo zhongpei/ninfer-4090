@@ -91,6 +91,14 @@ def summary_values(samples: list[float]) -> dict[str, float] | None:
     }
 
 
+def streaming_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def benchmark_command(args: argparse.Namespace, report: Path) -> list[str]:
     command = [
         str(args.exe.resolve()), "--weights", str(args.model.resolve()),
@@ -261,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             "model": str(args.model.resolve()),
             "model_size_bytes": args.model.stat().st_size,
             "model_sha256": None,  # model files can be >20 GB; do not hide expensive hashing
-            "exe": str(args.exe.resolve()), "exe_sha256": hashlib.sha256(args.exe.read_bytes()).hexdigest(),
+            "exe": str(args.exe.resolve()), "exe_sha256": streaming_sha256(args.exe),
             "settings": {"prompts": args.prompts, "prefill_chunk": args.prefill_chunk,
                          "kv_dtype": args.kv_dtype, "spec": args.spec, "draft_tokens": args.draft_tokens,
                          "max_context": args.max_context, "pairs": args.pairs, "warmup": args.warmup},
