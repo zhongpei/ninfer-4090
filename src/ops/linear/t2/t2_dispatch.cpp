@@ -1,4 +1,5 @@
 #include "ops/linear/t2/t2_dispatch.h"
+#include "ops/common/device_route.h"
 
 #include <stdexcept>
 
@@ -8,6 +9,10 @@ namespace ninfer::ops::detail {
 // decode and prefill. Column and row tiling may vary without changing a query's arithmetic.
 T2Launch select_t2_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
     if (t <= 0) { throw std::invalid_argument("t2 linear: unsupported shape or T"); }
+    // Upstream A16 small-T kernel is a fully separate candidate; the local exact FP32
+    // accumulation path remains the default and the fallback for any width > 16.
+    const bool upstream_small = t <= 16 &&
+        ops::device_route_schedule("t2_a16", t) == "upstream";
 
     switch (k) {
     case 5120:
@@ -20,22 +25,22 @@ T2Launch select_t2_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
         case 14336:
         case 16384:
         case 34816:
-            return launch_t2_small_t_v2;
+            return upstream_small ? launch_t2_small_t_upstream : launch_t2_small_t_v2;
         case 131072:
         case 248320:
-            return launch_t2_small_t_v2;
+            return upstream_small ? launch_t2_small_t_upstream : launch_t2_small_t_v2;
         default:
             break;
         }
         break;
     case 6144:
         if (n == 5120) {
-            return launch_t2_small_t_v2;
+            return upstream_small ? launch_t2_small_t_upstream : launch_t2_small_t_v2;
         }
         break;
     case 17408:
         if (n == 5120) {
-            return launch_t2_small_t_v2;
+            return upstream_small ? launch_t2_small_t_upstream : launch_t2_small_t_v2;
         }
         break;
     default:
