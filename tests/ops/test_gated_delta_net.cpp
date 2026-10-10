@@ -488,6 +488,8 @@ int unaligned_fast_guard_cases() {
     return failures;
 }
 
+int state_cast_cases(); // also exercised by the exact-prefetch qualification below
+
 // The exact double-buffer candidate changes only global-to-shared prefetch order.
 // Exercise both implementations in this process with identical source tensors,
 // including non-multiple-of-16 final tiles, graph replay, and continuation cuts.
