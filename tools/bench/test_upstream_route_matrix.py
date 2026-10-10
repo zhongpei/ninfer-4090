@@ -5,9 +5,11 @@ import json
 import tempfile
 from pathlib import Path
 import unittest
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 from tools.bench.run_upstream_route_matrix import (
-    calculate, percentile, read_cases, streaming_sha256, summary_values,
+    calculate, main, percentile, read_cases, streaming_sha256, summary_values,
 )
 
 
@@ -41,6 +43,55 @@ class RouteMatrixContractTests(unittest.TestCase):
         self.assertTrue(report["performance_only_screen"])
         self.assertEqual(report["resolved_chunk_values"], ["1536"])
         self.assertEqual(report["runtime_reservation_peak_bytes"], 110)
+
+    def test_multicase_runs_use_separate_baseline_directories(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            executable = root / "bench"
+            model = root / "model.ninfer"
+            executable.write_bytes(b"benchmark")
+            model.write_bytes(b"model")
+            output = root / "out"
+
+            def fake_run(command, **kwargs):
+                if command[0] == "nvidia-smi":
+                    return CompletedProcess(command, 0, "RTX 4090, 610, 24564 MiB\n", "")
+                report = Path(command[command.index("--output-file") + 1])
+                report.write_text(json.dumps({
+                    "tests": [{"label": "1024", "prefill_tok_s_mean": 100.0}],
+                    "config": {"prefill_chunk": 1024},
+                    "memory": {"runtime_reservation_bytes": 10,
+                               "workspace": {"capacity_bytes": 5}},
+                }))
+                return CompletedProcess(command, 0, "", "")
+
+            argv = [
+                "--exe", str(executable), "--model", str(model), "--out", str(output),
+                "--device", "1", "--max-context", "1024", "--prompts", "1024",
+                "--spec", "none", "--cases", "prompt_fast,gdn_two_stage,all_candidates",
+                "--warmup", "1", "--pairs", "3",
+            ]
+            with patch("tools.bench.run_upstream_route_matrix.subprocess.run",
+                       side_effect=fake_run):
+                self.assertEqual(main(argv), 0)
+
+            baseline_dirs = []
+            for invocation in output.rglob("invocation.json"):
+                record = json.loads(invocation.read_text())
+                if record["case"] == "baseline":
+                    baseline_dirs.append(invocation.parent)
+            self.assertEqual(len(baseline_dirs), 12)
+            self.assertEqual(len(set(baseline_dirs)), 12)
+            candidate_routes = []
+            for invocation in output.rglob("invocation.json"):
+                record = json.loads(invocation.read_text())
+                if record["case"] == "all_candidates":
+                    candidate_routes.append(record["route_env"])
+            self.assertEqual(len(candidate_routes), 4)
+            expected_only = "attn_prompt_fast,gdn_two_stage/h32,gdn_two_stage/h48,t2_a16,prefill_align"
+            self.assertTrue(all(route["NINFER_DEVICE_ROUTE_ONLY"] == expected_only
+                                for route in candidate_routes))
+            self.assertTrue((output / "summary.json").is_file())
 
     def test_missing_pair_not_silently_reused(self):
         rows = [{"case": "baseline", "pair": 0, "warmup": False,

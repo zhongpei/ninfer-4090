@@ -39,6 +39,9 @@ DEFAULT_CASES: dict[str, dict[str, str]] = {
     },
     "all_candidates": {
         "NINFER_DEVICE_ROUTE_MODE": "builtin",
+        "NINFER_DEVICE_ROUTE_ONLY": (
+            "attn_prompt_fast,gdn_two_stage/h32,gdn_two_stage/h48,t2_a16,prefill_align"
+        ),
         "NINFER_DEVICE_ROUTE_OVERRIDES": "t2_a16=upstream;prefill_align=on",
     },
 }
@@ -109,9 +112,9 @@ def benchmark_command(args: argparse.Namespace, report: Path) -> list[str]:
     return command
 
 
-def run_one(args: argparse.Namespace, case: str, override: dict[str, str],
+def run_one(args: argparse.Namespace, experiment: str, case: str, override: dict[str, str],
             pair: int, iteration: int, warmup: bool) -> dict[str, Any]:
-    tag = f"{'warmup' if warmup else 'pair'}-{pair:02d}-{iteration:02d}-{case}"
+    tag = f"{'warmup' if warmup else 'pair'}-{experiment}-{pair:02d}-{iteration:02d}-{case}"
     base = args.out / tag
     base.mkdir()
     report = base / "bench.json"
@@ -249,11 +252,11 @@ def main(argv: list[str] | None = None) -> int:
         for case in selected:
             for warmup in range(args.warmup):
                 for index, arm in enumerate(("baseline", case)):
-                    run_one(args, arm, cases[arm], warmup, index, True)
+                    run_one(args, case, arm, cases[arm], warmup, index, True)
             for pair in range(args.pairs):
                 ordered = ("baseline", case) if pair % 2 == 0 else (case, "baseline")
                 for index, arm in enumerate(ordered):
-                    records.append(run_one(args, arm, cases[arm], pair, index, False))
+                    records.append(run_one(args, case, arm, cases[arm], pair, index, False))
             # One candidate's baseline records should not be reused for other candidates.
             results = [x for x in records if x["case"] in ("baseline", case)]
             # Assign the baseline from the last n pairs for this candidate, not earlier arms.

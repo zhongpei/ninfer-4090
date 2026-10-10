@@ -4,6 +4,7 @@
 #include "ops/common/math.cuh"
 #include "ops/common/mma.cuh"
 #include "ops/common/warp.cuh"
+#include "ops/linear_attention/gated_delta_net/common.cuh"
 
 namespace ninfer::ops::detail::gated_delta_net::two_stage {
 namespace {
@@ -72,9 +73,9 @@ __launch_bounds__(256, 2) void prepare_kernel(Arguments args, QkChunk* __restric
             if (tid >= offset) g += previous;
         }
         sm.prefix[tid]         = g;
-        sm.control.prefix[tid] = exp2_approx(g * kLog2e);
+        sm.control.prefix[tid] = exp2_approx(g * kLog2E);
         const float last       = __shfl_sync(0xffffU, g, kChunkSize - 1, kChunkSize);
-        sm.control.suffix[tid] = exp2_approx((last - g) * kLog2e);
+        sm.control.suffix[tid] = exp2_approx((last - g) * kLog2E);
     }
     __syncthreads();
 
@@ -106,7 +107,7 @@ __launch_bounds__(256, 2) void prepare_kernel(Arguments args, QkChunk* __restric
                 const int c = n * 8 + (lane & 3) * 2 + (i & 1);
                 // Do not evaluate upper-triangle exponentials: g can be strongly negative.
                 const float value =
-                    r >= c ? acc[n][i] * exp2_approx((sm.prefix[r] - sm.prefix[c]) * kLog2e) : 0.0F;
+                    r >= c ? acc[n][i] * exp2_approx((sm.prefix[r] - sm.prefix[c]) * kLog2E) : 0.0F;
                 if (tid < 32)
                     sm.lower[r * kChunkSize + c] = r > c ? sm.beta[r] * value : 0.0F;
                 else
