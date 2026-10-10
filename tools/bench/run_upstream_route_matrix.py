@@ -454,9 +454,23 @@ def main(argv: list[str] | None = None) -> int:
         # Consumers can identify unfinished comparisons from plan.json vs records.jsonl.
         raise
     finally:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.wait(timeout=20)
+        if process is not None:
+            # Close parent-side pipes on both normal and exceptional exits. The
+            # JSONL reader owns only its selector; leaving these streams open
+            # leaks descriptors and emits ResourceWarning in repeated sessions.
+            if process.stdin is not None and not process.stdin.closed:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=20)
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
 
 
 if __name__ == "__main__":

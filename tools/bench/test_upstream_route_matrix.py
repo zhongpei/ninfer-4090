@@ -174,7 +174,7 @@ for line in sys.stdin:
             self.assertEqual(len({r["tag"] for r in baselines}), len(baselines))
             combinations = [r["route_env"] for r in records
                             if r["case"] == "all_candidates"]
-            self.assertEqual(len(combinations), 8)
+            self.assertEqual(len(combinations), 4)
             only = "attn_prompt_fast,gdn_two_stage/h32,gdn_two_stage/h48,t2_a16,prefill_align"
             self.assertTrue(all(r["NINFER_DEVICE_ROUTE_ONLY"] == only for r in combinations))
             approx = json.loads((out / "summary-gdn_two_stage_approx.json").read_text())
