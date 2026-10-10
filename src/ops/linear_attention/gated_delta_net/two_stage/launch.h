@@ -12,8 +12,10 @@
 
 // The two-stage prefill: one kernel normalizes Q/K and prepares each 16-token chunk's control
 // matrices, a second carries the FP32 state through the chunks and writes the output. The
-// WY/state-passing/output pipeline in ../chunked remains the default; the device profile or
-// NINFER_GDN_TWO_STAGE selects this one.
+// The existing recurrent kernel remains the default. The matrix formulation
+// changes reduction order and BF16/TF32 intermediate semantics, so it is gated by
+// NINFER_GDN_TWO_STAGE_NUMERICS=approx, in addition to the device profile or
+// NINFER_GDN_TWO_STAGE. The exact default never selects the candidate.
 namespace ninfer::ops::detail::gated_delta_net::two_stage {
 
 inline constexpr int kChunkSize = 16;

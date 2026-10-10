@@ -28,6 +28,30 @@ fork and is therefore *not qualified* for this checkout. Never use `builtin` or
 `auto` in production before the correctness and performance gates below.
 The default remains `off`.
 
+### GDN correctness gate and fast-math opt-in
+
+The upstream two-stage algorithm does not satisfy the current exact FP32
+state/segment-continuation contract: it replaces token-wise recurrence with
+BF16/TF32 matrix blocks and a different reduction order. Simply changing a
+tolerance would invalidate the existing context-cache/checkpoint contract.
+
+- **Default:** `NINFER_GDN_TWO_STAGE_NUMERICS=exact` (or unset). Even if the
+  device profile requests two-stage, the exact recurrent implementation is used.
+- **Experiment only:** set `NINFER_GDN_TWO_STAGE_NUMERICS=approx` alongside
+  `NINFER_GDN_TWO_STAGE=1` or a profile route. This **does not** pass exact
+  state/chunk-split correctness and must not be considered production safe.
+- For misaligned BF16 Q/K/V/output views, fast two-stage is now rejected at
+  dispatch and the existing recurrent kernel executes instead. Test this with
+  shifted +2/+4/+8 byte pointers and CUDA compute-sanitizer.
+- Distinguish the actual route from a loaded profile key in benchmark reports.
+  `NINFER_DEVICE_ROUTE_TRACE=1` only shows the requested profile; it cannot
+  prove that the guarded accelerated Kernel ran.
+
+The next qualification milestone is to develop a chunk-parallel alternative
+with an exact state transition or prove a separate approximate-state cache
+identity and quality contract. Until then, 8–10% prefill uplift measured on
+the old route is an *experimental upper bound*, not a promotable speedup.
+
 ## RTX 4090 test matrix
 
 Use the *same binary, same model, same driver*, idle GPU, same

@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <cstdint>
 
 namespace ninfer::ops {
 namespace {
@@ -178,8 +180,20 @@ void validate_distinct_state(const Tensor& q, const Tensor& k, const Tensor& v, 
 
 // The two-stage prefill against the WY/state-passing/output pipeline, per prompt width: the device
 // profile's "gdn_two_stage/h<value heads>" entry, or NINFER_GDN_TWO_STAGE=0/1 for every width.
+// The fast matrix formulation is mathematically close but not FP32-step bit-identical.
+// It MUST NOT silently inherit the state/checkpoint contract of the recurrent kernel.
+bool two_stage_approx_enabled() {
+    const char* policy = std::getenv("NINFER_GDN_TWO_STAGE_NUMERICS");
+    if (policy == nullptr || policy[0] == '\0' || std::string_view(policy) == "exact")
+        return false;
+    if (std::string_view(policy) == "approx") return true;
+    throw std::invalid_argument(
+        "NINFER_GDN_TWO_STAGE_NUMERICS must be exact or approx (experimental)");
+}
+
 bool two_stage_route(std::int32_t value_heads, std::int32_t tokens) {
-    if (tokens < detail::gated_delta_net::two_stage::kMinTokens) { return false; }
+    if (tokens < detail::gated_delta_net::two_stage::kMinTokens ||
+        !two_stage_approx_enabled()) return false;
     static const int forced = [] {
         const char* value = std::getenv("NINFER_GDN_TWO_STAGE");
         return value == nullptr ? -1 : (value[0] == '1' ? 1 : 0);
@@ -311,7 +325,15 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
 
     // Candidate is opt-in. Do not alter the existing closed FP32 recurrent path by default.
     // Keep all state/outputs owned by the existing Program; only the Op kernel changes.
-    if (two_stage_route(v.ne[1], q.ne[2])) {
+    // The accelerated candidate needs 16-byte-aligned Q/K/V/output for vectorized
+    // loads and cp.async. In particular, a legal BF16 tensor view shifted by 2 bytes
+    // must take the same scalar-safe fallback as the existing recurrent launcher.
+    const std::uintptr_t addresses =
+        reinterpret_cast<std::uintptr_t>(q.data) |
+        reinterpret_cast<std::uintptr_t>(k.data) |
+        reinterpret_cast<std::uintptr_t>(v.data) |
+        reinterpret_cast<std::uintptr_t>(out.data);
+    if ((addresses & 15U) == 0 && two_stage_route(v.ne[1], q.ne[2])) {
         run_two_stage(q, k, v, g, beta, scale, normalize_qk, ws, ssm_state_in,
                       ssm_state_out, out, stream);
         return;
