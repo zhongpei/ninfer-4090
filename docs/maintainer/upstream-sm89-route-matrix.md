@@ -114,40 +114,178 @@ Example profile:
 }
 ```
 
-## Running the isolated route A/B locally
+## Local retest: correctness first, model-resident AB/BA second
 
-Build from this PR branch on the RTX 4090 host (clean Release, `sm_89`):
+This PR now includes a model-resident `ninfer_bench --resident-session` JSONL
+protocol. **Only one model materialization/upload occurs per entire matrix**:
+the owner holds the 27B weights on GPU while each arm makes and destroys its
+own Engine/Program/CUDA Graph. The previous Python tool started and exited
+`ninfer_bench` for every arm, reloading the model every time. The new runner
+does not do that. Program planning/capture may still occur once per arm;
+the report records `program_create_seconds` separately from generation.
+
+The protocol deliberately **never** swaps a CUDA Kernel beneath an active
+Graph or concurrent request. The existing `ResidentModelSession` supports
+only single-GPU DFlash2 Full at present; don't claim support for other
+speculative backends. Each arm's environment is isolated and restored. The
+GDN and Prompt Fast environment overrides no longer cache the very first
+arm's value for the lifetime of the process.
+
+### 0. Compile and validate the host-side resident protocol
 
 ```bash
+git fetch origin pull/26/head:pr26-sm89
+git switch pr26-sm89
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CUDA_ARCHITECTURES=89 -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
-cmake --build build -j 8 --target ninfer_bench
+  -DCMAKE_CUDA_ARCHITECTURES=89 \
+  -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
+cmake --build build -j8 --target ninfer_bench ninfer_gated_delta_net_test
 python3 -m unittest tools.bench.test_upstream_route_matrix -v
-
-python3 -m tools.bench.run_upstream_route_matrix \
-  --exe ./build/bench/ninfer_bench \
-  --model /absolute/path/to/Ternary-Bonsai-2-27B.ninfer \
-  --out profiles/bench/upstream-sm89-first-pass \
-  --device 0 --max-context 32768 --kv-dtype int8 \
-  --spec dflash2 --draft-tokens 7 \
-  --prefill-chunk 1024 --prompts 1024,4096,16384,32768 \
-  --cases prompt_fast,gdn_two_stage,t2_upstream,sm_wave,all_candidates \
-  --warmup 1 --pairs 10
+python3 -m py_compile tools/bench/run_upstream_route_matrix.py
+git diff --check
 ```
 
-For `rk8v4` change `--kv-dtype` to the local CLI's supported
-spelling and use a *new* `--out` directory. If testing longer context, set
-`--max-context` accordingly, keep the model and numeric flags identical.
+The Python tests include a **real long-running fake benchmark process**. They
+assert exactly one process/model owner across 24 interleaved sample arms,
+unique per-case baseline directories, explicit 5-key combination scoping,
+response/load-count validation and fail-closed generated-token identity.
 
-This script restarts the benchmark binary for each arm: it runs a full
-`ninfer_bench` JSON test sequence, not a microkernel-only loop. Each
-candidate's baseline is taken from its own adjacent AB/BA pairs. See
-`summary.md`, `summary.json`, and the raw reports and invocation JSON.
-A `performance_only_screen: true` is **not** production qualification.
-You must separately check numerical and serving gates.
+### 1. GDN exact correctness gates (must pass)
 
-A custom case matrix can be supplied via `--cases-json cases.json`.
-For example, only enable the candidate T2 A16 route on a local profile:
+First exercise the original/default route, then request Two-stage in the
+**exact** numerical mode. Both must preserve full-vs-split byte-exact
+FP32 state and BF16 output at 59+5 and 123+5, FP16 state conversions, and
+shifted-input views.
+
+```bash
+# Baseline: should pass unchanged.
+env -u NINFER_GDN_TWO_STAGE -u NINFER_GDN_TWO_STAGE_NUMERICS \
+  ./build/tests/ninfer_gated_delta_net_test
+
+# Force requested route but insist on existing exact FP32 state semantics:
+# the safe recurrent route is selected (NOT the approximate fast algorithm).
+NINFER_GDN_TWO_STAGE=1 NINFER_GDN_TWO_STAGE_NUMERICS=exact \
+  ./build/tests/ninfer_gated_delta_net_test
+
+# Check illegal memory accesses with shifted BF16 views (must pass).
+NINFER_GDN_TWO_STAGE=1 NINFER_GDN_TWO_STAGE_NUMERICS=exact \
+  compute-sanitizer --tool memcheck --error-exitcode=99 \
+  ./build/tests/ninfer_gated_delta_net_test
+```
+
+**Fast GDN experiment (not a green gate):** With
+`NINFER_GDN_TWO_STAGE_NUMERICS=approx` and a selected two-stage route,
+alignment-invalid Q/K/V/output views now fall back to the original safe
+recurrent kernel. Aligned fast kernels still retain the upstream BF16/TF32
+chunk algorithm, which **does not guarantee exact FP32 state and segmentation
+identity**. Capture and report the exact failures; do NOT loosen the existing
+oracle or assert that the +8–10% prefill uplift is qualified.
+
+```bash
+NINFER_GDN_TWO_STAGE=1 NINFER_GDN_TWO_STAGE_NUMERICS=approx \
+  ./build/tests/ninfer_gated_delta_net_test \
+  > profiles/gdn-approx-quality.log 2>&1
+# Nonzero exit with aligned split-state mismatches remains a correctness blocker.
+```
+
+### 2. Smoke test the resident process (single model load)
+
+Choose a **new** output directory. Change the artifact path below to
+the exact local 27B file.
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/sm89-resident-smoke \
+  --device 0 --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --prefill-chunk 1024 \
+  --prompts 1024,4096,16384,32768 \
+  --cases gdn_two_stage \
+  --warmup 1 --arm-warmup 1 --pairs 3
+```
+
+Inspect `residency.json` (`model_load_count: 1`), every
+`pair-*/bench.json` (`residency.model_load_count: 1` and
+`generated_token_hashes`), `records.jsonl`, `summary.json` and
+`session-stderr.log`. The owner remains alive across all six measured arms;
+a fresh Program and graph is intentionally created for each arm.
+All completed arms are journaled immediately. If one CUDA candidate
+fails, the process terminates rather than silently reusing a poisoned device.
+
+### 3. Separate *experimental* GDN throughput from correctness
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/sm89-gdn-fast-experiment \
+  --device 0 --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --prefill-chunk 1024 \
+  --prompts 1024,4096,16384,32768 \
+  --cases gdn_two_stage_approx \
+  --warmup 1 --arm-warmup 1 --pairs 10
+```
+
+This explicitly opts into approximate state semantics. The report contains
+a `blocked_approx_state_semantics` quality gate regardless of throughput.
+Even identical output-token digests cannot override the prior failing
+full-vs-split FP32 state oracle.
+
+### 4. Expanded experiments (optional after correctness)
+
+To compare the other candidates in the same **resident** process:
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/sm89-full-route-matrix \
+  --device 0 --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --prefill-chunk 1024 \
+  --prompts 1024,4096,16384,32768 \
+  --cases prompt_fast,gdn_two_stage,t2_upstream,sm_wave,all_candidates \
+  --warmup 1 --arm-warmup 1 --pairs 10
+```
+
+For longer **generated** outputs, include combined prompt+decode tests:
+`--max-context 65536 --prompt-gen '4096,256;32768,256'`. Those tests
+compare entire 257-token greedily generated continuations through a
+64-bit hash in each arm. A hash mismatch is an automatic **failure** of
+the output identity gate; a match is necessary but not sufficient for
+FP32 state/checkpoint correctness.
+
+Run a separate `--kv-dtype rk8v4` or `fp8` matrix if those storages
+are part of production. Verify the route's actual execution, not only
+that a key appears in the bundled device profile. All-candidate mode is
+restricted to the intended five keys; it never loads all 65 upstream
+configurations.
+
+### 5. Required promotion gates
+
+| Stage | Checks | Result required |
+|---|---|---|
+| Correctness | CUDA memcheck; full vs 59+5, 123+5 state/output; FP64 reference; graph replay | Pass |
+| Generated tokens | Every paired AB/BA generated ID digest, including mixed pp+tg | Match |
+| Quality | 4K/32K/131K perplexity and long-range needle/tool-call retrieval | No unacceptable degradation |
+| Performance | 1K/4K/16K/32K, at least 10 paired orders with independent warmup | Stable >=2% end-to-end benefit |
+| Memory | Real peak allocations, Program workspace capacity, GPU 24 GiB budget | No capacity regression |
+| Agent serving | DFlash2 K7/K15, C1/C2/C4/C8, branch/prefix caching, TTFT and request p95 | No critical regression |
+
+The runner is **serial prefill/optional decode**, not a concurrent Agent
+serving test. It records the count of artifact materializations, not the
+number of independently constructed Programs. P95 request latency,
+long-session cache correctness, and 131K multi-request behavior need
+separate real-server qualification before promoting any Kernel.
+
+For diagnostic route inspection run a new output directory with
+`--route-trace`, but **do not** collect performance evidence with tracing
+enabled. The loaded route key is not proof that a guarded candidate kernel
+ran.
+
+A custom case matrix can be supplied via `--cases-json cases.json`,
+where the `baseline` route must explicitly set
+`NINFER_DEVICE_ROUTE_MODE=off`. For example:
 
 ```json
 {
@@ -160,32 +298,5 @@ For example, only enable the candidate T2 A16 route on a local profile:
 }
 ```
 
-Then add `--cases t2_only --cases-json cases.json`. The script emits reports
-without altering the serving configuration.
-
-**To qualify an Agent-serving deployment**, conduct a separate open-loop
-client A/B against two otherwise identical server configurations: fixed
-32K/131K histories, 1/2/4/8 active requests, Qwen tool calls,
-re-ask/regenerate/edited-last-turn branches, and 512-token continuation.
-Capture TTFT p50/p95, wall requests/s, final token/s, draft acceptance,
-prompt cache hit depth, 429/5xx, GPU peak memory and exact greedy outputs.
-A candidate that wins isolated prefill but regresses these actual scenarios
-should remain opt-in.
-
-## Route selection diagnostics
-
-For a separate **diagnostic** run, add `--route-trace` to the matrix script
-with only one candidate and three pairs in a new output directory. The runtime
-prints lines such as:
-
-```text
-ninfer route applied device=0 key=attn_prompt_fast width=1 schedule=on
-ninfer route applied device=0 key=gdn_two_stage/h48 width=1024 schedule=on
-ninfer route applied device=0 key=t2_a16 width=8 schedule=upstream
-```
-
-This trace is limited to the first observation of a device/key/schedule.
-**Do not enable it during timing qualification**, because the extra host locks
-and logging can distort throughput. A route profile's loaded key count is
-not evidence that its kernels were executed. Use the actual trace and the
-reported `config` field to verify selected routes and resolved chunk capacity.
+The reported `performance_only_screen` is NOT a decision to
+enable a candidate in production. No new fast GDN route is yet qualified.
