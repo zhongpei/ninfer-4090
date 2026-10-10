@@ -2,8 +2,14 @@
 
 #include "ops/linear_attention/gated_delta_net/common.h"
 #include "ops/linear_attention/gated_delta_net/launch.h"
+#include "ops/linear_attention/gated_delta_net/two_stage/launch.h"
+#include "ops/common/device_route.h"
+#include "core/device.h"
+#include "core/layout.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <utility>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -170,6 +176,87 @@ void validate_distinct_state(const Tensor& q, const Tensor& k, const Tensor& v, 
     require_contiguous_nonnull(ssm_state_in, "ssm_state_in");
 }
 
+// The two-stage prefill against the WY/state-passing/output pipeline, per prompt width: the device
+// profile's "gdn_two_stage/h<value heads>" entry, or NINFER_GDN_TWO_STAGE=0/1 for every width.
+bool two_stage_route(std::int32_t value_heads, std::int32_t tokens) {
+    if (tokens < detail::gated_delta_net::two_stage::kMinTokens) { return false; }
+    static const int forced = [] {
+        const char* value = std::getenv("NINFER_GDN_TWO_STAGE");
+        return value == nullptr ? -1 : (value[0] == '1' ? 1 : 0);
+    }();
+    if (forced >= 0) { return forced == 1; }
+    return device_route_schedule("gdn_two_stage/h" + std::to_string(value_heads), tokens) == "on";
+}
+
+struct TwoStageWorkspace {
+    DeviceSpan packets;
+    // FP32 running state for the two-stage kernels when either stored state is FP16.
+    Tensor state_fp32;
+};
+
+template <class Allocator>
+TwoStageWorkspace allocate_two_stage_workspace(Allocator& allocator, std::int32_t qk_heads,
+                                               std::int32_t value_heads, std::int32_t tokens) {
+    TwoStageWorkspace out;
+    if (tokens < detail::gated_delta_net::two_stage::kMinTokens) { return out; }
+    out.packets = allocator.alloc_bytes(
+        detail::gated_delta_net::two_stage::workspace_layout(qk_heads, value_heads, tokens)
+            .total_bytes);
+    out.state_fp32 =
+        allocator.alloc(DType::FP32, {detail::gated_delta_net::kStateDim,
+                                      detail::gated_delta_net::kStateDim, value_heads});
+    return out;
+}
+
+void run_two_stage(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
+                   const Tensor& beta, float scale, bool normalize_qk, WorkspaceArena& ws,
+                   const Tensor& ssm_state_in, Tensor& ssm_state_out, Tensor& out,
+                   cudaStream_t stream) {
+    namespace two_stage       = detail::gated_delta_net::two_stage;
+    auto scratch_scope        = ws.scope();
+    TwoStageWorkspace scratch = allocate_two_stage_workspace(ws, q.ne[1], v.ne[1], q.ne[2]);
+    const auto layout         = two_stage::workspace_layout(q.ne[1], v.ne[1], q.ne[2]);
+    auto* qk = static_cast<two_stage::QkChunk*>(layout.qk.bind(scratch.packets).data);
+    auto* control =
+        static_cast<two_stage::ControlChunk*>(layout.control.bind(scratch.packets).data);
+
+    const bool staged = ssm_state_in.dtype == DType::FP16 || ssm_state_out.dtype == DType::FP16;
+    if (staged) {
+        if (ssm_state_in.dtype == DType::FP16) {
+            detail::gated_delta_net::widen_state_fp16_to_fp32(ssm_state_in, scratch.state_fp32,
+                                                              stream);
+        } else {
+            CUDA_CHECK(cudaMemcpyAsync(scratch.state_fp32.data, ssm_state_in.data,
+                                       ssm_state_in.bytes(), cudaMemcpyDeviceToDevice, stream));
+        }
+    }
+    const two_stage::Arguments args{
+        static_cast<const __nv_bfloat16*>(q.data),
+        static_cast<const __nv_bfloat16*>(k.data),
+        static_cast<const __nv_bfloat16*>(v.data),
+        static_cast<const float*>(g.data),
+        static_cast<const float*>(beta.data),
+        static_cast<const float*>(staged ? scratch.state_fp32.data : ssm_state_in.data),
+        static_cast<float*>(staged ? scratch.state_fp32.data : ssm_state_out.data),
+        static_cast<__nv_bfloat16*>(out.data),
+        q.ne[1],
+        v.ne[1],
+        q.ne[2],
+        scale};
+    two_stage::launch_prepare(args, qk, control, normalize_qk, stream);
+    two_stage::launch_recurrence(args, qk, control, stream);
+    if (staged) {
+        if (ssm_state_out.dtype == DType::FP16) {
+            detail::gated_delta_net::narrow_state_fp32_to_fp16(scratch.state_fp32, ssm_state_out,
+                                                               stream);
+        } else {
+            CUDA_CHECK(cudaMemcpyAsync(ssm_state_out.data, scratch.state_fp32.data,
+                                       ssm_state_out.bytes(), cudaMemcpyDeviceToDevice, stream));
+        }
+    }
+}
+
+
 } // namespace
 
 std::size_t gated_delta_net_workspace_capacity_bytes(std::int32_t qk_heads,
@@ -181,7 +268,10 @@ std::size_t gated_delta_net_workspace_capacity_bytes(std::int32_t qk_heads,
         throw std::invalid_argument("gated_delta_net workspace: invalid profile or interval");
     }
     (void)normalize_qk;
-    return 0;
+    if (!two_stage_route(value_heads, max_tokens)) return 0;
+    WorkspaceLayoutBuilder layout;
+    (void)allocate_two_stage_workspace(layout, qk_heads, value_heads, max_tokens);
+    return layout.peak_bytes(1);
 }
 
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
@@ -219,8 +309,13 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
                      cudaStream_t stream) {
     validate_distinct_state(q, k, v, g, beta, scale, ssm_state_in, ssm_state_out, out);
 
-    // One closed Op keeps the public FP32 transition and normalization arithmetic identical
-    // for every token, independently of call width or the position of a call boundary.
+    // Candidate is opt-in. Do not alter the existing closed FP32 recurrent path by default.
+    // Keep all state/outputs owned by the existing Program; only the Op kernel changes.
+    if (two_stage_route(v.ne[1], q.ne[2])) {
+        run_two_stage(q, k, v, g, beta, scale, normalize_qk, ws, ssm_state_in,
+                      ssm_state_out, out, stream);
+        return;
+    }
     (void)ws;
     detail::gated_delta_net::launch_recurrent_inout(q, k, v, g, beta, scale, normalize_qk,
                                                   ssm_state_in, ssm_state_out, out, stream);
