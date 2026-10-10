@@ -927,6 +927,92 @@ __global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
     store_state_tile(state, access.state_write_base(coord), coord);
 }
 
+// Experimental pipelined *exact* recurrent candidate. Reuses the original
+// float normalization / expf / warp-sum / FP32 state update / BF16 readout
+// instructions, changing only copy scheduling. This is intentionally independent
+// of the approximate WY two-stage kernel.
+template <bool NormalizeInputs, class ReadStateT, class WriteStateT>
+__global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
+    recurrent_pipelined_direct_kernel(const __nv_bfloat16* __restrict__ q,
+                                   const __nv_bfloat16* __restrict__ k,
+                                   const __nv_bfloat16* __restrict__ v,
+                                   const float* __restrict__ g, const float* __restrict__ beta,
+                                   const ReadStateT* __restrict__ state_read,
+                                   WriteStateT* __restrict__ state_write,
+                                   __nv_bfloat16* __restrict__ out, std::int32_t width,
+                                   head_map heads, float scale) {
+    const DirectAccess<ReadStateT, WriteStateT> access{
+        q, k, v, g, beta, state_read, state_write, out, heads, width, scale};
+    const RecurrentCoordinates coord = access.coordinates();
+    // Ping-pong global->shared copies between tiles; FP32 arithmetic is unchanged.
+    __shared__ RecordStage stages[2];
+    constexpr int kThreads = kWarpSize * kNumWarps;
+    constexpr int kRowChunks = kStateDim * sizeof(__nv_bfloat16) / 16;
+    constexpr int kValueChunks = kBlockDv * sizeof(__nv_bfloat16) / 16;
+    const int tid = coord.warp * kWarpSize + coord.lane;
+    __align__(16) float state[kDvPerWarp][kQkPerLane];
+    load_state_tile(state, access.state_read_base(coord), coord);
+    // Retain the existing per-token normalization and recurrence order.
+    const auto issue = [&](RecordStage& stage, int begin, int count) {
+        for (int i = tid; i < count * kRowChunks; i += kThreads) {
+            const int token = i / kRowChunks;
+            const int offset = (i - token * kRowChunks) * 8;
+            cp_async<16>(&stage.key[token][offset], access.key_ptr(coord, begin + token) + offset);
+            cp_async<16>(&stage.query[token][offset],
+                         access.query_ptr(coord, begin + token) + offset);
+        }
+        for (int i = tid; i < count * kValueChunks; i += kThreads) {
+            const int token = i / kValueChunks;
+            const int offset = (i - token * kValueChunks) * 8;
+            cp_async<16>(&stage.value[token][offset],
+                         access.value_ptr(coord, begin + token) + coord.state_tile * kBlockDv + offset);
+        }
+        if (tid < count) {
+            const RawGatePair gate = access.load_gate(coord, begin + tid);
+            stage.g[tid] = gate.g;
+            stage.beta[tid] = gate.beta;
+        }
+        cp_commit();
+    };
+    issue(stages[0], 0, kRecordMaxTokens);
+    for (int begin = 0, tile = 0; begin < width; begin += kRecordMaxTokens, ++tile) {
+        const int count = min(kRecordMaxTokens, width - begin);
+        const int next_begin = begin + count;
+        const bool has_next = next_begin < width;
+        if (has_next) {
+            const int next_count = min(kRecordMaxTokens, width - next_begin);
+            issue(stages[(tile + 1) & 1], next_begin, next_count);
+            // Wait for this tile, not the next tile, so DMA overlaps FP32 math.
+            cp_wait<1>();
+        } else {
+            cp_wait<0>();
+        }
+        __syncthreads(); // Every warp has finished its copies for this tile.
+        const RecordStage& stage = stages[tile & 1];
+        RawQkLane key = staged_qk_lane(stage.key[0], coord.dqk_base);
+        normalize_qk_lane<NormalizeInputs>(key.value, coord.lane);
+        for (int token = 0; token < count; ++token) {
+            RawValueLane value{__float2bfloat16(0.0f), 0.0f};
+            if (coord.lane < kDvPerWarp) {
+                value.bits = stage.value[token][coord.warp * kDvPerWarp + coord.lane];
+                value.value = __bfloat162float(value.bits);
+            }
+            apply_gdn_transition(state, key.value, value.value, stage.g[token], stage.beta[token]);
+            if (token + 1 < count) {
+                key = staged_qk_lane(stage.key[token + 1], coord.dqk_base);
+                normalize_qk_lane<NormalizeInputs>(key.value, coord.lane);
+            }
+            readout_and_store<NormalizeInputs>(state, stage.query[token],
+                access.output_ptr(coord, begin + token), coord.dqk_base, coord.dv_base,
+                coord.lane, access.scale);
+        }
+        __syncthreads(); // All readers finish before reusing this stage.
+    }
+    cp_wait<0>();
+    store_state_tile(state, access.state_write_base(coord), coord);
+}
+
+
 template <bool Masked, class StateT>
 __global__ void __launch_bounds__(kWarpSize* kNumWarps, 2)
     recurrent_record_kernel(RecordAccess<Masked, StateT> access) {

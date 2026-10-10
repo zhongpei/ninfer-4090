@@ -1,12 +1,15 @@
 #include "ops/linear_attention/gated_delta_net/launch.h"
 
 #include "core/device.h"
+#include "ops/common/device_route.h"
 #include "ops/linear_attention/gated_delta_net/recurrent.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 #include <stdexcept>
 #include <type_traits>
 
@@ -19,6 +22,16 @@ static_assert(sizeof(GdnReplayFoldKernelRows) == 128);
 static_assert(alignof(GdnReplayFoldKernelRows) == 16);
 static_assert(std::is_trivially_copyable_v<GdnReplayFoldKernelRows>);
 
+// The exact pipeline does NOT change the public FP32 state identity. Profiles
+// may name it for width >= 32; the env override allows isolated resident A/B.
+bool select_exact_prefetch(int value_heads, int width) {
+    if (width < 32) return false;
+    if (const char* value = std::getenv("NINFER_GDN_EXACT_PREFETCH"))
+        return value[0] == '1';
+    return device_route_schedule("gdn_exact_prefetch/h" + std::to_string(value_heads), width)
+           == "on";
+}
+
 template <bool NormalizeQK, class ReadStateT, class WriteStateT>
 void launch_recurrent_direct_typed(const Tensor& q, const Tensor& k, const Tensor& v,
                                    const Tensor& g, const Tensor& beta, float scale,
@@ -30,14 +43,35 @@ void launch_recurrent_direct_typed(const Tensor& q, const Tensor& k, const Tenso
     const auto addresses = reinterpret_cast<std::uintptr_t>(q.data) |
                            reinterpret_cast<std::uintptr_t>(k.data) |
                            reinterpret_cast<std::uintptr_t>(v.data);
-    if (q.ne[2] > 1 && (addresses & 15u) == 0) {
-        recurrent_staged_direct_kernel<NormalizeQK, ReadStateT, WriteStateT><<<grid, block, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(q.data), static_cast<const __nv_bfloat16*>(k.data),
-            static_cast<const __nv_bfloat16*>(v.data), static_cast<const float*>(g.data),
-            static_cast<const float*>(beta.data), static_cast<const ReadStateT*>(state_read.data),
-            static_cast<WriteStateT*>(state_write.data), static_cast<__nv_bfloat16*>(out.data), q.ne[2],
-            heads, scale);
+    const bool aligned = (addresses & 15u) == 0;
+    if (q.ne[2] > 1 && aligned) {
+        if (select_exact_prefetch(v.ne[1], q.ne[2])) {
+            trace_device_kernel_selection("gdn_recurrent", q.ne[2],
+                                          "exact_double_buffer", "fp32_recurrence");
+            recurrent_pipelined_direct_kernel<NormalizeQK, ReadStateT, WriteStateT>
+                <<<grid, block, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(q.data),
+                    static_cast<const __nv_bfloat16*>(k.data),
+                    static_cast<const __nv_bfloat16*>(v.data),
+                    static_cast<const float*>(g.data), static_cast<const float*>(beta.data),
+                    static_cast<const ReadStateT*>(state_read.data),
+                    static_cast<WriteStateT*>(state_write.data),
+                    static_cast<__nv_bfloat16*>(out.data), q.ne[2], heads, scale);
+        } else {
+            trace_device_kernel_selection("gdn_recurrent", q.ne[2], "original_staged");
+            recurrent_staged_direct_kernel<NormalizeQK, ReadStateT, WriteStateT>
+                <<<grid, block, 0, stream>>>(
+                    static_cast<const __nv_bfloat16*>(q.data),
+                    static_cast<const __nv_bfloat16*>(k.data),
+                    static_cast<const __nv_bfloat16*>(v.data),
+                    static_cast<const float*>(g.data), static_cast<const float*>(beta.data),
+                    static_cast<const ReadStateT*>(state_read.data),
+                    static_cast<WriteStateT*>(state_write.data),
+                    static_cast<__nv_bfloat16*>(out.data), q.ne[2], heads, scale);
+        }
     } else {
+        trace_device_kernel_selection("gdn_recurrent", q.ne[2], "scalar_safe",
+                                      aligned ? "single_token" : "unaligned");
         recurrent_bf16_direct_kernel<NormalizeQK, ReadStateT, WriteStateT><<<grid, block, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(q.data), static_cast<const __nv_bfloat16*>(k.data),
             static_cast<const __nv_bfloat16*>(v.data), static_cast<const float*>(g.data),
