@@ -1089,7 +1089,7 @@ std::uint32_t sm89_wave_aligned_chunk(const execution::Parameters& parameters,
                                       const EngineOptions& options) {
     const std::uint32_t original = std::min(options.prefill_chunk, options.max_context);
     if (options.prefill_chunk_auto || original < 256 ||
-        !kv_cache_is_int8_family(options.kv_cache)) {
+        !kv_storage_is_int8_family(options.kv_cache)) {
         return original;
     }
     const char* setting = std::getenv("NINFER_PREFILL_ALIGN");

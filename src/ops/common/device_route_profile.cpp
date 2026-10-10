@@ -37,7 +37,7 @@ std::string env(std::string_view key) {
 }
 
 std::string class_name(const cudaDeviceProp& prop) {
-    std::string result{"nvidia-"};
+    std::string result;
     bool previous_dash = false;
     for (const char* c = prop.name; *c != '\0'; ++c) {
         const auto value = static_cast<unsigned char>(*c);
@@ -50,6 +50,8 @@ std::string class_name(const cudaDeviceProp& prop) {
         }
     }
     if (!result.empty() && result.back() == '-') result.pop_back();
+    // CUDA usually returns "NVIDIA GeForce RTX 4090"; avoid nvidia-nvidia-.
+    if (result.rfind("nvidia-", 0) != 0) result = "nvidia-" + result;
     result += "-sm" + std::to_string(prop.major) + std::to_string(prop.minor);
     return result;
 }
