@@ -21,11 +21,11 @@ namespace {
 // Fast prompt is a separate opt-in candidate. The original INT8-family implementation remains
 // the default until the user's SM89 numerical/perplexity and end-to-end A/B gates pass.
 bool fast_prompt_route() {
-    static const int forced = [] {
-        const char* value = std::getenv("NINFER_PROMPT_FAST");
-        return value == nullptr ? -1 : (value[0] == '1' ? 1 : 0);
-    }();
-    if (forced >= 0) return forced == 1;
+    // Re-evaluate the explicit override for each Engine: resident route experiments
+    // create fresh Programs in the same process with different environment profiles.
+    if (const char* forced = std::getenv("NINFER_PROMPT_FAST")) {
+        return forced[0] == '1';
+    }
     return device_route_schedule("attn_prompt_fast", 1) == "on";
 }
 

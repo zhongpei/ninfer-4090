@@ -194,11 +194,11 @@ bool two_stage_approx_enabled() {
 bool two_stage_route(std::int32_t value_heads, std::int32_t tokens) {
     if (tokens < detail::gated_delta_net::two_stage::kMinTokens ||
         !two_stage_approx_enabled()) return false;
-    static const int forced = [] {
-        const char* value = std::getenv("NINFER_GDN_TWO_STAGE");
-        return value == nullptr ? -1 : (value[0] == '1' ? 1 : 0);
-    }();
-    if (forced >= 0) { return forced == 1; }
+    // Route environment is scoped to each Engine in resident A/B: never cache it for
+    // the lifetime of the process or a later arm silently inherits the first choice.
+    if (const char* forced = std::getenv("NINFER_GDN_TWO_STAGE")) {
+        return forced[0] == '1';
+    }
     return device_route_schedule("gdn_two_stage/h" + std::to_string(value_heads), tokens) == "on";
 }
 
