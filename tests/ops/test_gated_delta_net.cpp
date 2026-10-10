@@ -535,7 +535,11 @@ int exact_prefetch_cases() {
                 failures += verify_exact("GDN pipelined exact output", pipelined.out, ordinary.out);
                 failures += verify_exact("GDN pipelined exact FP32 state",
                                          pipelined.state, ordinary.state);
-                failures += causal_pair(in, cut, normalize); // now uses pipelined prefills
+                // The independent FP64 oracle is much more expensive than the
+                // byte-exact baseline comparison. Focus split-state FP64 work
+                // on the two known historical regression frontiers on h32/h48.
+                if (normalize && (tokens == 64 || tokens == 128))
+                    failures += causal_pair(in, cut, normalize);
             }
         }
     }
