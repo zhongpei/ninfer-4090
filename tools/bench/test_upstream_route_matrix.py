@@ -54,6 +54,7 @@ class RouteMatrixContractTests(unittest.TestCase):
             for case, tps, bytes_ in [("baseline", 100, 100), ("fast", 110, 110)]:
                 rows.append({"case": case, "pair": pair, "warmup": False,
                              "metrics": {"pp4096": float(tps)},
+                             "output_token_hashes": {"pp4096": [12345]},
                              "resolved_chunk": 1024,
                              "runtime_reservation_bytes": bytes_,
                              "workspace_capacity_bytes": 60})
@@ -62,12 +63,17 @@ class RouteMatrixContractTests(unittest.TestCase):
         self.assertTrue(report["performance_only_screen"])
         self.assertEqual(report["runtime_reservation_peak_bytes"], 110)
         self.assertEqual(report["quality_gate"], "not_executed")
+        self.assertEqual(report["output_token_gate"], "pass")
+        rows[-1]["output_token_hashes"] = {"pp4096": [12346]}
+        self.assertEqual(calculate(rows, "fast", 3)["output_token_gate"], "fail")
 
     def test_missing_pair_and_rejected_fake_load_count(self):
         rows = [{"case": "baseline", "pair": 0, "warmup": False,
-                 "metrics": {"pp4096": 100}},
+                 "metrics": {"pp4096": 100},
+                 "output_token_hashes": {"pp4096": [1]}},
                 {"case": "fast", "pair": 0, "warmup": False,
-                 "metrics": {"pp4096": 110}}]
+                 "metrics": {"pp4096": 110},
+                 "output_token_hashes": {"pp4096": [1]}}]
         with self.assertRaises(RuntimeError):
             calculate(rows, "fast", 3)
         with self.assertRaises(RuntimeError):
@@ -101,7 +107,8 @@ for line in sys.stdin:
             "config": {"prefill_chunk": 1024},
             "memory": {"runtime_reservation_bytes": 1000,
                        "workspace": {"capacity_bytes": 200}},
-            "residency": {"model_load_count": 1, "program_create_seconds": 0.001}}
+            "residency": {"model_load_count": 1, "program_create_seconds": 0.001},
+            "generated_token_hashes": {"pp1024": [12345]}}
     print(json.dumps({"event": "measurement", "id": packet["id"], "ok": True,
                       "model_load_count": 1, "report": data}), flush=True)
 """, encoding="utf-8")
