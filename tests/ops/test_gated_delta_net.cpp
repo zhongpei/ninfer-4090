@@ -488,6 +488,56 @@ int unaligned_fast_guard_cases() {
     return failures;
 }
 
+// The exact double-buffer candidate changes only global-to-shared prefetch order.
+// Exercise both implementations in this process with identical source tensors,
+// including non-multiple-of-16 final tiles, graph replay, and continuation cuts.
+int exact_prefetch_cases() {
+    const char* previous_raw = std::getenv("NINFER_GDN_EXACT_PREFETCH");
+    const std::optional<std::string> previous =
+        previous_raw ? std::optional<std::string>(previous_raw) : std::nullopt;
+    const auto set_route = [](const char* value) {
+#if defined(_WIN32)
+        if (_putenv_s("NINFER_GDN_EXACT_PREFETCH", value ? value : "") != 0)
+            throw std::runtime_error("failed to select exact GDN prefetch route");
+#else
+        if ((value ? setenv("NINFER_GDN_EXACT_PREFETCH", value, 1)
+                   : unsetenv("NINFER_GDN_EXACT_PREFETCH")) != 0)
+            throw std::runtime_error("failed to select exact GDN prefetch route");
+#endif
+    };
+    struct Restore {
+        decltype(set_route)& setter;
+        const std::optional<std::string>& original;
+        ~Restore() {
+            try { setter(original ? original->c_str() : nullptr); } catch (...) {}
+        }
+    } restore{set_route, previous};
+
+    int failures = 0;
+    for (bool normalize : {false, true}) {
+        for (const auto [tokens, cut] :
+             {std::pair{32, 31}, std::pair{33, 32}, std::pair{59, 54},
+              std::pair{64, 59}, std::pair{65, 64},
+              std::pair{128, 123}, std::pair{129, 128}}) {
+            const auto in = make_inputs({"exact GDN double-buffer", 16, 48,
+                                         tokens, normalize}, 41000U + tokens);
+            set_route("0");
+            const CausalRun ordinary = causal_run(in, normalize, true);
+            set_route("1");
+            const CausalRun pipelined = causal_run(in, normalize, true);
+            failures += ordinary.failures + pipelined.failures;
+            failures += verify_exact("GDN pipelined exact output", pipelined.out, ordinary.out);
+            failures += verify_exact("GDN pipelined exact FP32 state",
+                                     pipelined.state, ordinary.state);
+            failures += causal_pair(in, cut, normalize); // now uses pipelined prefills
+        }
+    }
+    set_route("1");
+    failures += unaligned_input_cases(); // must take scalar-safe fallback
+    failures += state_cast_cases();       // FP16/FP32 state conversion and alias variants
+    return failures;
+}
+
 int state_cast_cases() {
     int failures = 0;
     for (bool source_half : {false, true}) {
@@ -861,6 +911,12 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--state-casts-only") {
         failures += state_cast_cases();
         std::cout << (failures == 0 ? "OK" : "FAIL") << " GDN state casts\n";
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--exact-prefetch-only") {
+        failures += exact_prefetch_cases();
+        std::cout << (failures == 0 ? "OK" : "FAIL")
+                  << " GDN exact double-buffer prefetch\n";
         return failures == 0 ? 0 : 1;
     }
     if (argc == 2 && std::string(argv[1]) == "--unaligned-fast-only") {
