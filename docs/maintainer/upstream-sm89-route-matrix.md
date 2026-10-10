@@ -313,3 +313,49 @@ where the `baseline` route must explicitly set
 
 The reported `performance_only_screen` is NOT a decision to
 enable a candidate in production. No new fast GDN route is yet qualified.
+
+## RTX 4090 validation record — PR #26 (2026-10-10)
+
+Tested code head: `e80251a4dec4350b61fd42525366c5a4803c5c8`; PR #26 remains Draft/Open.
+Hardware: RTX 4090 (GPU 0), driver 610.57.04, CUDA 12.8.61, Compute Sanitizer 2025.1.0.0. Artifact: `Ternary-Bonsai-2-27B-ninfer-v3.ninfer` (9,520,051,456 bytes).
+
+### Build and correctness checks
+
+| Check | Result | Evidence / scope |
+|---|---|---|
+| Release sm_89 configure and requested targets | PASS | `ninfer_bench`, `ninfer_gated_delta_net_test`, `ninfer_bench_support_test` built at `ef1600f2`; the later `e80251a4` change is Python-only, with identical C++/CUDA/CMake sources. |
+| Route-matrix Python tests | PASS, 10/10 | At `ef1600f2`, the fake-session contract exposed a wrong expected candidate count (8 expected, 4 planned). The count was corrected and resident process stdin/stdout cleanup added. At `e80251a4`, all 10 tests pass and the ResourceWarnings are gone. |
+| GDN exact causal-prefix test | PASS | `NINFER_GDN_TWO_STAGE=1`, `NINFER_GDN_TWO_STAGE_NUMERICS=exact`; state/output boundary cases passed. |
+| Approximate unaligned guard under Compute Sanitizer | PASS | `--unaligned-fast-only`; zero sanitizer errors. |
+
+### Resident strict-mode smoke
+
+The 3-pair smoke completed 8 arms with one model materialization and 8 independent Programs. Every arm reported zero artifact bytes read and zero weight bytes uploaded. Runtime reservation remained 1,974,435,840 bytes and workspace capacity 185,393,152 bytes. Generated-token hashes matched in all 3 pairs at each prompt length.
+
+| Prompt | Median paired throughput change |
+|---|---:|
+| 1K | -0.34% |
+| 4K | +0.10% |
+| 16K | +0.13% |
+| 32K | +0.97% |
+
+The performance screen failed; strict-mode GDN did not show a material gain. The route remains exact/default and the approximate kernel is gated off.
+
+### Approximate GDN experiment
+
+The 10-pair experiment completed all 22 arms with one model materialization. Per-arm artifact reads and weight uploads were zero. Runtime reservation and workspace capacity stayed at the same values as the smoke. Program setup was 0.174–0.226 seconds after the first warmup arm (4.49 seconds).
+
+| Workload | Median paired change | Token hashes |
+|---|---:|---|
+| 1K prefill | +11.13% | 10/10 pairs match |
+| 4K prefill | +10.65% | 10/10 pairs match |
+| 16K prefill | +9.40% | 10/10 pairs match |
+| 32K prefill | +8.30% | 10/10 pairs match |
+| 4K prefill + 256 generated tokens | +9.82% | **0/10 pairs match** |
+| 16K prefill + 256 generated tokens | +9.12% | 10/10 pairs match |
+
+The performance-only screen passed, but the overall output-token gate failed because all 10 `4K+256` comparisons diverged. The quality gate is `blocked_approx_state_semantics`; the measured token mismatch confirms that the approximate route is not eligible for production. This is tracked as validation defect `PR26-GDN-001`.
+
+A separate route-trace run confirmed `baseline: kernel=recurrent reason=exact_or_default` and `approximate candidate: kernel=two_stage reason=approx_aligned`. Trace timings are diagnostic only and are excluded from the A/B results. Perplexity, 131K context quality, and Agent-serving concurrency/latency remain unverified.
+
+Raw summaries and per-arm evidence are retained locally under `profiles/bench/sm89-resident-smoke-e80251a4`, `profiles/bench/sm89-gdn-fast-e80251a4`, and `profiles/bench/sm89-gdn-fast-trace-e80251a4`; those generated directories are git-ignored.
