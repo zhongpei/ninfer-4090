@@ -516,22 +516,27 @@ int exact_prefetch_cases() {
     } restore{set_route, previous};
 
     int failures = 0;
-    for (bool normalize : {false, true}) {
-        for (const auto [tokens, cut] :
-             {std::pair{32, 31}, std::pair{33, 32}, std::pair{59, 54},
-              std::pair{64, 59}, std::pair{65, 64},
-              std::pair{128, 123}, std::pair{129, 128}}) {
-            const auto in = make_inputs({"exact GDN double-buffer", 16, 48,
-                                         tokens, normalize}, 41000U + tokens);
-            set_route("0");
-            const CausalRun ordinary = causal_run(in, normalize, true);
-            set_route("1");
-            const CausalRun pipelined = causal_run(in, normalize, true);
-            failures += ordinary.failures + pipelined.failures;
-            failures += verify_exact("GDN pipelined exact output", pipelined.out, ordinary.out);
-            failures += verify_exact("GDN pipelined exact FP32 state",
-                                     pipelined.state, ordinary.state);
-            failures += causal_pair(in, cut, normalize); // now uses pipelined prefills
+    // Qualify the two real GDN value-head geometries, not just 27B's h48.
+    // The raw-FP32 Q/K path is also checked alongside normalized Q/K.
+    for (int value_heads : {32, 48}) {
+        for (bool normalize : {false, true}) {
+            for (const auto [tokens, cut] :
+                 {std::pair{32, 31}, std::pair{33, 32}, std::pair{59, 54},
+                  std::pair{64, 59}, std::pair{65, 64},
+                  std::pair{128, 123}, std::pair{129, 128}}) {
+                const auto in = make_inputs({"exact GDN double-buffer", 16, value_heads,
+                                             tokens, normalize},
+                                            41000U + tokens + value_heads * 1000U);
+                set_route("0");
+                const CausalRun ordinary = causal_run(in, normalize, true);
+                set_route("1");
+                const CausalRun pipelined = causal_run(in, normalize, true);
+                failures += ordinary.failures + pipelined.failures;
+                failures += verify_exact("GDN pipelined exact output", pipelined.out, ordinary.out);
+                failures += verify_exact("GDN pipelined exact FP32 state",
+                                         pipelined.state, ordinary.state);
+                failures += causal_pair(in, cut, normalize); // now uses pipelined prefills
+            }
         }
     }
     set_route("1");
