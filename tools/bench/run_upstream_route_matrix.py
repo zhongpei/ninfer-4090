@@ -25,6 +25,10 @@ DEFAULT_CASES: dict[str, dict[str, str]] = {
         "NINFER_DEVICE_ROUTE_MODE": "builtin",
         "NINFER_DEVICE_ROUTE_ONLY": "attn_prompt_fast",
     },
+    "gdn_exact_prefetch": {
+        "NINFER_DEVICE_ROUTE_MODE": "off",
+        "NINFER_GDN_EXACT_PREFETCH": "1",
+    },
     "gdn_two_stage": {
         "NINFER_DEVICE_ROUTE_MODE": "builtin",
         "NINFER_DEVICE_ROUTE_ONLY": "gdn_two_stage/h32,gdn_two_stage/h48",
@@ -58,7 +62,7 @@ CLEAN_ENV = (
     "NINFER_DEVICE_ROUTE_MODE", "NINFER_DEVICE_PROFILE_PATH", "NINFER_DEVICE_PROFILES",
     "NINFER_DEVICE_ROUTE_ONLY", "NINFER_DEVICE_ROUTE_OVERRIDES",
     "NINFER_PROMPT_FAST", "NINFER_GDN_TWO_STAGE", "NINFER_GDN_TWO_STAGE_NUMERICS",
-    "NINFER_PREFILL_ALIGN", "NINFER_DEVICE_ROUTE_TRACE",
+    "NINFER_GDN_EXACT_PREFETCH", "NINFER_PREFILL_ALIGN", "NINFER_DEVICE_ROUTE_TRACE",
 )
 
 
@@ -283,8 +287,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True, help="new output directory")
     parser.add_argument("--cases-json", type=Path)
-    parser.add_argument("--cases", default="gdn_two_stage,gdn_two_stage_approx",
-                        help="default focuses the failing GDN route; other cases are opt-in")
+    parser.add_argument("--cases", default="gdn_exact_prefetch",
+                        help="default measures exact-FP32 pipelined GDN; approximate case is opt-in")
     parser.add_argument("--pairs", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=1, help="discarded complete baseline/candidate pairs before measured pairs")
     parser.add_argument("--arm-warmup", type=int, default=1, help="in-Engine warmup repetitions; avoids timing graph capture")

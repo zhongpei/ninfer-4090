@@ -158,7 +158,7 @@ private:
     std::streambuf* saved_;
 };
 
-constexpr std::array<std::string_view, 10> kRouteEnvironment{
+constexpr std::array<std::string_view, 11> kRouteEnvironment{
     "NINFER_DEVICE_ROUTE_MODE",
     "NINFER_DEVICE_PROFILE_PATH",
     "NINFER_DEVICE_PROFILES",
@@ -167,6 +167,7 @@ constexpr std::array<std::string_view, 10> kRouteEnvironment{
     "NINFER_PROMPT_FAST",
     "NINFER_GDN_TWO_STAGE",
     "NINFER_GDN_TWO_STAGE_NUMERICS",
+    "NINFER_GDN_EXACT_PREFETCH",
     "NINFER_PREFILL_ALIGN",
     "NINFER_DEVICE_ROUTE_TRACE",
 };
