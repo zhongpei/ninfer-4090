@@ -243,8 +243,12 @@ def validated_measurement(packet: dict[str, Any], expected_id: str) -> dict[str,
     if packet.get("model_load_count") != 1:
         raise RuntimeError("resident route matrix reloaded the model")
     report = packet.get("report")
-    if not isinstance(report, dict) or (report.get("residency") or {}).get("model_load_count") != 1:
+    residency = report.get("residency") if isinstance(report, dict) else None
+    if not isinstance(residency, dict) or residency.get("model_load_count") != 1:
         raise RuntimeError("resident route arm lacks verified single-load evidence")
+    if (residency.get("artifact_bytes_read_this_arm") != 0 or
+            residency.get("weight_bytes_uploaded_this_arm") != 0):
+        raise RuntimeError("resident route arm reread or re-uploaded model weights")
     tests = report.get("tests")
     if not isinstance(tests, list) or not tests:
         raise RuntimeError("resident route arm has no benchmark tests")

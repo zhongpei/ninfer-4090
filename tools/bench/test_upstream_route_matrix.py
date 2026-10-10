@@ -102,6 +102,21 @@ class RouteMatrixContractTests(unittest.TestCase):
                 "model_load_count": 2, "report": {}
             }, "foo")
 
+    def test_reject_artifact_reloads_even_with_load_count_one(self):
+        import tools.bench.run_upstream_route_matrix as route
+        base = {
+            "event": "measurement", "id": "x", "ok": True, "model_load_count": 1,
+            "report": {
+                "residency": {"model_load_count": 1, "program_create_seconds": 0.1,
+                              "artifact_bytes_read_this_arm": 4096,
+                              "weight_bytes_uploaded_this_arm": 0},
+                "tests": [{"label": "pp1024", "prefill_tok_s_mean": 100}],
+                "generated_token_hashes": {"pp1024": [42]},
+            },
+        }
+        with self.assertRaises(RuntimeError):
+            route.validated_measurement(base, "x")
+
     def test_real_persistent_protocol_fake(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -132,7 +147,9 @@ for line in sys.stdin:
             "config": {"prefill_chunk": 1024},
             "memory": {"runtime_reservation_bytes": 1000,
                        "workspace": {"capacity_bytes": 200}},
-            "residency": {"model_load_count": 1, "program_create_seconds": 0.001},
+            "residency": {"model_load_count": 1, "program_create_seconds": 0.001,
+                          "artifact_bytes_read_this_arm": 0,
+                          "weight_bytes_uploaded_this_arm": 0},
             "generated_token_hashes": {"pp1024": [12345]}}
     print(json.dumps({"event": "measurement", "id": packet["id"], "ok": True,
                       "model_load_count": 1, "report": data}), flush=True)
@@ -187,7 +204,9 @@ for line in sys.stdin:
             "config": {"prefill_chunk": 1024},
             "memory": {"runtime_reservation_bytes": 1,
                        "workspace": {"capacity_bytes": 1}},
-            "residency": {"model_load_count": 1, "program_create_seconds": 0.01},
+            "residency": {"model_load_count": 1, "program_create_seconds": 0.01,
+                          "artifact_bytes_read_this_arm": 0,
+                          "weight_bytes_uploaded_this_arm": 0},
             "generated_token_hashes": {"pp1024": [777]}}
     print(json.dumps({"event": "measurement", "id": packet["id"], "ok": True,
                       "model_load_count": 1, "report": data}), flush=True)
