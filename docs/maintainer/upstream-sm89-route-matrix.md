@@ -171,6 +171,13 @@ NINFER_GDN_TWO_STAGE=1 NINFER_GDN_TWO_STAGE_NUMERICS=exact \
 NINFER_GDN_TWO_STAGE=1 NINFER_GDN_TWO_STAGE_NUMERICS=exact \
   compute-sanitizer --tool memcheck --error-exitcode=99 \
   ./build/tests/ninfer_gated_delta_net_test
+
+# Actually select the fast candidate, then exercise its alignment fallback.
+# This test is allowed to pass even though aligned approximate GDN still fails
+# the bitwise state-splitting correctness contract.
+NINFER_GDN_TWO_STAGE_NUMERICS=approx \
+  compute-sanitizer --tool memcheck --error-exitcode=99 \
+  ./build/tests/ninfer_gated_delta_net_test --unaligned-fast-only
 ```
 
 **Fast GDN experiment (not a green gate):** With
@@ -184,7 +191,7 @@ oracle or assert that the +8–10% prefill uplift is qualified.
 ```bash
 NINFER_GDN_TWO_STAGE=1 NINFER_GDN_TWO_STAGE_NUMERICS=approx \
   ./build/tests/ninfer_gated_delta_net_test \
-  > profiles/gdn-approx-quality.log 2>&1
+  > /tmp/gdn-approx-quality.log 2>&1
 # Nonzero exit with aligned split-state mismatches remains a correctness blocker.
 ```
 
@@ -210,8 +217,12 @@ Inspect `residency.json` (`model_load_count: 1`), every
 `generated_token_hashes`), `records.jsonl`, `summary.json` and
 `session-stderr.log`. The owner remains alive across all six measured arms;
 a fresh Program and graph is intentionally created for each arm.
-All completed arms are journaled immediately. If one CUDA candidate
-fails, the process terminates rather than silently reusing a poisoned device.
+All completed arms are journaled immediately. A per-candidate
+`summary-CANDIDATE.json` is written as soon as its last paired arm finishes.
+If a later CUDA candidate fails, the process terminates rather than silently
+reusing a poisoned device. Successful earlier results survive in the output
+directory; `plan.json`, `records.jsonl` and `ERROR.txt` distinguish
+completed arms from the unfinished remainder.
 
 ### 3. Separate *experimental* GDN throughput from correctness
 

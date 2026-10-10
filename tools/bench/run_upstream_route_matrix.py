@@ -373,6 +373,16 @@ def main(argv: list[str] | None = None) -> int:
                     journal.flush()  # Retain all completed arms even after a CUDA failure.
                     print(f"[resident {idx + 1}/{len(plan)}] {tag}; loads=1; "
                           f"program_init={measurement['program_create_seconds']:.3f}s", flush=True)
+                    # Commit an experiment's paired summary before the next candidate.
+                    # A failed later CUDA kernel must not erase completed comparisons.
+                    if idx + 1 == len(plan) or plan[idx + 1]["experiment"] != experiment:
+                        completed = [r for r in records if r["experiment"] == experiment]
+                        result = calculate(completed, experiment, args.pairs)
+                        (args.out / f"summary-{experiment}.json").write_text(
+                            json.dumps(result, indent=2) + "\n", encoding="utf-8")
+                        print(f"[resident] completed {experiment}: "
+                              f"token_gate={result['output_token_gate']}, "
+                              f"quality_gate={result['quality_gate']}", flush=True)
 
                 process.stdin.write((json.dumps({"id": "__stop__", "stop": True}) + "\n").encode())
                 process.stdin.flush()
@@ -432,6 +442,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except Exception as exc:
         (args.out / "ERROR.txt").write_text(f"{type(exc).__name__}: {exc}\n")
+        # Do not overwrite any earlier summary or drop completed arm records.
+        # Consumers can identify unfinished comparisons from plan.json vs records.jsonl.
         raise
     finally:
         if process is not None and process.poll() is None:
