@@ -415,9 +415,11 @@ NINFER_GDN_EXACT_PREFETCH=1 \
 
 The GDN test toggles the exact pipeline on and off within the same process,
 comparing BF16 outputs and the complete FP32 final states byte-for-byte. It
-also repeats full-vs-split frontiers for h32/h48, normalized/raw Q/K,
-31/32/33, 59+5, 64/65, 123+5, 128/129, graph replay, mixed FP16/FP32
-state layouts and unaligned operands. **Any mismatch, sanitizer error or
+compares the original and pipelined kernel bitwise for h32/h48 and
+normalized/raw Q/K at 32/33/59/64/65/128/129 tokens. It runs the
+more expensive independent FP64 and full-vs-split frontiers specifically
+at **59+5** and **123+5** for both h32 and h48 (normalized Q/K),
+plus graph replay, mixed FP16/FP32 states and unaligned operands. **Any mismatch, sanitizer error or
 CUDA failure is a hard stop; do not tune numerical tolerances.**
 
 ### 2. Single-model resident performance and generation correctness
