@@ -8,6 +8,8 @@
 #include <cuda_runtime.h>
 
 #include <exception>
+#include <algorithm>
+#include <memory>
 #include <array>
 #include <chrono>
 #include <cstdlib>

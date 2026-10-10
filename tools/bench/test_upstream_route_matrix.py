@@ -1,15 +1,21 @@
-"""Pure route A/B statistical and schema regressions; no CUDA/GPU required."""
+"""CPU-only contract tests for resident-weight AB/BA routing.
+
+The integration fake is a real, long-running JSONL child (no GPU needed).
+It deliberately fails if the runner starts more than one process/model owner.
+"""
 from __future__ import annotations
 
+import hashlib
 import json
-import tempfile
+import os
 from pathlib import Path
+import tempfile
 import unittest
-from subprocess import CompletedProcess
 from unittest.mock import patch
 
 from tools.bench.run_upstream_route_matrix import (
-    calculate, main, percentile, read_cases, streaming_sha256, summary_values,
+    build_plan, calculate, main, percentile, read_cases, streaming_sha256,
+    summary_values, validated_measurement,
 )
 
 
@@ -17,9 +23,9 @@ class RouteMatrixContractTests(unittest.TestCase):
     def test_percentile_and_singleton(self):
         self.assertEqual(percentile([7.0], .95), 7.0)
         self.assertAlmostEqual(percentile([0.0, 100.0], .05), 5.0)
-        self.assertEqual(summary_values([]), None)
+        self.assertIsNone(summary_values([]))
 
-    def test_reject_missing_baseline_or_non_env(self):
+    def test_reject_invalid_case_and_missing_baseline(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "cases.json"
             path.write_text(json.dumps({"fast": {"NINFER_PROMPT_FAST": "1"}}))
@@ -28,84 +34,108 @@ class RouteMatrixContractTests(unittest.TestCase):
             path.write_text(json.dumps({"baseline": {"PATH": "invalid"}}))
             with self.assertRaises(ValueError):
                 read_cases(path)
+            path.write_text(json.dumps({"baseline": {"NINFER_DEVICE_ROUTE_MODE": "builtin"}}))
+            with self.assertRaises(ValueError):
+                read_cases(path)
 
-    def test_pair_math_and_memory(self):
+    def test_both_pair_orders_and_disjoint_ids(self):
+        plan = build_plan(["prompt_fast", "gdn_two_stage_approx"], pairs=5, warmup=1)
+        self.assertEqual(len(plan), 2 * (2 + 10))
+        self.assertEqual(len({item["tag"] for item in plan}), len(plan))
+        pairs = [p for p in plan if not p["warmup"] and p["experiment"] == "prompt_fast"]
+        self.assertEqual([a["case"] for a in pairs[:4]],
+                         ["baseline", "prompt_fast", "prompt_fast", "baseline"])
+        self.assertTrue(all(p["experiment"] == p["case"] or p["case"] == "baseline"
+                            for p in plan))
+
+    def test_pair_math_memory_and_quality(self):
         rows = []
         for pair in range(3):
-            rows.append({"case": "baseline", "pair": pair, "warmup": False,
-                         "metrics": {"4K": 100.0}, "resolved_chunk": 1024,
-                         "runtime_reservation_bytes": 100, "workspace_capacity_bytes": 60})
-            rows.append({"case": "fast", "pair": pair, "warmup": False,
-                         "metrics": {"4K": 110.0}, "resolved_chunk": 1536,
-                         "runtime_reservation_bytes": 110, "workspace_capacity_bytes": 65})
+            for case, tps, bytes_ in [("baseline", 100, 100), ("fast", 110, 110)]:
+                rows.append({"case": case, "pair": pair, "warmup": False,
+                             "metrics": {"pp4096": float(tps)},
+                             "resolved_chunk": 1024,
+                             "runtime_reservation_bytes": bytes_,
+                             "workspace_capacity_bytes": 60})
         report = calculate(rows, "fast", 3)
-        self.assertAlmostEqual(report["tests"]["4K"]["paired_improvement_pct"]["median"], 10)
+        self.assertAlmostEqual(report["tests"]["pp4096"]["paired_improvement_pct"]["median"], 10)
         self.assertTrue(report["performance_only_screen"])
-        self.assertEqual(report["resolved_chunk_values"], ["1536"])
         self.assertEqual(report["runtime_reservation_peak_bytes"], 110)
+        self.assertEqual(report["quality_gate"], "not_executed")
 
-    def test_multicase_runs_use_separate_baseline_directories(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            executable = root / "bench"
-            model = root / "model.ninfer"
-            executable.write_bytes(b"benchmark")
-            model.write_bytes(b"model")
-            output = root / "out"
-
-            def fake_run(command, **kwargs):
-                if command[0] == "nvidia-smi":
-                    return CompletedProcess(command, 0, "RTX 4090, 610, 24564 MiB\n", "")
-                report = Path(command[command.index("--output-file") + 1])
-                report.write_text(json.dumps({
-                    "tests": [{"label": "1024", "prefill_tok_s_mean": 100.0}],
-                    "config": {"prefill_chunk": 1024},
-                    "memory": {"runtime_reservation_bytes": 10,
-                               "workspace": {"capacity_bytes": 5}},
-                }))
-                return CompletedProcess(command, 0, "", "")
-
-            argv = [
-                "--exe", str(executable), "--model", str(model), "--out", str(output),
-                "--device", "1", "--max-context", "1024", "--prompts", "1024",
-                "--spec", "none", "--cases", "prompt_fast,gdn_two_stage,all_candidates",
-                "--warmup", "1", "--pairs", "3",
-            ]
-            with patch("tools.bench.run_upstream_route_matrix.subprocess.run",
-                       side_effect=fake_run):
-                self.assertEqual(main(argv), 0)
-
-            baseline_dirs = []
-            for invocation in output.rglob("invocation.json"):
-                record = json.loads(invocation.read_text())
-                if record["case"] == "baseline":
-                    baseline_dirs.append(invocation.parent)
-            self.assertEqual(len(baseline_dirs), 12)
-            self.assertEqual(len(set(baseline_dirs)), 12)
-            candidate_routes = []
-            for invocation in output.rglob("invocation.json"):
-                record = json.loads(invocation.read_text())
-                if record["case"] == "all_candidates":
-                    candidate_routes.append(record["route_env"])
-            self.assertEqual(len(candidate_routes), 4)
-            expected_only = "attn_prompt_fast,gdn_two_stage/h32,gdn_two_stage/h48,t2_a16,prefill_align"
-            self.assertTrue(all(route["NINFER_DEVICE_ROUTE_ONLY"] == expected_only
-                                for route in candidate_routes))
-            self.assertTrue((output / "summary.json").is_file())
-
-    def test_missing_pair_not_silently_reused(self):
+    def test_missing_pair_and_rejected_fake_load_count(self):
         rows = [{"case": "baseline", "pair": 0, "warmup": False,
-                 "metrics": {"4K": 100}},
+                 "metrics": {"pp4096": 100}},
                 {"case": "fast", "pair": 0, "warmup": False,
-                 "metrics": {"4K": 110}}]
+                 "metrics": {"pp4096": 110}}]
         with self.assertRaises(RuntimeError):
             calculate(rows, "fast", 3)
+        with self.assertRaises(RuntimeError):
+            validated_measurement({
+                "id": "foo", "event": "measurement", "ok": True,
+                "model_load_count": 2, "report": {}
+            }, "foo")
+
+    def test_real_persistent_protocol_fake(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "fake_resident_bench"
+            model = root / "model.ninfer"
+            model.write_bytes(b"artifact")
+            startup_log = root / "model-load-count.txt"
+            exe.write_text("""#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_ROUTE_STARTUPS"], "a", encoding="utf8") as f:
+    f.write("1\\n")
+print(json.dumps({"event": "ready", "ok": True, "model_load_count": 1,
+                  "resident_weight_bytes": 123}), flush=True)
+for line in sys.stdin:
+    packet = json.loads(line)
+    if packet.get("stop"):
+        print(json.dumps({"event": "bye", "id": packet["id"], "ok": True,
+                          "model_load_count": 1}), flush=True)
+        break
+    route = packet["route_env"]
+    score = 100.0 if route.get("NINFER_DEVICE_ROUTE_MODE") == "off" else 110.0
+    data = {"tests": [{"label": "pp1024", "prefill_tok_s_mean": score}],
+            "config": {"prefill_chunk": 1024},
+            "memory": {"runtime_reservation_bytes": 1000,
+                       "workspace": {"capacity_bytes": 200}},
+            "residency": {"model_load_count": 1, "program_create_seconds": 0.001}}
+    print(json.dumps({"event": "measurement", "id": packet["id"], "ok": True,
+                      "model_load_count": 1, "report": data}), flush=True)
+""", encoding="utf-8")
+            exe.chmod(0o755)
+            out = root / "out"
+            argv = ["--exe", str(exe), "--model", str(model), "--out", str(out),
+                    "--max-context", "1024", "--prompts", "1024",
+                    "--cases", "prompt_fast,gdn_two_stage_approx,all_candidates",
+                    "--warmup", "1", "--pairs", "3", "--timeout", "10"]
+            with patch.dict(os.environ, {"FAKE_ROUTE_STARTUPS": str(startup_log)}):
+                self.assertEqual(main(argv), 0)
+            # The old runner spawned (pairs+warmup) x 2 x cases models. New runner: exactly one.
+            self.assertEqual(startup_log.read_text().splitlines(), ["1"])
+            self.assertEqual(json.loads((out / "summary.json").read_text())["model_load_count"], 1)
+            self.assertEqual(json.loads((out / "summary.json").read_text())["program_creation_count"], 24)
+            self.assertEqual(len((out / "records.jsonl").read_text().splitlines()), 24)
+            records = [json.loads(p.read_text()) for p in out.rglob("invocation.json")]
+            self.assertEqual(len(records), 24)
+            baselines = [r for r in records if r["case"] == "baseline"]
+            self.assertEqual(len(baselines), 12)
+            self.assertEqual(len({r["tag"] for r in baselines}), len(baselines))
+            combinations = [r["route_env"] for r in records
+                            if r["case"] == "all_candidates"]
+            self.assertEqual(len(combinations), 8)
+            only = "attn_prompt_fast,gdn_two_stage/h32,gdn_two_stage/h48,t2_a16,prefill_align"
+            self.assertTrue(all(r["NINFER_DEVICE_ROUTE_ONLY"] == only for r in combinations))
+            approx = json.loads((out / "summary-gdn_two_stage_approx.json").read_text())
+            self.assertEqual(approx["quality_gate"], "blocked_approx_state_semantics")
+            self.assertTrue((out / "summary.md").is_file())
 
     def test_stream_hash(self):
-        import hashlib
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "input.bin"
-            path.write_bytes(b"X" * (1024 * 1024 + 5))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "data"
+            path.write_bytes(b"z" * (1024 * 1024 + 5))
             self.assertEqual(streaming_sha256(path),
                              hashlib.sha256(path.read_bytes()).hexdigest())
 
