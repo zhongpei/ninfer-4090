@@ -87,16 +87,20 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
                                                   cudaStream_t stream) {
     if (fast_prompt_route()) {
         if (cache.storage == KvCacheStorage::Int8Group64) {
+            trace_device_kernel_selection("attn_prompt_fast", q.ne[2], "upstream_fast_int8");
             launch_fast_prompt_candidate<Geometry, false>(q, positions, scale, cache, metadata,
                                                           out, stream);
             return;
         }
         if (cache.storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {
+            trace_device_kernel_selection("attn_prompt_fast", q.ne[2], "upstream_fast_rk8v4");
             launch_fast_prompt_candidate<Geometry, true>(q, positions, scale, cache, metadata,
                                                          out, stream);
             return;
         }
     }
+    trace_device_kernel_selection("attn_prompt_fast", q.ne[2], "local_original",
+                                  "profile_off_or_unsupported_storage");
     const Tensor& cache_k = cache.k_pages;
     const Tensor& cache_v = cache.v_pages;
     // Both dtype-specialized kernels exceed the default 48 KiB dynamic-smem ceiling.

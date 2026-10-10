@@ -333,11 +333,15 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
         reinterpret_cast<std::uintptr_t>(k.data) |
         reinterpret_cast<std::uintptr_t>(v.data) |
         reinterpret_cast<std::uintptr_t>(out.data);
-    if ((addresses & 15U) == 0 && two_stage_route(v.ne[1], q.ne[2])) {
+    const bool requested = two_stage_route(v.ne[1], q.ne[2]);
+    if ((addresses & 15U) == 0 && requested) {
+        trace_device_kernel_selection("gdn", q.ne[2], "two_stage", "approx_aligned");
         run_two_stage(q, k, v, g, beta, scale, normalize_qk, ws, ssm_state_in,
                       ssm_state_out, out, stream);
         return;
     }
+    trace_device_kernel_selection("gdn", q.ne[2], "recurrent",
+                                  requested ? "unaligned_fallback" : "exact_or_default");
     (void)ws;
     detail::gated_delta_net::launch_recurrent_inout(q, k, v, g, beta, scale, normalize_qk,
                                                   ssm_state_in, ssm_state_out, out, stream);

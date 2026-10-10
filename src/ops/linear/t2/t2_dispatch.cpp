@@ -71,6 +71,9 @@ void t2_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy pol
         throw std::invalid_argument("t2 linear: requires a row-split weight");
     }
     const T2Launch launch = select_t2_launch(w.n, w.k, x.ne[1], policy);
+    trace_device_kernel_selection("t2_a16", x.ne[1],
+                                  launch == launch_t2_small_t_upstream
+                                      ? "upstream_small_t" : "local_original");
     launch(x, w, out, stream);
 }
 

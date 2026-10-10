@@ -44,6 +44,13 @@ void install_device_route_profile(std::shared_ptr<const DeviceRouteProfile> prof
 // profile, no entry for the key, or the width lies past the entry's last band.
 [[nodiscard]] std::string_view device_route_schedule(std::string_view key, std::int32_t width);
 
+// Debug-only evidence of the kernel *actually launched*, not just a profile
+// lookup. Emits distinct device/key/implementation records only when
+// NINFER_DEVICE_ROUTE_TRACE=1. Never changes dispatch or production routing.
+void trace_device_kernel_selection(std::string_view key, std::int32_t width,
+                                   std::string_view implementation,
+                                   std::string_view reason = {});
+
 // Calibration times candidate schedules with the compiled routes bypassed: while a scope is alive,
 // device_route_schedule() answers `schedule` for `key` whatever the installed profile says.
 class DeviceRouteForce {

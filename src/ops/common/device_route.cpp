@@ -70,7 +70,7 @@ void route_trace(int device, std::string_view key, std::int32_t width,
     const std::string identity = std::to_string(device) + ":" + std::string(key) + "=" + actual;
     const std::lock_guard guard(mutex);
     if (recorded.size() < 512 && recorded.insert(identity).second) {
-        std::fprintf(stderr, "ninfer route applied device=%d key=%.*s width=%d schedule=%s\n",
+        std::fprintf(stderr, "ninfer route requested device=%d key=%.*s width=%d schedule=%s\n",
                      device, static_cast<int>(key.size()), key.data(), width, actual.c_str());
     }
 }
@@ -128,6 +128,27 @@ std::string_view device_route_schedule(std::string_view key, std::int32_t width)
     }
     route_trace(device, key, width, {});
     return {};
+}
+
+void trace_device_kernel_selection(std::string_view key, std::int32_t width,
+                                   std::string_view implementation, std::string_view reason) {
+    // Read the environment on each Engine's lifetime: resident A/B mutates this between arms.
+    const char* trace = std::getenv("NINFER_DEVICE_ROUTE_TRACE");
+    if (trace == nullptr || trace[0] != '1') return;
+    const int device = current_device();
+    static std::mutex mutex;
+    static std::unordered_set<std::string> emitted;
+    const std::string signature = std::to_string(device) + ":kernel:" + std::string(key) +
+                                  ":" + std::string(implementation) + ":" +
+                                  std::string(reason);
+    const std::lock_guard guard(mutex);
+    if (emitted.size() < 512 && emitted.insert(signature).second) {
+        std::fprintf(stderr,
+                     "ninfer kernel selected device=%d key=%.*s width=%d kernel=%.*s reason=%.*s\n",
+                     device, static_cast<int>(key.size()), key.data(), width,
+                     static_cast<int>(implementation.size()), implementation.data(),
+                     static_cast<int>(reason.size()), reason.data());
+    }
 }
 
 DeviceRouteForce::DeviceRouteForce(std::string key, std::string schedule) {
