@@ -67,6 +67,26 @@ class RouteMatrixContractTests(unittest.TestCase):
         rows[-1]["output_token_hashes"] = {"pp4096": [12346]}
         self.assertEqual(calculate(rows, "fast", 3)["output_token_gate"], "fail")
 
+    def test_custom_named_approx_case_still_blocks_quality_gate(self):
+        rows = []
+        for pair in range(3):
+            for name in ("baseline", "optimized"):
+                rows.append({
+                    "case": name, "pair": pair, "warmup": False,
+                    "metrics": {"pp1024": 100.0 if name == "baseline" else 110.0},
+                    "output_token_hashes": {"pp1024": [777]},
+                    "route_env": ({
+                        "NINFER_GDN_TWO_STAGE_NUMERICS": "approx"
+                    } if name == "optimized" else {
+                        "NINFER_DEVICE_ROUTE_MODE": "off"
+                    }),
+                    "resolved_chunk": 1024, "runtime_reservation_bytes": 1,
+                    "workspace_capacity_bytes": 1,
+                })
+        result = calculate(rows, "optimized", 3)
+        self.assertEqual(result["output_token_gate"], "pass")
+        self.assertEqual(result["quality_gate"], "blocked_approx_state_semantics")
+
     def test_missing_pair_and_rejected_fake_load_count(self):
         rows = [{"case": "baseline", "pair": 0, "warmup": False,
                  "metrics": {"pp4096": 100},
@@ -100,6 +120,11 @@ for line in sys.stdin:
     if packet.get("stop"):
         print(json.dumps({"event": "bye", "id": packet["id"], "ok": True,
                           "model_load_count": 1}), flush=True)
+        break
+    if (os.environ.get("FAKE_ROUTE_FAIL_CASE") and
+            packet["id"].endswith("-" + os.environ["FAKE_ROUTE_FAIL_CASE"])):
+        print(json.dumps({"event": "error", "id": packet["id"], "ok": False,
+                          "error": "simulated illegal memory access"}), flush=True)
         break
     route = packet["route_env"]
     score = 100.0 if route.get("NINFER_DEVICE_ROUTE_MODE") == "off" else 110.0
@@ -138,6 +163,47 @@ for line in sys.stdin:
             approx = json.loads((out / "summary-gdn_two_stage_approx.json").read_text())
             self.assertEqual(approx["quality_gate"], "blocked_approx_state_semantics")
             self.assertTrue((out / "summary.md").is_file())
+
+    def test_failed_later_candidate_keeps_completed_pair_reports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "fake-resident"
+            model = root / "model.ninfer"
+            model.write_bytes(b"model")
+            exe.write_text("""#!/usr/bin/env python3
+import json, os, sys
+print(json.dumps({"event": "ready", "ok": True, "model_load_count": 1}), flush=True)
+for line in sys.stdin:
+    packet = json.loads(line)
+    if packet.get("stop"):
+        print(json.dumps({"event": "bye", "id": packet["id"], "ok": True,
+                          "model_load_count": 1}), flush=True)
+        break
+    if packet["id"].endswith("-gdn_two_stage_approx"):
+        print(json.dumps({"event": "error", "id": packet["id"], "ok": False,
+                          "error": "simulated CUDA failure"}), flush=True)
+        break
+    data = {"tests": [{"label": "pp1024", "prefill_tok_s_mean": 100.0}],
+            "config": {"prefill_chunk": 1024},
+            "memory": {"runtime_reservation_bytes": 1,
+                       "workspace": {"capacity_bytes": 1}},
+            "residency": {"model_load_count": 1, "program_create_seconds": 0.01},
+            "generated_token_hashes": {"pp1024": [777]}}
+    print(json.dumps({"event": "measurement", "id": packet["id"], "ok": True,
+                      "model_load_count": 1, "report": data}), flush=True)
+""", encoding="utf-8")
+            exe.chmod(0o755)
+            out = root / "campaign"
+            with self.assertRaises(RuntimeError):
+                main(["--exe", str(exe), "--model", str(model), "--out", str(out),
+                      "--cases", "prompt_fast,gdn_two_stage_approx",
+                      "--pairs", "3", "--warmup", "0", "--prompts", "1024",
+                      "--max-context", "1024", "--timeout", "10"])
+            self.assertTrue((out / "summary-prompt_fast.json").is_file())
+            self.assertEqual(
+                len((out / "records.jsonl").read_text().splitlines()), 7)
+            self.assertTrue((out / "ERROR.txt").is_file())
+            self.assertFalse((out / "summary-gdn_two_stage_approx.json").exists())
 
     def test_stream_hash(self):
         with tempfile.TemporaryDirectory() as tmp:
