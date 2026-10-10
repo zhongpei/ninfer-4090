@@ -147,3 +147,21 @@ Capture TTFT p50/p95, wall requests/s, final token/s, draft acceptance,
 prompt cache hit depth, 429/5xx, GPU peak memory and exact greedy outputs.
 A candidate that wins isolated prefill but regresses these actual scenarios
 should remain opt-in.
+
+## Route selection diagnostics
+
+For a separate **diagnostic** run, add `--route-trace` to the matrix script
+with only one candidate and three pairs in a new output directory. The runtime
+prints lines such as:
+
+```text
+ninfer route applied device=0 key=attn_prompt_fast width=1 schedule=on
+ninfer route applied device=0 key=gdn_two_stage/h48 width=1024 schedule=on
+ninfer route applied device=0 key=t2_a16 width=8 schedule=upstream
+```
+
+This trace is limited to the first observation of a device/key/schedule.
+**Do not enable it during timing qualification**, because the extra host locks
+and logging can distort throughput. A route profile's loaded key count is
+not evidence that its kernels were executed. Use the actual trace and the
+reported `config` field to verify selected routes and resolved chunk capacity.

@@ -120,9 +120,12 @@ def run_one(args: argparse.Namespace, case: str, override: dict[str, str],
     for key in CLEAN_ENV:
         env.pop(key, None)
     env.update(override)
-    env["NINFER_DEVICE_ROUTE_TRACE"] = "1"
+    if args.route_trace:
+        env["NINFER_DEVICE_ROUTE_TRACE"] = "1"
+    else:
+        env.pop("NINFER_DEVICE_ROUTE_TRACE", None)
     (base / "invocation.json").write_text(json.dumps({
-        "command": command, "route_env": {k: env[k] for k in CLEAN_ENV if k in env},
+        "command": command, "route_env": {k: env[k] for k in (*CLEAN_ENV, "NINFER_DEVICE_ROUTE_TRACE") if k in env},
         "case": case, "pair": pair, "warmup": warmup,
     }, indent=2) + "\n", encoding="utf-8")
     with (base / "stdout.log").open("wb") as stdout, (base / "stderr.log").open("wb") as stderr:
@@ -207,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True, help="new output directory")
     parser.add_argument("--cases-json", type=Path, help="optional case-name -> NINFER_* env map")
+    parser.add_argument("--route-trace", action="store_true", help="debug route resolution; adds host overhead, do not use for speed measurements")
     parser.add_argument("--cases", default="prompt_fast,gdn_two_stage,t2_upstream,sm_wave,all_candidates")
     parser.add_argument("--pairs", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=1)
