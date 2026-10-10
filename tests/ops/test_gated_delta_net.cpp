@@ -22,6 +22,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <optional>
+#include <cstdlib>
 
 using namespace ninfer;
 using namespace ninfer::test;
@@ -379,9 +381,16 @@ int causal_pair(const gdn_ref::Inputs& in, int prefix, bool normalize, bool samp
 int causal_prefix_cases() {
     int failures = 0;
     for (bool normalize : {false, true}) {
-        for (int tokens : {64, 128}) {
-            const auto in = make_inputs({"causal prefix", 16, 48, tokens, normalize}, 19000 + tokens);
-            failures += causal_pair(in, tokens - 5, normalize);
+        // 16-token Two-stage packet boundaries and arbitrary context-cache frontiers.
+        // Keep the previous 59+5 and 123+5 regressions; add 15+1/16+1/
+        // 64+1/128+1 to distinguish a packet-edge bug from generic FP32 drift.
+        for (const auto [tokens, prefix] :
+             {std::pair{16, 15}, std::pair{17, 16},
+              std::pair{64, 59}, std::pair{65, 64},
+              std::pair{128, 123}, std::pair{129, 128}}) {
+            const auto in = make_inputs({"causal prefix", 16, 48, tokens, normalize},
+                                        19000 + tokens);
+            failures += causal_pair(in, prefix, normalize);
         }
     }
     return failures;
@@ -434,6 +443,47 @@ int unaligned_input_cases() {
             std::vector<double>(run->state.begin(), run->state.end()), ref.final_state,
             gated_delta_net_state_fp32_criterion());
     }
+    return failures;
+}
+
+// Qualifies the actual two-stage *dispatch alignment guard*, not merely the numerical
+// "exact" mode where the fast kernel is disabled before checking alignment. For shifted
+// BF16 views, enabling approximate fast-math must still produce byte-exact recurrent
+// results (not just avoid a CUDA misaligned-address crash).
+int unaligned_fast_guard_cases() {
+    const char* precision = std::getenv("NINFER_GDN_TWO_STAGE_NUMERICS");
+    if (precision == nullptr || std::string(precision) != "approx") {
+        throw std::invalid_argument(
+            "--unaligned-fast-only requires NINFER_GDN_TWO_STAGE_NUMERICS=approx");
+    }
+    const char* old = std::getenv("NINFER_GDN_TWO_STAGE");
+    const std::optional<std::string> previous =
+        old ? std::optional<std::string>(old) : std::nullopt;
+    const auto set_force = [](const char* value) {
+#if defined(_WIN32)
+        if (_putenv_s("NINFER_GDN_TWO_STAGE", value ? value : "") != 0)
+            throw std::runtime_error("cannot set GDN test route override");
+#else
+        if ((value ? setenv("NINFER_GDN_TWO_STAGE", value, 1)
+                   : unsetenv("NINFER_GDN_TWO_STAGE")) != 0)
+            throw std::runtime_error("cannot set GDN test route override");
+#endif
+    };
+    const auto in = make_inputs({"fast GDN unaligned dispatch", 16, 48, 64, true}, 33064U);
+    set_force("0");
+    const auto recurrent8 = causal_run(in, true, false, 0, 8, 8);
+    const auto recurrent2 = causal_run(in, true, false, 0, 8, 2);
+    set_force("1");
+    const auto guarded8 = causal_run(in, true, false, 0, 8, 8);
+    const auto guarded2 = causal_run(in, true, false, 0, 8, 2);
+    set_force(previous ? previous->c_str() : nullptr);
+    int failures = recurrent8.failures + recurrent2.failures + guarded8.failures + guarded2.failures;
+    failures += verify_exact("GDN fast-route Q/K/V offset8 output", guarded8.out, recurrent8.out);
+    failures += verify_exact("GDN fast-route Q/K/V offset8 FP32 state", guarded8.state,
+                             recurrent8.state);
+    failures += verify_exact("GDN fast-route value offset2 output", guarded2.out, recurrent2.out);
+    failures += verify_exact("GDN fast-route value offset2 FP32 state", guarded2.state,
+                             recurrent2.state);
     return failures;
 }
 
@@ -810,6 +860,11 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--state-casts-only") {
         failures += state_cast_cases();
         std::cout << (failures == 0 ? "OK" : "FAIL") << " GDN state casts\n";
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--unaligned-fast-only") {
+        failures += unaligned_fast_guard_cases();
+        std::cout << (failures == 0 ? "OK" : "FAIL") << " GDN approximate fast alignment guard\n";
         return failures == 0 ? 0 : 1;
     }
     if (argc == 2 && std::string(argv[1]) == "--unaligned-inputs-only") {
