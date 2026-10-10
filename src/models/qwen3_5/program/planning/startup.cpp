@@ -10,6 +10,7 @@
 #include "models/qwen3_5/execution/workspace.h"
 #include "runtime/contract/speculative_routing.h"
 #include "core/device.h"
+#include "ops/common/device_route.h"
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/candidate_selector.h"
 #include "ninfer/ops/context_kv_materialize.h"
@@ -24,6 +25,8 @@
 #include "ninfer/ops/softmax_attention.h"
 #include "ninfer/ops/speculative_round.h"
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <initializer_list>
 #include <limits>
 #include <stdexcept>
@@ -1078,19 +1081,73 @@ std::uint32_t vision_item_token_bound(std::uint32_t capacity, const models::Load
         std::min<std::uint64_t>({capacity, kMaximumVisionItemTokens, requested}));
 }
 
+// Whole-SM-wave candidate: the effective execution chunk is never larger than the
+// physical budget chosen upstream (especially when --prefill-chunk auto is active).
+// One 4090 SM hosts a prompt CTA, and each CTA covers either 64 or 128 query rows.
+// This heuristic intentionally does not alter the production default without opt-in.
+std::uint32_t sm89_wave_aligned_chunk(const execution::Parameters& parameters,
+                                      const EngineOptions& options) {
+    const std::uint32_t original = std::min(options.prefill_chunk, options.max_context);
+    if (options.prefill_chunk_auto || original < 256 ||
+        !kv_cache_is_int8_family(options.kv_cache)) {
+        return original;
+    }
+    const char* setting = std::getenv("NINFER_PREFILL_ALIGN");
+    const bool enabled = setting != nullptr
+                             ? setting[0] == '1'
+                             : ops::device_route_schedule("prefill_align", 1) == "on";
+    if (!enabled) return original;
+    int cuda_device = 0, sms = 0;
+    if (cudaGetDevice(&cuda_device) != cudaSuccess ||
+        cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, cuda_device) != cudaSuccess ||
+        sms <= 0) {
+        return original;
+    }
+    const auto& attention = *parameters.model.config().text.attention;
+    const int heads = execution::dimension(attention.num_attention_heads);
+    if (heads <= 0) return original;
+    const char* fast = std::getenv("NINFER_PROMPT_FAST");
+    const bool fast_prompt = fast != nullptr
+                                 ? fast[0] == '1'
+                                 : ops::device_route_schedule("attn_prompt_fast", 1) == "on";
+    const int rows = fast_prompt ? 128 : 64;
+    const auto occupancy = [&](std::uint32_t chunk) {
+        const std::uint64_t ctas =
+            ((static_cast<std::uint64_t>(chunk) + rows - 1) / rows) * heads;
+        const std::uint64_t waves = (ctas + sms - 1) / sms;
+        return static_cast<double>(ctas) / static_cast<double>(waves * sms);
+    };
+    // Do not spend extra persistent workspace, change the admission ceiling, or run a
+    // sub-128 chunk. A reduced chunk is selected only for a meaningful wave fill gain.
+    std::uint32_t best = original;
+    double best_occupancy = occupancy(original);
+    constexpr std::uint32_t granule = 128;
+    const std::uint32_t first =
+        std::max(granule, ((original / 2) / granule) * granule);
+    for (std::uint32_t candidate = first; candidate <= original; candidate += granule) {
+        const double fill = occupancy(candidate);
+        if (fill > best_occupancy + 0.025) {
+            best = candidate;
+            best_occupancy = fill;
+        }
+    }
+    return best;
+}
+
 std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
 make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,
                            const EngineOptions& options) {
     validate_target_options(parameters, device, options);
+    const std::uint32_t physical_chunk = sm89_wave_aligned_chunk(parameters, options);
     SequencePlanningInputs inputs{
         .parameters          = &parameters,
         .capacity            = options.max_context,
         .max_concurrency     = options.max_concurrency,
-        .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
+        .prefill_chunk       = physical_chunk,
         .prefill_service_chunk =
             std::min(options.prefill_chunk_auto
-                         ? std::min(options.prefill_chunk, kAutoPrefillInterleaveChunk)
-                         : options.prefill_chunk,
+                         ? std::min(physical_chunk, kAutoPrefillInterleaveChunk)
+                         : physical_chunk,
                      options.max_context),
         .draft_window        = options.speculative.draft_tokens,
         .lookup_ngram        = options.speculative.lookup_ngram,
