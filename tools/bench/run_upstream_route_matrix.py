@@ -152,6 +152,38 @@ def build_plan(selected: list[str], pairs: int, warmup: int) -> list[dict[str, A
     return plan
 
 
+def primary_measure(test: dict[str, Any]) -> tuple[float, str, str]:
+    """One objective per test kind. Decode requests are NOT scored as prefill-only."""
+    kind = test.get("kind", "pp")
+    if kind == "pp+tg":
+        # A generated-token workload must include prefill AND decode in its objective.
+        # Convert whole-request latency to requests/s; larger is always better.
+        metric, unit, value = "full_request_rate", "requests/s", test.get("total_seconds_mean")
+        if value is None or not math.isfinite(float(value)) or float(value) <= 0:
+            raise RuntimeError(f"missing full-request duration for {test.get('label')}")
+        return 1.0 / float(value), metric, unit
+    if kind == "tg":
+        metric, unit, value = "decode_output_tok_s", "tokens/s", test.get("decode_output_tok_s_mean")
+    elif kind == "pp":
+        metric, unit, value = "prefill_tok_s", "tokens/s", test.get("prefill_tok_s_mean")
+    else:
+        raise RuntimeError(f"unsupported benchmark kind {kind}")
+    if value is None or not math.isfinite(float(value)) or float(value) <= 0:
+        raise RuntimeError(f"invalid {metric} for {test.get('label')}")
+    return float(value), metric, unit
+
+
+def first_divergent_token(left: list[list[int]], right: list[list[int]]) -> int | None:
+    """Zero-based index of the first prefix hash divergence; None for identical reps."""
+    first = None
+    for a, b in zip(left, right):
+        for index in range(max(len(a), len(b))):
+            if index >= len(a) or index >= len(b) or a[index] != b[index]:
+                first = index if first is None else min(index, first)
+                break
+    return first
+
+
 def calculate(rows: list[dict[str, Any]], name: str, pairs: int) -> dict[str, Any]:
     baseline = {r["pair"]: r for r in rows if r["case"] == "baseline" and not r["warmup"]}
     candidate = {r["pair"]: r for r in rows if r["case"] == name and not r["warmup"]}
@@ -163,10 +195,16 @@ def calculate(rows: list[dict[str, Any]], name: str, pairs: int) -> dict[str, An
     for label in labels:
         ratios, speeds, refs = [], [], []
         per_pair_matches = []
+        first_mismatches = []
+        objective = baseline[0].get("objectives", {}).get(label,
+                    {"metric": "prefill_tok_s", "unit": "tokens/s"})
         for pair in range(pairs):
             a, b = baseline[pair], candidate[pair]
             if set(a["metrics"]) != set(b["metrics"]):
                 raise RuntimeError(f"benchmark test label mismatch {name}, pair {pair}")
+            if (a.get("objectives") != b.get("objectives") or
+                    a.get("objectives", {}).get(label) != objective):
+                raise RuntimeError(f"benchmark scoring objective changed inside {name}, pair {pair}")
             av, bv = a["metrics"][label], b["metrics"][label]
             refs.append(av)
             speeds.append(bv)
@@ -176,8 +214,14 @@ def calculate(rows: list[dict[str, Any]], name: str, pairs: int) -> dict[str, An
             matched = (a_hashes == b_hashes and len(set(a_hashes)) == 1 and
                        len(set(b_hashes)) == 1)
             per_pair_matches.append(matched)
+            first_mismatches.append(
+                first_divergent_token(a["prefix_hashes"][label], b["prefix_hashes"][label])
+            )
             all_matching = all_matching and matched
         results[label] = {
+            "primary_metric": objective["metric"],
+            "primary_unit": objective["unit"],
+            "first_divergent_token_by_pair": first_mismatches,
             "output_token_match_by_pair": per_pair_matches,
             "output_token_identical_all_pairs": all(per_pair_matches),
             "baseline_tok_s": summary_values(refs),
@@ -257,21 +301,36 @@ def validated_measurement(packet: dict[str, Any], expected_id: str) -> dict[str,
     if not isinstance(tests, list) or not tests:
         raise RuntimeError("resident route arm has no benchmark tests")
     metrics: dict[str, float] = {}
+    objectives: dict[str, dict[str, str]] = {}
     for test in tests:
         label = str(test["label"])
-        value = test.get("prefill_tok_s_mean")
-        if label in metrics or value is None or not math.isfinite(float(value)) or float(value) <= 0:
-            raise RuntimeError(f"invalid prefill throughput for {label}")
-        metrics[label] = float(value)
+        if label in metrics:
+            raise RuntimeError(f"duplicate benchmark label {label}")
+        score, metric, unit = primary_measure(test)
+        metrics[label] = score
+        objectives[label] = {"metric": metric, "unit": unit}
     hashes = report.get("generated_token_hashes")
     if not isinstance(hashes, dict) or set(hashes) != set(metrics) or any(
             not isinstance(v, list) or not v or
             any(not isinstance(token_hash, int) or token_hash < 0 for token_hash in v)
             for v in hashes.values()):
         raise RuntimeError("resident arm is missing exact generated token IDs hash evidence")
+    prefixes = report.get("generated_token_prefix_hashes")
+    if not isinstance(prefixes, dict) or set(prefixes) != set(metrics):
+        raise RuntimeError("resident arm missing rolling output token hash evidence")
+    for label, per_rep in prefixes.items():
+        if not isinstance(per_rep, list) or len(per_rep) != len(hashes[label]):
+            raise RuntimeError(f"{label}: invalid rolling hash repetitions")
+        for sequence, final_hash in zip(per_rep, hashes[label]):
+            if (not isinstance(sequence, list) or not sequence or
+                    any(not isinstance(v, int) or v < 0 for v in sequence) or
+                    sequence[-1] != final_hash):
+                raise RuntimeError(f"{label}: rolling fingerprint does not agree with token hash")
     memory = report.get("memory") or {}
     config = report.get("config") or {}
     return {
+        "prefix_hashes": prefixes,
+        "objectives": objectives,
         "output_token_hashes": hashes,
         "metrics": metrics,
         "resolved_chunk": config.get("prefill_chunk"),
@@ -436,17 +495,18 @@ def main(argv: list[str] | None = None) -> int:
             "promotion": "not approved; requires numerical, memory and serving correctness",
         }
         (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-        table = ["# RTX 4090 resident-weight route A/B — prefill / optional decode", "",
+        table = ["# RTX 4090 resident-weight route A/B — prefill / complete generation", "",
                  "**Model materializations: 1; fresh Program/CUDA Graph per arm.**", "",
-                 "| Arm | Prompt | Median Δ tok/s | P05 paired Δ | Output hashes | Performance screen |",
-                 "|---|---|---:|---:|---|---|"]
+                 "| Arm | Test | Scored metric | Median improvement | P05 paired | First divergent output token | Output gate |",
+                 "|---|---|---|---:|---:|---:|---|"]
         for case in reports:
             for label, value in case["tests"].items():
                 ratio = value["paired_improvement_pct"]
-                table.append(f"| {case['case']} | {label} | {ratio['median']:+.2f}% "
-                             f"| {ratio['p05']:+.2f}% "
-                             f"| {'match' if value['output_token_identical_all_pairs'] else 'MISMATCH'} "
-                             f"| {'pass' if case['performance_only_screen'] else 'fail'} |")
+                mismatches = [v for v in value['first_divergent_token_by_pair'] if v is not None]
+                mismatch = str(min(mismatches)) if mismatches else "-"
+                table.append(f"| {case['case']} | {label} | {value['primary_metric']} "
+                             f"| {ratio['median']:+.2f}% | {ratio['p05']:+.2f}% "
+                             f"| {mismatch} | {case['output_token_gate']} |")
         table += ["", "Output hash equality is necessary but not sufficient: FP32 checkpoint/state correctness is separately required.", "GDN approx is explicitly unqualified.",
                   "This is a serial single-request prefill benchmark, not concurrent Agent serving.", ""]
         (args.out / "summary.md").write_text("\n".join(table), encoding="utf-8")
