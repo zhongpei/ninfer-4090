@@ -120,6 +120,8 @@ def benchmark_command(args: argparse.Namespace) -> list[str]:
         "--spec", "dflash2", "--draft-tokens", str(args.draft_tokens),
         "--output", "json",
     ]
+    if args.prompt_gen:
+        result += ["-pg", args.prompt_gen]
     if args.prefill_cublas:
         result.append("--prefill-cublas")
     return result
@@ -153,8 +155,10 @@ def calculate(rows: list[dict[str, Any]], name: str, pairs: int) -> dict[str, An
         raise RuntimeError(f"missing baseline/candidate measurements for {name}")
     labels = sorted(baseline[0]["metrics"])
     results = {}
+    all_matching = True
     for label in labels:
         ratios, speeds, refs = [], [], []
+        per_pair_matches = []
         for pair in range(pairs):
             a, b = baseline[pair], candidate[pair]
             if set(a["metrics"]) != set(b["metrics"]):
@@ -163,7 +167,15 @@ def calculate(rows: list[dict[str, Any]], name: str, pairs: int) -> dict[str, An
             refs.append(av)
             speeds.append(bv)
             ratios.append(100.0 * (bv / av - 1.0))
+            a_hashes = a["output_token_hashes"][label]
+            b_hashes = b["output_token_hashes"][label]
+            matched = (a_hashes == b_hashes and len(set(a_hashes)) == 1 and
+                       len(set(b_hashes)) == 1)
+            per_pair_matches.append(matched)
+            all_matching = all_matching and matched
         results[label] = {
+            "output_token_match_by_pair": per_pair_matches,
+            "output_token_identical_all_pairs": all(per_pair_matches),
             "baseline_tok_s": summary_values(refs),
             "candidate_tok_s": summary_values(speeds),
             "paired_improvement_pct": summary_values(ratios),
@@ -171,6 +183,7 @@ def calculate(rows: list[dict[str, Any]], name: str, pairs: int) -> dict[str, An
     return {
         "case": name,
         "tests": results,
+        "output_token_gate": "pass" if all_matching else "fail",
         "resolved_chunk_values": sorted({str(r["resolved_chunk"]) for r in candidate.values()}),
         "runtime_reservation_peak_bytes": max(
             [int(r["runtime_reservation_bytes"]) for r in candidate.values()
@@ -239,9 +252,16 @@ def validated_measurement(packet: dict[str, Any], expected_id: str) -> dict[str,
         if label in metrics or value is None or not math.isfinite(float(value)) or float(value) <= 0:
             raise RuntimeError(f"invalid prefill throughput for {label}")
         metrics[label] = float(value)
+    hashes = report.get("generated_token_hashes")
+    if not isinstance(hashes, dict) or set(hashes) != set(metrics) or any(
+            not isinstance(v, list) or not v or
+            any(not isinstance(token_hash, int) or token_hash < 0 for token_hash in v)
+            for v in hashes.values()):
+        raise RuntimeError("resident arm is missing exact generated token IDs hash evidence")
     memory = report.get("memory") or {}
     config = report.get("config") or {}
     return {
+        "output_token_hashes": hashes,
         "metrics": metrics,
         "resolved_chunk": config.get("prefill_chunk"),
         "runtime_reservation_bytes": memory.get("runtime_reservation_bytes"),
@@ -256,7 +276,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True, help="new output directory")
     parser.add_argument("--cases-json", type=Path)
-    parser.add_argument("--cases", default="prompt_fast,gdn_two_stage,t2_upstream,sm_wave,all_candidates")
+    parser.add_argument("--cases", default="gdn_two_stage,gdn_two_stage_approx",
+                        help="default focuses the failing GDN route; other cases are opt-in")
     parser.add_argument("--pairs", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=1, help="discarded complete baseline/candidate pairs before measured pairs")
     parser.add_argument("--arm-warmup", type=int, default=1, help="in-Engine warmup repetitions; avoids timing graph capture")
@@ -266,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=32768)
     parser.add_argument("--prompts", default="1024,4096,16384,32768")
+    parser.add_argument("--prompt-gen", default="", help="optional P,G;P,G combined prefill+decode tests")
     parser.add_argument("--prefill-chunk", default="1024")
     parser.add_argument("--kv-dtype", default="int8")
     parser.add_argument("--spec", choices=("dflash2",), default="dflash2",
@@ -376,11 +398,15 @@ def main(argv: list[str] | None = None) -> int:
             "exe_sha256": streaming_sha256(args.exe), "hardware": gpu,
             "model_load_count": 1, "program_creation_count": len(plan),
             "seconds_total": time.monotonic() - started,
-            "quality_gate": "not_executed",
+            "quality_gate": "not_executed_FP32_checkpoint_and_perplexity",
+            "output_token_gate": {
+                result["case"]: result["output_token_gate"] for result in reports
+            },
             "serving_gate": "not_executed",
             "settings": {"prompts": args.prompts, "prefill_chunk": args.prefill_chunk,
                          "kv_dtype": args.kv_dtype, "spec": args.spec,
                          "draft_tokens": args.draft_tokens, "max_context": args.max_context,
+                         "prompt_gen": args.prompt_gen,
                          "pairs": args.pairs, "warmup": args.warmup,
                          "arm_warmup": args.arm_warmup, "repetitions": args.repetitions},
             "cases": {name: cases[name] for name in ["baseline", *selected]},
@@ -388,17 +414,18 @@ def main(argv: list[str] | None = None) -> int:
             "promotion": "not approved; requires numerical, memory and serving correctness",
         }
         (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-        table = ["# RTX 4090 resident-weight route A/B — prefill only", "",
+        table = ["# RTX 4090 resident-weight route A/B — prefill / optional decode", "",
                  "**Model materializations: 1; fresh Program/CUDA Graph per arm.**", "",
-                 "| Arm | Prompt | Median Δ tok/s | P05 paired Δ | P95 paired Δ | Performance screen |",
-                 "|---|---|---:|---:|---:|---|"]
+                 "| Arm | Prompt | Median Δ tok/s | P05 paired Δ | Output hashes | Performance screen |",
+                 "|---|---|---:|---:|---|---|"]
         for case in reports:
             for label, value in case["tests"].items():
                 ratio = value["paired_improvement_pct"]
                 table.append(f"| {case['case']} | {label} | {ratio['median']:+.2f}% "
-                             f"| {ratio['p05']:+.2f}% | {ratio['p95']:+.2f}% "
+                             f"| {ratio['p05']:+.2f}% "
+                             f"| {'match' if value['output_token_identical_all_pairs'] else 'MISMATCH'} "
                              f"| {'pass' if case['performance_only_screen'] else 'fail'} |")
-        table += ["", "A performance screen is not a correctness gate. GDN approx is explicitly unqualified.",
+        table += ["", "Output hash equality is necessary but not sufficient: FP32 checkpoint/state correctness is separately required.", "GDN approx is explicitly unqualified.",
                   "This is a serial single-request prefill benchmark, not concurrent Agent serving.", ""]
         (args.out / "summary.md").write_text("\n".join(table), encoding="utf-8")
         print(f"Saved {args.out / 'summary.json'} and {args.out / 'summary.md'}")
