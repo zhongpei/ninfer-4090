@@ -20,6 +20,12 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
   target_link_libraries(ninfer_ops PRIVATE ninfer_nvfp4_non_rdc)
 endif()
 
+target_sources(ninfer_ops PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/common/device_route.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/common/device_route_profile.cpp"
+)
+target_link_libraries(ninfer_ops PRIVATE ninfer::json)
+
 include(basic_sources.cmake)
 include("${CMAKE_CURRENT_LIST_DIR}/attn_input_proj/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/candidate_selector/sources.cmake")
