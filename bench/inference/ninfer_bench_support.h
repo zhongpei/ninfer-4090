@@ -70,6 +70,7 @@ struct BenchOptions {
     bool prefill_cublas   = false;
     bool prefill_cublas_projections = true;
     bool profile_measured = false;
+    bool resident_session = false;
     OutputFormat output   = OutputFormat::Table;
     std::string output_file;
     bool help_requested = false;
