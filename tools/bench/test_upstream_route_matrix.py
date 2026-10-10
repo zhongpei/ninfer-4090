@@ -14,8 +14,9 @@ import unittest
 from unittest.mock import patch
 
 from tools.bench.run_upstream_route_matrix import (
-    build_plan, calculate, main, percentile, read_cases, streaming_sha256,
-    summary_values, validated_measurement,
+    build_plan, calculate, first_divergent_token, main, percentile,
+    primary_measure, read_cases, streaming_sha256, summary_values,
+    validated_measurement,
 )
 
 
@@ -55,6 +56,8 @@ class RouteMatrixContractTests(unittest.TestCase):
                 rows.append({"case": case, "pair": pair, "warmup": False,
                              "metrics": {"pp4096": float(tps)},
                              "output_token_hashes": {"pp4096": [12345]},
+                             "prefix_hashes": {"pp4096": [[12345]]},
+                             "objectives": {"pp4096": {"metric": "prefill_tok_s", "unit": "tokens/s"}},
                              "resolved_chunk": 1024,
                              "runtime_reservation_bytes": bytes_,
                              "workspace_capacity_bytes": 60})
@@ -65,7 +68,10 @@ class RouteMatrixContractTests(unittest.TestCase):
         self.assertEqual(report["quality_gate"], "not_executed")
         self.assertEqual(report["output_token_gate"], "pass")
         rows[-1]["output_token_hashes"] = {"pp4096": [12346]}
-        self.assertEqual(calculate(rows, "fast", 3)["output_token_gate"], "fail")
+        rows[-1]["prefix_hashes"] = {"pp4096": [[12346]]}
+        divergent = calculate(rows, "fast", 3)
+        self.assertEqual(divergent["output_token_gate"], "fail")
+        self.assertEqual(divergent["tests"]["pp4096"]["first_divergent_token_by_pair"][-1], 0)
 
     def test_custom_named_approx_case_still_blocks_quality_gate(self):
         rows = []
@@ -75,6 +81,8 @@ class RouteMatrixContractTests(unittest.TestCase):
                     "case": name, "pair": pair, "warmup": False,
                     "metrics": {"pp1024": 100.0 if name == "baseline" else 110.0},
                     "output_token_hashes": {"pp1024": [777]},
+                    "prefix_hashes": {"pp1024": [[777]]},
+                    "objectives": {"pp1024": {"metric": "prefill_tok_s", "unit": "tokens/s"}},
                     "route_env": ({
                         "NINFER_GDN_TWO_STAGE_NUMERICS": "approx"
                     } if name == "optimized" else {
@@ -86,6 +94,32 @@ class RouteMatrixContractTests(unittest.TestCase):
         result = calculate(rows, "optimized", 3)
         self.assertEqual(result["output_token_gate"], "pass")
         self.assertEqual(result["quality_gate"], "blocked_approx_state_semantics")
+
+    def test_full_request_objective_not_prefill_only(self):
+        base = {"kind": "pp+tg", "label": "pp4096+tg256",
+                "prefill_tok_s_mean": 2000.0, "total_seconds_mean": 3.0}
+        candidate = {"kind": "pp+tg", "label": "pp4096+tg256",
+                     "prefill_tok_s_mean": 2200.0, "total_seconds_mean": 3.5}
+        old_prefill_only_gain = candidate["prefill_tok_s_mean"] / base["prefill_tok_s_mean"] - 1
+        self.assertGreater(old_prefill_only_gain, 0)
+        baseline_rate, metric, unit = primary_measure(base)
+        candidate_rate, _, _ = primary_measure(candidate)
+        self.assertEqual((metric, unit), ("full_request_rate", "requests/s"))
+        self.assertLess(candidate_rate / baseline_rate - 1, 0)
+        self.assertEqual(primary_measure({"kind": "pp", "label": "pp4096",
+                                         "prefill_tok_s_mean": 1100})[0], 1100)
+
+    def test_earliest_divergence_fingerprint(self):
+        self.assertEqual(first_divergent_token([[1, 2, 3]], [[1, 9, 10]]), 1)
+        self.assertEqual(first_divergent_token([[1, 2, 3]], [[1, 2]]), 2)
+        self.assertIsNone(first_divergent_token([[1, 2]], [[1, 2]]))
+
+    def test_exact_prefetch_case_has_explicit_isolated_flag(self):
+        from tools.bench.run_upstream_route_matrix import DEFAULT_CASES, CLEAN_ENV
+        arm = DEFAULT_CASES["gdn_exact_prefetch"]
+        self.assertEqual(arm["NINFER_DEVICE_ROUTE_MODE"], "off")
+        self.assertEqual(arm["NINFER_GDN_EXACT_PREFETCH"], "1")
+        self.assertIn("NINFER_GDN_EXACT_PREFETCH", CLEAN_ENV)
 
     def test_missing_pair_and_rejected_fake_load_count(self):
         rows = [{"case": "baseline", "pair": 0, "warmup": False,
@@ -150,7 +184,8 @@ for line in sys.stdin:
             "residency": {"model_load_count": 1, "program_create_seconds": 0.001,
                           "artifact_bytes_read_this_arm": 0,
                           "weight_bytes_uploaded_this_arm": 0},
-            "generated_token_hashes": {"pp1024": [12345]}}
+            "generated_token_hashes": {"pp1024": [12345]},
+            "generated_token_prefix_hashes": {"pp1024": [[12345]]}}
     print(json.dumps({"event": "measurement", "id": packet["id"], "ok": True,
                       "model_load_count": 1, "report": data}), flush=True)
 """, encoding="utf-8")
@@ -207,7 +242,8 @@ for line in sys.stdin:
             "residency": {"model_load_count": 1, "program_create_seconds": 0.01,
                           "artifact_bytes_read_this_arm": 0,
                           "weight_bytes_uploaded_this_arm": 0},
-            "generated_token_hashes": {"pp1024": [777]}}
+            "generated_token_hashes": {"pp1024": [777]},
+            "generated_token_prefix_hashes": {"pp1024": [[777]]}}
     print(json.dumps({"event": "measurement", "id": packet["id"], "ok": True,
                       "model_load_count": 1, "report": data}), flush=True)
 """, encoding="utf-8")
