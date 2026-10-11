@@ -118,12 +118,16 @@ def benchmark_command(args: argparse.Namespace) -> list[str]:
         str(args.exe.resolve()), "--resident-session",
         "--weights", str(args.model.resolve()),
         "--device", str(args.device), "--max-ctx", str(args.max_context),
-        "-p", args.prompts, "-r", str(args.repetitions),
+        "-r", str(args.repetitions),
         "--warmup", str(args.arm_warmup),
         "--kv-dtype", args.kv_dtype, "--prefill-chunk", args.prefill_chunk,
         "--spec", "dflash2", "--draft-tokens", str(args.draft_tokens),
         "--output", "json",
     ]
+    if args.prompts:
+        result += ["-p", args.prompts]
+    if args.decode:
+        result += ["-n", args.decode]
     if args.prompt_gen:
         result += ["-pg", args.prompt_gen]
     if args.prefill_cublas:
@@ -224,10 +228,14 @@ def calculate(rows: list[dict[str, Any]], name: str, pairs: int) -> dict[str, An
             "first_divergent_token_by_pair": first_mismatches,
             "output_token_match_by_pair": per_pair_matches,
             "output_token_identical_all_pairs": all(per_pair_matches),
-            "baseline_tok_s": summary_values(refs),
-            "candidate_tok_s": summary_values(speeds),
+            "baseline_primary_rate": summary_values(refs),
+            "candidate_primary_rate": summary_values(speeds),
             "paired_improvement_pct": summary_values(ratios),
         }
+        # Only real token-rate objectives keep these legacy aliases.
+        if objective["unit"] == "tokens/s":
+            results[label]["baseline_tok_s"] = summary_values(refs)
+            results[label]["candidate_tok_s"] = summary_values(speeds)
     return {
         "case": name,
         "tests": results,
@@ -247,6 +255,19 @@ def calculate(rows: list[dict[str, Any]], name: str, pairs: int) -> dict[str, An
                          if any(r.get("route_env", {}).get("NINFER_GDN_TWO_STAGE_NUMERICS") == "approx"
                                 for r in candidate.values()) or "approx" in name
                          else "not_executed"),
+        # An actual correctness or performance failure must not masquerade
+        # as a candidate ready for independent numerical review.
+        "performance_and_output_screen": (
+            all_matching and all(
+                m["paired_improvement_pct"]["median"] >= 2
+                and m["paired_improvement_pct"]["p05"] >= -5
+                for m in results.values()
+            ) and not any(
+                r.get("route_env", {}).get("NINFER_GDN_TWO_STAGE_NUMERICS") == "approx"
+                for r in candidate.values()
+            ) and "approx" not in name
+        ),
+        "production_qualified": False,
     }
 
 
@@ -356,7 +377,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=int, default=900, help="deadline per resident response including initial model upload")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--max-context", type=int, default=32768)
-    parser.add_argument("--prompts", default="1024,4096,16384,32768")
+    parser.add_argument("--prompts", default="1024,4096,16384,32768",
+                        help="P list; pass empty string for TG-only or pp+tg-only")
+    parser.add_argument("--decode", default="",
+                        help="standalone decode G list e.g. 64,256")
     parser.add_argument("--prompt-gen", default="", help="optional P,G;P,G combined prefill+decode tests")
     parser.add_argument("--prefill-chunk", default="1024")
     parser.add_argument("--kv-dtype", default="int8")
@@ -374,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("pairs>=3, warmup>=0, arm-warmup>=1, repetitions>=1, timeout>=1")
     if args.max_context < 1024 or args.device < 0 or not 1 <= args.draft_tokens <= 15:
         parser.error("unsupported context/device/draft token settings")
+    if not (args.prompts or args.decode or args.prompt_gen):
+        parser.error("at least one benchmark workload must be selected")
 
     cases = read_cases(args.cases_json)
     selected = [name.strip() for name in args.cases.split(",") if name.strip()]
@@ -487,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
             "settings": {"prompts": args.prompts, "prefill_chunk": args.prefill_chunk,
                          "kv_dtype": args.kv_dtype, "spec": args.spec,
                          "draft_tokens": args.draft_tokens, "max_context": args.max_context,
-                         "prompt_gen": args.prompt_gen,
+                         "prompt_gen": args.prompt_gen, "decode": args.decode,
                          "pairs": args.pairs, "warmup": args.warmup,
                          "arm_warmup": args.arm_warmup, "repetitions": args.repetitions},
             "cases": {name: cases[name] for name in ["baseline", *selected]},
@@ -497,18 +523,26 @@ def main(argv: list[str] | None = None) -> int:
         (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         table = ["# RTX 4090 resident-weight route A/B — prefill / complete generation", "",
                  "**Model materializations: 1; fresh Program/CUDA Graph per arm.**", "",
-                 "| Arm | Test | Scored metric | Median improvement | P05 paired | First divergent output token | Output gate |",
-                 "|---|---|---|---:|---:|---:|---|"]
+                 "| Arm | Test | Primary metric | Baseline median | Candidate median | Median gain | P05 paired | First divergent token | Output gate | Review screen |",
+                 "|---|---|---|---:|---:|---:|---:|---:|---|---|"]
         for case in reports:
             for label, value in case["tests"].items():
                 ratio = value["paired_improvement_pct"]
                 mismatches = [v for v in value['first_divergent_token_by_pair'] if v is not None]
                 mismatch = str(min(mismatches)) if mismatches else "-"
+                unit = value["primary_unit"]
+                baseline = value["baseline_primary_rate"]["median"]
+                candidate = value["candidate_primary_rate"]["median"]
                 table.append(f"| {case['case']} | {label} | {value['primary_metric']} "
+                             f"| {baseline:.4f} {unit} | {candidate:.4f} {unit} "
                              f"| {ratio['median']:+.2f}% | {ratio['p05']:+.2f}% "
-                             f"| {mismatch} | {case['output_token_gate']} |")
-        table += ["", "Output hash equality is necessary but not sufficient: FP32 checkpoint/state correctness is separately required.", "GDN approx is explicitly unqualified.",
-                  "This is a serial single-request prefill benchmark, not concurrent Agent serving.", ""]
+                             f"| {mismatch} | {case['output_token_gate']} "
+                             f"| {'review' if case['performance_and_output_screen'] else 'hold'} |")
+        table += ["", "Review screen: paired median >= +2%, paired P05 >= -5%,"
+                  " matching output tokens and no approximate GDN candidate.",
+                  "This is NOT production qualification: separate FP32/PPL/131K/serving gates remain.",
+                  "TG = decode tokens/s; pp+tg = complete-request requests/s.",
+                  "This is serial benchmarking, not concurrent Agent serving.", ""]
         (args.out / "summary.md").write_text("\n".join(table), encoding="utf-8")
         print(f"Saved {args.out / 'summary.json'} and {args.out / 'summary.md'}")
         return 0
