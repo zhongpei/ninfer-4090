@@ -79,6 +79,28 @@ class RouteMatrixContractTests(unittest.TestCase):
         self.assertFalse(divergent["performance_and_output_screen"])
         self.assertEqual(divergent["tests"]["pp4096"]["first_divergent_token_by_pair"][-1], 0)
 
+    def test_aa_control_never_promotes_even_with_spurious_gain(self):
+        rows = []
+        for pair in range(3):
+            for name, rate in [("baseline", 100), ("aa_control", 105)]:
+                rows.append({
+                    "case": name, "pair": pair, "warmup": False,
+                    "metrics": {"pp1024": float(rate)},
+                    "prefix_hashes": {"pp1024": [[333]]},
+                    "output_token_hashes": {"pp1024": [333]},
+                    "objectives": {"pp1024": {"metric": "prefill_tok_s", "unit": "tokens/s"}},
+                    "resolved_chunk": 1024,
+                    "runtime_reservation_bytes": 1,
+                    "workspace_capacity_bytes": 1,
+                })
+        from tools.bench.run_upstream_route_matrix import DEFAULT_CASES
+        self.assertEqual(DEFAULT_CASES["aa_control"], DEFAULT_CASES["baseline"])
+        output = calculate(rows, "aa_control", 3)
+        self.assertTrue(output["performance_only_screen"])
+        self.assertFalse(output["performance_and_output_screen"])
+        self.assertTrue(output["negative_control"])
+        self.assertFalse(output["production_qualified"])
+
     def test_custom_named_approx_case_still_blocks_quality_gate(self):
         rows = []
         for pair in range(3):
