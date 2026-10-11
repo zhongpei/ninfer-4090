@@ -1,11 +1,23 @@
 #include "ninfer_bench_support.h"
 
 #include "ninfer/engine.h"
+#include "runtime/engine/resident_model.h"
+#include <nlohmann/json.hpp>
 
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 
 #include <exception>
+#include <algorithm>
+#include <memory>
+#include <cstdint>
+#include <array>
+#include <chrono>
+#include <cstdlib>
+#include <map>
+#include <optional>
+#include <set>
+#include <string_view>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -90,7 +102,22 @@ ninfer::bench::RepTiming run_repetition(ninfer::Engine& engine,
         throw std::runtime_error(test.label + " did not finish at the requested output limit");
     }
 
+    // Fingerprint every generated token, including the first prefill token.
+    // The hash is computed AFTER Engine timing has ended, never inside the GPU timing.
+    std::uint64_t digest = UINT64_C(14695981039346656037);
+    std::vector<std::uint64_t> rolling;
+    rolling.reserve(generated.generated_token_ids.size());
+    for (const ninfer::TokenId id : generated.generated_token_ids) {
+        const auto word = static_cast<std::uint32_t>(id);
+        for (int byte = 0; byte < 4; ++byte) {
+            digest ^= static_cast<std::uint8_t>(word >> (byte * 8));
+            digest *= UINT64_C(1099511628211);
+        }
+        rolling.push_back(digest);
+    }
     ninfer::bench::RepTiming timing;
+    timing.output_token_hash       = digest;
+    timing.output_token_prefix_hashes = std::move(rolling);
     timing.timings                 = generated.timings;
     timing.speculative             = std::move(generated.speculative);
     timing.generated_output_tokens = expected;
@@ -118,6 +145,215 @@ void write_output(const ninfer::bench::BenchOptions& options, const std::string&
     if (!output) { throw std::runtime_error("failed to open output file: " + options.output_file); }
     output << text;
     std::cout << "wrote " << options.output_file << '\n';
+}
+
+// Resident A/B protocol: Engine/Program is recreated after each arm, but the materialized
+// model weights stay on the selected GPU for the entire JSONL session. Never mutate a route
+// while any Program, CUDA Graph, or kernel from the prior arm is still live.
+using Json = nlohmann::json;
+
+class ScopedStdoutToStderr {
+public:
+    ScopedStdoutToStderr() : saved_(std::cout.rdbuf(std::cerr.rdbuf())) {}
+    ~ScopedStdoutToStderr() { std::cout.rdbuf(saved_); }
+    ScopedStdoutToStderr(const ScopedStdoutToStderr&) = delete;
+    ScopedStdoutToStderr& operator=(const ScopedStdoutToStderr&) = delete;
+private:
+    std::streambuf* saved_;
+};
+
+constexpr std::array<std::string_view, 11> kRouteEnvironment{
+    "NINFER_DEVICE_ROUTE_MODE",
+    "NINFER_DEVICE_PROFILE_PATH",
+    "NINFER_DEVICE_PROFILES",
+    "NINFER_DEVICE_ROUTE_ONLY",
+    "NINFER_DEVICE_ROUTE_OVERRIDES",
+    "NINFER_PROMPT_FAST",
+    "NINFER_GDN_TWO_STAGE",
+    "NINFER_GDN_TWO_STAGE_NUMERICS",
+    "NINFER_GDN_EXACT_PREFETCH",
+    "NINFER_PREFILL_ALIGN",
+    "NINFER_DEVICE_ROUTE_TRACE",
+};
+
+void set_process_environment(const std::string& key, const std::optional<std::string>& value) {
+#if defined(_WIN32)
+    const int result = _putenv_s(key.c_str(), value ? value->c_str() : "");
+#else
+    const int result = value ? setenv(key.c_str(), value->c_str(), 1) : unsetenv(key.c_str());
+#endif
+    if (result != 0) throw std::runtime_error("cannot update route environment: " + key);
+}
+
+// Snapshot and restore *every* known key. Clearing unknown inherited settings before each
+// arm avoids accidentally measuring two routes (including the required baseline) together.
+class ScopedRouteEnvironment {
+public:
+    ScopedRouteEnvironment() {
+        for (const auto key : kRouteEnvironment) {
+            const char* current = std::getenv(std::string(key).c_str());
+            previous_.emplace(std::string(key),
+                              current ? std::optional<std::string>(current) : std::nullopt);
+        }
+    }
+    ~ScopedRouteEnvironment() {
+        for (const auto& [name, value] : previous_) {
+            try { set_process_environment(name, value); } catch (...) {}
+        }
+    }
+    void apply(const Json& config) {
+        if (!config.is_object()) throw std::invalid_argument("resident arm env must be an object");
+        for (const auto key : kRouteEnvironment)
+            set_process_environment(std::string(key), std::nullopt);
+        for (auto it = config.begin(); it != config.end(); ++it) {
+            if (std::find(kRouteEnvironment.begin(), kRouteEnvironment.end(), it.key()) ==
+                    kRouteEnvironment.end() ||
+                !it.value().is_string() || it.value().get_ref<const std::string&>().size() > 4096)
+                throw std::invalid_argument("unsupported resident route environment: " + it.key());
+            set_process_environment(it.key(), it.value().get<std::string>());
+        }
+    }
+private:
+    std::map<std::string, std::optional<std::string>> previous_;
+};
+
+Json measure_resident_arm(ninfer::runtime::ResidentModelSession& resident,
+                          const ninfer::EngineOptions& engine_options,
+                          const ninfer::bench::BenchOptions& options,
+                          ninfer::bench::BenchEnvironment base_env,
+                          const std::vector<ninfer::bench::BenchTest>& tests,
+                          const std::vector<ninfer::TokenId>& corpus,
+                          const std::string& invocation) {
+    ScopedStdoutToStderr redirect;
+    const auto began = std::chrono::steady_clock::now();
+    // Each arm gets its own CUDA graph, route choice and prefill workspace plan, but does
+    // NOT repeat artifact reads, conversions, or weight upload.
+    ninfer::Engine engine = resident.make_engine(engine_options);
+    const double program_create_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+    base_env.prefill_chunk = engine.options().prefill_chunk;
+    base_env.load = engine.load_summary();
+    // The resident owner must not read artifact weights or upload them again per arm.
+    // The materialization counter alone would not catch an accidental hidden reload.
+    if (base_env.load.artifact_bytes_read != 0 ||
+        base_env.load.host_to_device_bytes != 0) {
+        throw std::logic_error("resident arm unexpectedly read or re-uploaded model weights");
+    }
+    base_env.memory = engine.memory_summary();
+    fill_cuda_environment(base_env, options.device);
+    prime_decode_graph(engine, base_env, corpus);
+    std::vector<ninfer::bench::TestResult> results;
+    results.reserve(tests.size());
+    for (const auto& test : tests) {
+        ninfer::bench::TestResult result;
+        result.test = test;
+        engine.reset_memory_peaks();
+        for (int warm = 0; warm < options.warmup; ++warm)
+            (void)run_repetition(engine, test, corpus);
+        result.reps.reserve(static_cast<std::size_t>(options.repetitions));
+        for (int run = 0; run < options.repetitions; ++run)
+            result.reps.push_back(run_repetition(engine, test, corpus));
+        const auto memory = engine.memory_summary();
+        result.workspace_peak_bytes = memory.workspace_logical_peak_bytes;
+        result.workspace_allocator_peak_bytes = memory.workspace.peak_used_bytes;
+        results.push_back(std::move(result));
+    }
+    Json report = Json::parse(ninfer::bench::format_json(base_env, invocation, results));
+    // An in-process AB/BA test can now detect token-level divergence without writing
+    // prompt strings or sample completions to the audit log.
+    Json hashes = Json::object();
+    Json prefix_hashes = Json::object();
+    for (const auto& measured : results) {
+        Json per_rep = Json::array();
+        Json prefix_by_rep = Json::array();
+        for (const auto& rep : measured.reps) {
+            per_rep.push_back(rep.output_token_hash);
+            prefix_by_rep.push_back(rep.output_token_prefix_hashes);
+        }
+        hashes[measured.test.label] = std::move(per_rep);
+        prefix_hashes[measured.test.label] = std::move(prefix_by_rep);
+    }
+    report["generated_token_hashes"] = std::move(hashes);
+    report["generated_token_prefix_hashes"] = std::move(prefix_hashes);
+    report["residency"] = {
+        {"scope", "single_process_weight_residency_fresh_program_per_arm"},
+        {"model_load_count", resident.model_load_count()},
+        {"resident_weight_bytes", resident.resident_weight_bytes()},
+        {"program_create_seconds", program_create_seconds},
+        {"program_recreated", true},
+        {"artifact_bytes_read_this_arm", base_env.load.artifact_bytes_read},
+        {"weight_bytes_uploaded_this_arm", base_env.load.host_to_device_bytes},
+    };
+    return report;
+}
+
+int resident_session(const ninfer::bench::BenchOptions& options,
+                     const ninfer::EngineOptions& engine_options,
+                     ninfer::bench::BenchEnvironment env,
+                     const std::vector<ninfer::bench::BenchTest>& tests,
+                     const std::vector<ninfer::TokenId>& corpus, std::string invocation) {
+    if (options.speculative.backend != ninfer::SpeculativeBackend::DFlash2 ||
+        options.speculative.proposal_head != ninfer::ProposalHead::Full ||
+        options.profile_measured || !options.output_file.empty()) {
+        throw std::invalid_argument(
+            "--resident-session requires DFlash2 Full, no profiler and no --output-file");
+    }
+    std::unique_ptr<ninfer::runtime::ResidentModelSession> resident;
+    {
+        ScopedStdoutToStderr redirect;
+        resident = std::make_unique<ninfer::runtime::ResidentModelSession>(engine_options);
+    }
+    if (resident->model_load_count() != 1)
+        throw std::runtime_error("resident session must materialize weights exactly once");
+    std::cout << Json{{"event", "ready"},
+                      {"ok", true},
+                      {"model_load_count", resident->model_load_count()},
+                      {"resident_weight_bytes", resident->resident_weight_bytes()}}.dump()
+              << std::endl;
+    ScopedRouteEnvironment saved_environment;
+    std::set<std::string> ids;
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        Json id = nullptr;
+        try {
+            if (line.size() > 16384) throw std::invalid_argument("resident packet too large");
+            const Json packet = Json::parse(line);
+            if (!packet.is_object() || !packet.contains("id") || !packet.at("id").is_string() ||
+                packet.at("id").get<std::string>().empty() ||
+                packet.at("id").get<std::string>().size() > 128)
+                throw std::invalid_argument("resident request needs a bounded string id");
+            id = packet.at("id");
+            if (!ids.insert(id.get<std::string>()).second)
+                throw std::invalid_argument("duplicate resident request id");
+            if (packet.contains("stop")) {
+                if (packet.size() != 2 || !packet.at("stop").is_boolean() ||
+                    !packet.at("stop").get<bool>())
+                    throw std::invalid_argument("resident stop accepts id and stop:true");
+                std::cout << Json{{"event", "bye"}, {"id", id}, {"ok", true},
+                                  {"model_load_count", resident->model_load_count()}}.dump()
+                          << std::endl;
+                return 0;
+            }
+            if (packet.size() != 2 || !packet.contains("route_env"))
+                throw std::invalid_argument("resident arm requires id and route_env");
+            saved_environment.apply(packet.at("route_env"));
+            Json report = measure_resident_arm(*resident, engine_options, options, env, tests,
+                                               corpus, invocation);
+            if (resident->model_load_count() != 1)
+                throw std::logic_error("resident route comparison rematerialized model weights");
+            std::cout << Json{{"event", "measurement"}, {"id", id}, {"ok", true},
+                              {"model_load_count", resident->model_load_count()},
+                              {"report", std::move(report)}}.dump()
+                      << std::endl;
+        } catch (const std::exception& error) {
+            std::cout << Json{{"event", "error"}, {"id", id}, {"ok", false},
+                              {"error", error.what()}}.dump() << std::endl;
+            std::cerr << "resident route matrix: " << error.what() << '\n';
+            return 1; // Device state may be poisoned by a failing CUDA candidate.
+        }
+    }
+    if (std::cin.bad()) throw std::runtime_error("resident session stdin read failure");
+    return 0;
 }
 
 } // namespace
@@ -184,6 +420,10 @@ int main(int argc, char** argv) {
         std::cerr << "[ninfer_bench] loading " << options.artifact_path
                   << " (max_context=" << max_context
                   << ", kv_cache=" << ninfer::bench::kv_cache_name(options.kv_cache) << ")\n";
+        if (options.resident_session) {
+            return resident_session(options, engine_options, env, tests, corpus,
+                                    command_line(argc, argv));
+        }
         ninfer::Engine engine(std::move(engine_options));
         fill_cuda_environment(env, options.device);
         env.prefill_chunk = engine.options().prefill_chunk;

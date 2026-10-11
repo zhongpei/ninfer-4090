@@ -119,6 +119,13 @@ int test_cli_contract() {
                        "optimized proposal head");
     failures += expect(parsed.device == 1 && !parsed.use_cuda_graph, "device and graph settings");
     failures += expect(parsed.profile_measured, "profile-measured flag");
+    const auto resident = parse_for_test(
+        {"ninfer_bench", "--weights", "model.ninfer", "--spec", "dflash2",
+         "--draft-tokens", "7", "--resident-session"});
+    failures += expect(resident.resident_session && !resident.profile_measured,
+                       "resident session CLI switch");
+    failures += expect(qb::usage_text("ninfer_bench").find("--resident-session") != std::string::npos,
+                       "resident session help");
     failures +=
         expect(parsed.output == qb::OutputFormat::Json && parsed.output_file == "report.json",
                "output settings");

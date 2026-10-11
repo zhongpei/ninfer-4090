@@ -314,6 +314,7 @@ std::string usage_text(std::string_view program) {
         << "  --no-prefill-cublas-projections  keep attention/GDN input projections off that route\n"
         << "  --lookup-ngram <n>          context-lookup drafting from the last n tokens (0 = off)\n"
         << "  --profile-measured          bracket one measured repetition with CUDA profiler API\n"
+        << "  --resident-session          JSONL route A/B session: load weights once; regenerate Program per arm\n"
         << "  -o, --output <table|json|csv>  output format (default: table)\n"
         << "  --output-file <path>        write report to a file\n"
         << "  -h, --help                  show this help\n\n"
@@ -388,6 +389,8 @@ BenchOptions parse_args(int argc, char** argv) {
             options.use_cuda_graph = false;
         } else if (arg == "--profile-measured") {
             options.profile_measured = true;
+        } else if (arg == "--resident-session") {
+            options.resident_session = true;
         } else if (arg == "-o" || arg == "--output") {
             const std::string selected = value("--output");
             if (selected == "table") {

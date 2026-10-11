@@ -1,6 +1,7 @@
 #include "ninfer/engine.h"
 
 #include "core/device.h"
+#include "ops/common/device_route_profile.h"
 #include "core/nvtx.h"
 #include "core/startup.h"
 #include "runtime/contract/sampling.h"
@@ -169,6 +170,8 @@ public:
     explicit Impl(EngineOptions engine_options, runtime::ResidentModelSession* resident = nullptr)
         : options(runtime::normalize_engine_options(std::move(engine_options))),
           device(initialize_device(options)) {
+        // Route choices must be installed before sequence/workspace planning and CUDA graphs.
+        ops::configure_device_routes_from_environment();
         nvtx::ScopedRange load_range(nvtx::Name::EngineLoad, nvtx::Category::Runtime);
         auto constructed  = resident != nullptr ? resident->make_instance(options, device)
                                                  : runtime::construct_model(options, device);

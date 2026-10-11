@@ -61,4 +61,7 @@ void launch_replay_tree_fold(const GdnReplayRecords& records,
                              const Tensor& path_nodes, std::int32_t commit_columns,
                              cudaStream_t stream);
 
+void widen_state_fp16_to_fp32(const Tensor& in, Tensor& out, cudaStream_t stream);
+void narrow_state_fp32_to_fp16(const Tensor& in, Tensor& out, cudaStream_t stream);
+
 } // namespace ninfer::ops::detail::gated_delta_net

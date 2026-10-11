@@ -1,0 +1,724 @@
+# Unified RTX 4090 route experiment (opt-in)
+
+Source: `iamwavecut/ninfer-all@e1debb45108d74aee199816d942e3bb8145d0feb`.
+Target: `zhongpei/ninfer-4090` / sm_89. This imports route infrastructure and
+select kernel **candidates**, not a blanket replacement of custom FP8, DFlash2,
+paged-KV or context-cache code.
+
+## Available switches
+
+- `NINFER_DEVICE_ROUTE_MODE=off` (default): existing production mapping, **no upstream routing**.
+- `NINFER_DEVICE_ROUTE_MODE=builtin`: bundled upstream RTX 4090 route profile (exact 128 SM device only).
+- `NINFER_DEVICE_ROUTE_MODE=file` + `NINFER_DEVICE_PROFILE_PATH=/absolute/path.json`: use external version-2 profile; mismatched GPU identity is rejected.
+- `NINFER_DEVICE_ROUTE_MODE=auto`: use that file if available, else the built-in 4090 profile. **This is profile auto-selection, not online benchmarking.**
+- `NINFER_DEVICE_ROUTE_ONLY=attn_prompt_fast,gdn_two_stage/h48`: restrict the active profile to named keys for isolation; an empty list leaves all keys available.
+- `NINFER_DEVICE_ROUTE_OVERRIDES='attn_prompt_fast=off;gdn_two_stage/h48=on'`: override complete width ranges after profile selection. A JSON profile supports width-specific bands.
+- `NINFER_PROMPT_FAST=0|1`: force old/fast prompt kernel where implemented.
+- `NINFER_GDN_TWO_STAGE=0|1`: force recurrent/two-stage GDN, for prefill width >=16.
+- `NINFER_PREFILL_ALIGN=0|1`: enable wave occupancy alignment of fixed INT8-family prompt chunks. This only reduces the requested physical chunk; auto chunk remains unchanged.
+
+The upstream reference contains 65 **route keys**. This is not 65 activated new
+kernels. Routing is meaningful only for ops with a local candidate hook.
+Currently: INT8/rk8v4 fast prompt attention, h32/h48 two-stage GDN and
+whole-SM wave-aligned fixed prompt chunk. Other keys are retained as reference
+data for future qualified kernels; they do not override local dispatches.
+
+**Important**: the bundled device profile selects candidates built for another
+fork and is therefore *not qualified* for this checkout. Never use `builtin` or
+`auto` in production before the correctness and performance gates below.
+The default remains `off`.
+
+### GDN correctness gate and fast-math opt-in
+
+The upstream two-stage algorithm does not satisfy the current exact FP32
+state/segment-continuation contract: it replaces token-wise recurrence with
+BF16/TF32 matrix blocks and a different reduction order. Simply changing a
+tolerance would invalidate the existing context-cache/checkpoint contract.
+
+- **Default:** `NINFER_GDN_TWO_STAGE_NUMERICS=exact` (or unset). Even if the
+  device profile requests two-stage, the exact recurrent implementation is used.
+- **Experiment only:** set `NINFER_GDN_TWO_STAGE_NUMERICS=approx` alongside
+  `NINFER_GDN_TWO_STAGE=1` or a profile route. This **does not** pass exact
+  state/chunk-split correctness and must not be considered production safe.
+- For misaligned BF16 Q/K/V/output views, fast two-stage is now rejected at
+  dispatch and the existing recurrent kernel executes instead. Test this with
+  shifted +2/+4/+8 byte pointers and CUDA compute-sanitizer.
+- Distinguish the actual route from a loaded profile key in benchmark reports.
+  `NINFER_DEVICE_ROUTE_TRACE=1` only shows the requested profile; it cannot
+  prove that the guarded accelerated Kernel ran.
+
+The next qualification milestone is to develop a chunk-parallel alternative
+with an exact state transition or prove a separate approximate-state cache
+identity and quality contract. Until then, 8–10% prefill uplift measured on
+the old route is an *experimental upper bound*, not a promotable speedup.
+
+## RTX 4090 test matrix
+
+Use the *same binary, same model, same driver*, idle GPU, same
+`--max-context`, `--kv-dtype`, Graph settings and DFlash2 K.
+
+1. Compile with `-DCMAKE_CUDA_ARCHITECTURES=89`; run the existing operator
+   conformance tests before any performance comparison.
+2. `off`: baseline. Repeat 5 warmups and 10+ timed AB/BA paired runs.
+3. Isolated GDN: `NINFER_DEVICE_ROUTE_MODE=builtin NINFER_DEVICE_ROUTE_ONLY=gdn_two_stage/h48`.
+   Test prompt widths 15/16/17/64/128/1024/8192 and full GDN state recovery;
+   include FP16/FP32 state, separated input/output, rewrite checkpoints and
+   chunk-boundary equivalence.
+4. Isolated attention: `NINFER_DEVICE_ROUTE_ONLY=attn_prompt_fast`.
+   Test int8/rk8v4, 1K/4K/16K/32K/131K prompts, KV pages and
+   FP32/FP16 numerical reference, long-context PPL and needle retrieval.
+5. Isolated wave alignment: with fixed `--prefill-chunk` of 1024, 1536,
+   2048, 3072, 4096 and 8192 run `NINFER_PREFILL_ALIGN=0` and `=1`.
+   Compare resolved physical chunk, reservation, workspace and end-to-end
+   throughput. Auto chunk must be unaffected.
+6. Combine only **passing** candidates. Compare `off`, isolated winners and
+   combined winners at concurrency 1/2/4/8, DFlash2 K7 and K15, with actual
+   Agent request streams.
+
+Guardrails:
+
+- Correctness first: numerical oracle, long-context perplexity, exact prefix
+  recovery, and greedy output checks. Kernel numerical differences may move
+  near-tied greedy decisions; investigate every mismatch, not only aggregate PPL.
+- Report short/long `TTFT`, prompt tok/s, decode tok/s, request p50/p95,
+  acceptance rate, GPU memory *peak*, Graph capture allocation and retries.
+- Give each pair the same prompt and GPU context; alternate AB and BA orders,
+  discard warmup and calculate median and p95 across >=10 pairs.
+- Promote a candidate only if there is a real end-to-end benefit under at least
+  one named workload, no unexpected quality regression, <=5% request-p95
+  regression for unaffected workloads, and no memory or startup-capacity loss.
+- If a candidate fails, leave it off. An unsupported upstream route name must
+  fall back to the locally compiled path, never silently pretend to be selected.
+- Caution: a new GDN prefill algorithm can change floating-point summation order.
+  Its test must cover boundary/state-image invariants, not just model output.
+
+The local test runner `tools/bench/run_upstream_route_matrix.py` writes an
+audit manifest for each route configuration without requiring GPU in CI.
+
+Example profile:
+```json
+{
+  "schema": "ninfer.device-route-profiles",
+  "schema_version": 2,
+  "devices": [{
+    "hardware_class": "nvidia-geforce-rtx-4090-sm89",
+    "multiprocessors": 128,
+    "origin": "operator local AB",
+    "routes": {
+      "attn_prompt_fast": [[2147483647, "on"]],
+      "gdn_two_stage/h48": [[2147483647, "off"]],
+      "gdn_two_stage/h32": [[2147483647, "off"]],
+      "prefill_align": [[2147483647, "off"]]
+    }
+  }]
+}
+```
+
+## Local retest: correctness first, model-resident AB/BA second
+
+This PR now includes a model-resident `ninfer_bench --resident-session` JSONL
+protocol. **Only one model materialization/upload occurs per entire matrix**:
+the owner holds the 27B weights on GPU while each arm makes and destroys its
+own Engine/Program/CUDA Graph. The previous Python tool started and exited
+`ninfer_bench` for every arm, reloading the model every time. The new runner
+does not do that. Program planning/capture may still occur once per arm;
+the report records `program_create_seconds` separately from generation.
+
+The protocol deliberately **never** swaps a CUDA Kernel beneath an active
+Graph or concurrent request. The existing `ResidentModelSession` supports
+only single-GPU DFlash2 Full at present; don't claim support for other
+speculative backends. Each arm's environment is isolated and restored. The
+GDN and Prompt Fast environment overrides no longer cache the very first
+arm's value for the lifetime of the process.
+
+### 0. Compile and validate the host-side resident protocol
+
+```bash
+git fetch origin pull/26/head:pr26-sm89
+git switch pr26-sm89
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_ARCHITECTURES=89 \
+  -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
+cmake --build build -j8 --target ninfer_bench ninfer_gated_delta_net_test
+python3 -m unittest tools.bench.test_upstream_route_matrix -v
+python3 -m py_compile tools/bench/run_upstream_route_matrix.py
+git diff --check
+```
+
+The Python tests include a **real long-running fake benchmark process**. They
+assert exactly one process/model owner across 24 interleaved sample arms,
+unique per-case baseline directories, explicit 5-key combination scoping,
+response/load-count validation and fail-closed generated-token identity.
+
+### 1. GDN exact correctness gates (must pass)
+
+First exercise the original/default route, then request Two-stage in the
+**exact** numerical mode. Both must preserve full-vs-split byte-exact
+FP32 state and BF16 output at 59+5 and 123+5, FP16 state conversions, and
+shifted-input views.
+
+```bash
+# Baseline: should pass unchanged.
+env -u NINFER_GDN_TWO_STAGE -u NINFER_GDN_TWO_STAGE_NUMERICS \
+  ./build/tests/ninfer_gated_delta_net_test
+
+# Force requested route but insist on existing exact FP32 state semantics:
+# the safe recurrent route is selected (NOT the approximate fast algorithm).
+NINFER_GDN_TWO_STAGE=1 NINFER_GDN_TWO_STAGE_NUMERICS=exact \
+  ./build/tests/ninfer_gated_delta_net_test
+
+# Check illegal memory accesses with shifted BF16 views (must pass).
+NINFER_GDN_TWO_STAGE=1 NINFER_GDN_TWO_STAGE_NUMERICS=exact \
+  compute-sanitizer --tool memcheck --error-exitcode=99 \
+  ./build/tests/ninfer_gated_delta_net_test
+
+# Actually select the fast candidate, then exercise its alignment fallback.
+# This test is allowed to pass even though aligned approximate GDN still fails
+# the bitwise state-splitting correctness contract.
+NINFER_GDN_TWO_STAGE_NUMERICS=approx \
+  compute-sanitizer --tool memcheck --error-exitcode=99 \
+  ./build/tests/ninfer_gated_delta_net_test --unaligned-fast-only
+```
+
+**Fast GDN experiment (not a green gate):** With
+`NINFER_GDN_TWO_STAGE_NUMERICS=approx` and a selected two-stage route,
+alignment-invalid Q/K/V/output views now fall back to the original safe
+recurrent kernel. Aligned fast kernels still retain the upstream BF16/TF32
+chunk algorithm, which **does not guarantee exact FP32 state and segmentation
+identity**. Capture and report the exact failures; do NOT loosen the existing
+oracle or assert that the +8–10% prefill uplift is qualified.
+
+```bash
+NINFER_GDN_TWO_STAGE=1 NINFER_GDN_TWO_STAGE_NUMERICS=approx \
+  ./build/tests/ninfer_gated_delta_net_test \
+  > /tmp/gdn-approx-quality.log 2>&1
+# Nonzero exit with aligned split-state mismatches remains a correctness blocker.
+```
+
+### 2. Smoke test the resident process (single model load)
+
+Choose a **new** output directory. Change the artifact path below to
+the exact local 27B file.
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/sm89-resident-smoke \
+  --device 0 --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --prefill-chunk 1024 \
+  --prompts 1024,4096,16384,32768 \
+  --cases gdn_two_stage \
+  --warmup 1 --arm-warmup 1 --pairs 3
+```
+
+Inspect `residency.json` (`model_load_count: 1`), every
+`pair-*/bench.json` (`residency.model_load_count: 1`,
+`residency.artifact_bytes_read_this_arm: 0`,
+`residency.weight_bytes_uploaded_this_arm: 0` and
+`generated_token_hashes`), `records.jsonl`, `summary.json` and
+`session-stderr.log`. The owner remains alive across all six measured arms;
+a fresh Program and graph is intentionally created for each arm.
+All completed arms are journaled immediately. A per-candidate
+`summary-CANDIDATE.json` is written as soon as its last paired arm finishes.
+If a later CUDA candidate fails, the process terminates rather than silently
+reusing a poisoned device. Successful earlier results survive in the output
+directory; `plan.json`, `records.jsonl` and `ERROR.txt` distinguish
+completed arms from the unfinished remainder.
+
+### 3. Separate *experimental* GDN throughput from correctness
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/sm89-gdn-fast-experiment \
+  --device 0 --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --prefill-chunk 1024 \
+  --prompts 1024,4096,16384,32768 \
+  --cases gdn_two_stage_approx \
+  --warmup 1 --arm-warmup 1 --pairs 10
+```
+
+This explicitly opts into approximate state semantics. The report contains
+a `blocked_approx_state_semantics` quality gate regardless of throughput.
+Even identical output-token digests cannot override the prior failing
+full-vs-split FP32 state oracle.
+
+### 4. Expanded experiments (optional after correctness)
+
+To compare the other candidates in the same **resident** process:
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/sm89-full-route-matrix \
+  --device 0 --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --prefill-chunk 1024 \
+  --prompts 1024,4096,16384,32768 \
+  --cases prompt_fast,gdn_two_stage,t2_upstream,sm_wave,all_candidates \
+  --warmup 1 --arm-warmup 1 --pairs 10
+```
+
+For longer **generated** outputs, include combined prompt+decode tests:
+`--max-context 65536 --prompt-gen '4096,256;32768,256'`. Those tests
+compare entire 257-token greedily generated continuations through a
+64-bit hash in each arm. A hash mismatch is an automatic **failure** of
+the output identity gate; a match is necessary but not sufficient for
+FP32 state/checkpoint correctness.
+
+Run a separate `--kv-dtype rk8v4` or `fp8` matrix if those storages
+are part of production. Verify the route's actual execution, not only
+that a key appears in the bundled device profile. All-candidate mode is
+restricted to the intended five keys; it never loads all 65 upstream
+configurations.
+
+### 5. Required promotion gates
+
+| Stage | Checks | Result required |
+|---|---|---|
+| Correctness | CUDA memcheck; full vs 59+5, 123+5 state/output; FP64 reference; graph replay | Pass |
+| Generated tokens | Every paired AB/BA generated ID digest, including mixed pp+tg | Match |
+| Quality | 4K/32K/131K perplexity and long-range needle/tool-call retrieval | No unacceptable degradation |
+| Performance | 1K/4K/16K/32K, at least 10 paired orders with independent warmup | Stable >=2% end-to-end benefit |
+| Memory | Real peak allocations, Program workspace capacity, GPU 24 GiB budget | No capacity regression |
+| Agent serving | DFlash2 K7/K15, C1/C2/C4/C8, branch/prefix caching, TTFT and request p95 | No critical regression |
+
+The runner is **serial prefill/optional decode**, not a concurrent Agent
+serving test. It records the count of artifact materializations, not the
+number of independently constructed Programs. P95 request latency,
+long-session cache correctness, and 131K multi-request behavior need
+separate real-server qualification before promoting any Kernel.
+
+For diagnostic route inspection run a new output directory with
+`--route-trace`, but **do not** collect performance evidence with tracing
+enabled. The loaded route key is not proof that a guarded candidate kernel
+ran.
+
+A custom case matrix can be supplied via `--cases-json cases.json`,
+where the `baseline` route must explicitly set
+`NINFER_DEVICE_ROUTE_MODE=off`. For example:
+
+```json
+{
+  "baseline": {"NINFER_DEVICE_ROUTE_MODE": "off"},
+  "t2_only": {
+    "NINFER_DEVICE_ROUTE_MODE": "builtin",
+    "NINFER_DEVICE_ROUTE_ONLY": "t2_a16",
+    "NINFER_DEVICE_ROUTE_OVERRIDES": "t2_a16=upstream"
+  }
+}
+```
+
+The reported `performance_only_screen` is NOT a decision to
+enable a candidate in production. No new fast GDN route is yet qualified.
+
+## RTX 4090 validation record — PR #26 (2026-10-10)
+
+Tested code head: `e80251a4dec4350b61fd42525366c5a4803c5c8`; PR #26 remains Draft/Open.
+Hardware: RTX 4090 (GPU 0), driver 610.57.04, CUDA 12.8.61, Compute Sanitizer 2025.1.0.0. Artifact: `Ternary-Bonsai-2-27B-ninfer-v3.ninfer` (9,520,051,456 bytes).
+
+### Build and correctness checks
+
+| Check | Result | Evidence / scope |
+|---|---|---|
+| Release sm_89 configure and requested targets | PASS | `ninfer_bench`, `ninfer_gated_delta_net_test`, `ninfer_bench_support_test` built at `ef1600f2`; the later `e80251a4` change is Python-only, with identical C++/CUDA/CMake sources. |
+| Route-matrix Python tests | PASS, 10/10 | At `ef1600f2`, the fake-session contract exposed a wrong expected candidate count (8 expected, 4 planned). The count was corrected and resident process stdin/stdout cleanup added. At `e80251a4`, all 10 tests pass and the ResourceWarnings are gone. |
+| GDN exact causal-prefix test | PASS | `NINFER_GDN_TWO_STAGE=1`, `NINFER_GDN_TWO_STAGE_NUMERICS=exact`; state/output boundary cases passed. |
+| Approximate unaligned guard under Compute Sanitizer | PASS | `--unaligned-fast-only`; zero sanitizer errors. |
+
+### Resident strict-mode smoke
+
+The 3-pair smoke completed 8 arms with one model materialization and 8 independent Programs. Every arm reported zero artifact bytes read and zero weight bytes uploaded. Runtime reservation remained 1,974,435,840 bytes and workspace capacity 185,393,152 bytes. Generated-token hashes matched in all 3 pairs at each prompt length.
+
+| Prompt | Median paired throughput change |
+|---|---:|
+| 1K | -0.34% |
+| 4K | +0.10% |
+| 16K | +0.13% |
+| 32K | +0.97% |
+
+The performance screen failed; strict-mode GDN did not show a material gain. The route remains exact/default and the approximate kernel is gated off.
+
+### Approximate GDN experiment
+
+The 10-pair experiment completed all 22 arms with one model materialization. Per-arm artifact reads and weight uploads were zero. Runtime reservation and workspace capacity stayed at the same values as the smoke. Program setup was 0.174–0.226 seconds after the first warmup arm (4.49 seconds).
+
+| Workload | Median paired change | Token hashes |
+|---|---:|---|
+| 1K prefill | +11.13% | 10/10 pairs match |
+| 4K prefill | +10.65% | 10/10 pairs match |
+| 16K prefill | +9.40% | 10/10 pairs match |
+| 32K prefill | +8.30% | 10/10 pairs match |
+| 4K prefill + 256 generated tokens | +9.82% | **0/10 pairs match** |
+| 16K prefill + 256 generated tokens | +9.12% | 10/10 pairs match |
+
+The performance-only screen passed, but the overall output-token gate failed because all 10 `4K+256` comparisons diverged. The quality gate is `blocked_approx_state_semantics`; the measured token mismatch confirms that the approximate route is not eligible for production. This is tracked as validation defect `PR26-GDN-001`.
+
+A separate route-trace run confirmed `baseline: kernel=recurrent reason=exact_or_default` and `approximate candidate: kernel=two_stage reason=approx_aligned`. Trace timings are diagnostic only and are excluded from the A/B results. Perplexity, 131K context quality, and Agent-serving concurrency/latency remain unverified.
+
+Raw summaries and per-arm evidence are retained locally under `profiles/bench/sm89-resident-smoke-e80251a4`, `profiles/bench/sm89-gdn-fast-e80251a4`, and `profiles/bench/sm89-gdn-fast-trace-e80251a4`; those generated directories are git-ignored.
+
+
+## Follow-up: exact FP32 GDN pipeline after PR26-GDN-001
+
+The first RTX 4090 validation above is retained as historical evidence. It found
+**11.13% to 8.30% prefill uplift** from the upstream BF16/TF32 WY-like two-stage
+GDN, but **10/10 `4096+256` output-token mismatches**. Its 10/10 matching
+`16384+256` continuations do **not** establish bitwise state compatibility:
+the independent GDN state/split tests already proved otherwise.
+
+### Root cause and new candidate
+
+- The baseline recurrent kernel normalizes Q/K and updates/reduces the recurrent
+  state in FP32 per token, with the state kept in registers.
+- The upstream Two-stage kernel re-encodes normalized Q/K in BF16 and uses
+  mixed BF16/TF32 matrix reductions. This changes both the input precision
+  and the order of floating-point arithmetic. Repairing misaligned loads
+  alone cannot make this algorithm bitwise state- or token-identical.
+- The **new** `NINFER_GDN_EXACT_PREFETCH=1` candidate duplicates the existing
+  exact recurrent numeric body unchanged: same `normalize_qk_lane`,
+  `expf`, warp reduction, FP32 state transition and BF16 readout. Only the
+  global-to-shared copy schedule is replaced with a **two-slot asynchronous
+  ping-pong prefetch**, allowing the next 16-token tile's Q/K/V/gates to load
+  while the current tile computes.
+- Only aligned input Q/K/V and widths of at least 32 tokens use the candidate;
+  other shapes use the existing staged or scalar-safe fallback. No extra
+  global GDN workspace is required.
+- This is a **testable exact-numerics candidate**, not an assertion that
+  GPU validation has already succeeded or that it outperforms the baseline.
+  The original approximate WY two-stage remains separately opt-in and blocked
+  from production.
+
+### 1. Correctness first
+
+```bash
+git fetch origin pull/26/head:pr26-gdn-fp32
+git switch pr26-gdn-fp32
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_ARCHITECTURES=89 \
+  -DNINFER_BUILD_BENCHMARKS=ON -DBUILD_TESTING=ON
+cmake --build build -j8 --target ninfer_gated_delta_net_test \
+  ninfer_bench ninfer_bench_support_test
+
+python3 -m unittest tools.bench.test_upstream_route_matrix -v
+python3 -m py_compile tools/bench/run_upstream_route_matrix.py
+ctest --test-dir build --output-on-failure \
+  -R 'ninfer_(gdn_exact_prefetch|bench_support)_test'
+
+NINFER_GDN_EXACT_PREFETCH=1 \
+  compute-sanitizer --tool memcheck --error-exitcode=99 \
+  ./build/tests/ninfer_gated_delta_net_test --exact-prefetch-only
+```
+
+The GDN test toggles the exact pipeline on and off within the same process,
+comparing BF16 outputs and the complete FP32 final states byte-for-byte. It
+compares the original and pipelined kernel bitwise for h32/h48 and
+normalized/raw Q/K at 32/33/59/64/65/128/129 tokens. It runs the
+more expensive independent FP64 and full-vs-split frontiers specifically
+at **59+5** and **123+5** for both h32 and h48 (normalized Q/K),
+plus graph replay, mixed FP16/FP32 states and unaligned operands. **Any mismatch, sanitizer error or
+CUDA failure is a hard stop; do not tune numerical tolerances.**
+
+### 2. Single-model resident performance and generation correctness
+
+Use a new output directory and the actual local 27B artifact path:
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/gdn-exact-prefetch-v3 \
+  --device 0 --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --prefill-chunk 1024 \
+  --prompts 1024,4096,16384,32768 \
+  --prompt-gen '4096,256;16384,256' \
+  --cases gdn_exact_prefetch \
+  --warmup 1 --arm-warmup 1 --pairs 10
+```
+
+The entire campaign loads model weights once, then creates a fresh Program
+per arm. The exact candidate is activated by an isolated environment override
+with the device profile otherwise **off**. The baseline never inherits this
+override.
+
+The new report uses correct primary metrics:
+
+- `pp`: Prefill tokens/sec.
+- `pp+tg`: **Complete-request throughput = 1 / total_seconds_mean**
+  (requests/sec). Previously the matrix scored these by Prefill tokens/sec
+  alone; that did **not** measure decode or the complete Agent request.
+- `tg`: decode output tokens/sec, when the corresponding test kind is run.
+
+Each repetition retains its exact 64-bit final generated-token hash and a
+rolling hash after **each generated token**. For any candidate that changes
+output, `first_divergent_token_by_pair` reports the earliest differing
+zero-based generation index (including the initial prefill output token).
+This is a diagnostic to distinguish immediate from late numerical drift;
+matching hashes do not replace full FP32 state verification.
+
+The full run is eligible for review **only if** the exact GDN op suite,
+compute-sanitizer, all paired output-token hashes and end-to-end performance
+pass. Even then, 131K/perplexity and C1/C2/C4/C8 Serving P95 remain separate
+promotion gates.
+
+### 3. Optional kernel-routing diagnostic
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/gdn-exact-trace-v3 \
+  --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 \
+  --prompts 4096 --cases gdn_exact_prefetch \
+  --pairs 3 --route-trace
+```
+
+Inspect `session-stderr.log` for
+`key=gdn_recurrent kernel=original_staged` and
+`key=gdn_recurrent kernel=exact_double_buffer`. With
+`NINFER_DEVICE_ROUTE_TRACE=1`, host-side logging may affect timings;
+**do not use the trace campaign for performance comparison**.
+
+The old `gdn_two_stage_approx` matrix remains available to diagnose
+approximate quality but is not a candidate for changing the default until
+its GDN FP32 state/split contract and long-context generation quality are
+resolved. Its earlier 8–11% speedup is not directly transferable to the
+new exact pipeline.
+
+### 4. Fixed-SHA RTX 4090 validation results (2026-10-11)
+
+PR #26 was independently tested at `22803be92a46456b45b4b6aff105f9054191bbcc`.
+The PR remains Draft/Open and unmerged. Tests ran on RTX 4090 GPU0 with driver
+`610.57.04`, CUDA `13.4.92`, Compute Sanitizer `2026.3.0.0`, Python `3.11.15`,
+and CMake `4.4.2`. The available CUDA compiler was 13.4 rather than the 12.8
+version expected in the earlier handoff; all checks below completed on 13.4.
+
+| Check | Result |
+|---|---|
+| Release sm_89 configure and requested three build targets | Pass |
+| Route-matrix Python tests | Pass, 13/13 |
+| Python 3.11 `py_compile` | Pass |
+| Exact-prefetch and benchmark-support ctest filter | Pass, 2/2 |
+| Exact-prefetch Compute Sanitizer | Pass, zero errors |
+| Resident 10-pair A/B structural and output-token gates | Pass |
+| Resident A/B performance screen | Fail: no material gain |
+
+The exact-prefetch test passed its independent FP32 oracle/state and segmented
+continuation cases, graph replay, state-cast cases, and unaligned fallback.
+Compute Sanitizer reported `ERROR SUMMARY: 0 errors`. The requested A/B ran
+22 arms (two warmups and 20 measured arms), loaded the model once, and created
+22 Programs. Every arm reported zero artifact bytes read and zero weight bytes
+uploaded. Runtime reservation stayed at `1,974,435,840` bytes and workspace
+capacity at `185,393,152` bytes. All measured output-token hashes matched and
+all earliest-divergence indices were null.
+
+| Workload | Primary metric | Median paired change | P05 paired change |
+|---|---|---:|---:|
+| pp1024 | Prefill tokens/s | +0.20% | -3.11% |
+| pp4096 | Prefill tokens/s | -0.25% | -0.64% |
+| pp16384 | Prefill tokens/s | +0.11% | -0.56% |
+| pp32768 | Prefill tokens/s | -0.29% | -0.95% |
+| pp4096+tg256 | Full request rate (requests/s) | +0.21% | -1.66% |
+| pp16384+tg256 | Full request rate (requests/s) | +0.18% | -0.74% |
+
+The route-trace run selected `recurrent` / `exact_or_default` for baseline and
+`exact_double_buffer` / `fp32_recurrence` for the candidate. It was a separate
+diagnostic and is excluded from performance results. No standalone TG-only
+workload ran. Per-request decode rates inside pp+tg changed by -0.066% and
++0.042%, respectively.
+
+**Disposition:** the exact double-buffer path passes the tested numerical,
+sanitizer, output-token, and residency gates. Its performance screen is false:
+all median gains are far below the approximately 2% admission target. Keep it
+opt-in; do not promote it to the default route based on this result. The run
+also did not test perplexity, 131K context, or concurrent serving. The earlier
+Two-stage Approx route remains separately blocked by its state-semantics and
+generated-token mismatch evidence.
+
+**Reporting issue:** summary JSON still names the paired values
+`baseline_tok_s` and `candidate_tok_s` when the objective is
+`full_request_rate`, and the Markdown summary omits the `requests/s` unit. This
+does not change the computed ratios, but can mislead readers about the unit.
+
+## Post-validation: Op screening and report-unit correction (2026-10-11)
+
+The independent CUDA 13.4.92 test of PR #26 commit `22803be9` is retained
+above. It established that **Exact Double-Buffer is correct but not fast
+enough** for production: 10 paired resident-model comparisons yielded
+-0.29% to +0.20% for Prefill and +0.18% to +0.21% for complete requests.
+The approximately 2% minimum useful-gain gate was not met. Do **not**
+automatically promote or retune this candidate without new profiler evidence.
+The original BF16/TF32 Two-stage Approx still fails state semantics/Token IDs.
+
+### 1. Correct rate units, standalone decode and a noise-control arm
+
+The route matrix now emits `ninfer.route-ab.v3` summaries:
+
+- `baseline_primary_rate` and `candidate_primary_rate` are the
+  **unit-safe** numeric rate distributions. Always read `primary_metric`
+  and `primary_unit` with them.
+- Legacy `baseline_tok_s` and `candidate_tok_s` remain **only** when the
+  metric is actually tokens/sec. Complete-request throughput is
+  `full_request_rate` in `requests/s`, never mislabeled as Token rate.
+- Markdown now prints both baseline and candidate medians with the explicit
+  `tokens/s` or `requests/s` unit.
+- `performance_only_screen` continues to describe performance alone.
+  The separate `performance_and_output_screen` requires both the >=2%
+  gain / P05 >= -5% and generated-token identity, and excludes explicitly
+  approximate-state candidates. `production_qualified` remains false
+  until the independent GDN FP32/oracle, PPL, context and serving gates pass.
+- `aa_control` deliberately runs two identical baseline routes in AB/BA
+  order, measuring apparent system drift. It is a **negative control**:
+  even a spurious +2% is not eligible for promotion.
+- `--decode` exposes an independent TG-only workload; use `--prompts ''`
+  to avoid running the default Prefill matrix alongside it.
+
+Run the Python regression contracts; no CUDA compilation is required for
+these report and orchestration changes:
+
+```bash
+python3 -m unittest \
+  tools.bench.test_upstream_route_matrix \
+  tools.bench.test_run_gdn_op_ab -v
+python3 -m py_compile \
+  tools/bench/run_upstream_route_matrix.py \
+  tools/bench/run_gdn_op_ab.py
+```
+
+Standalone TG-only resident A/B, **one 27B model load**:
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/gdn-tg-only-v4 \
+  --device 0 --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --prefill-chunk 1024 \
+  --prompts '' --decode 64,256 \
+  --cases aa_control,gdn_exact_prefetch \
+  --warmup 1 --arm-warmup 1 --pairs 10
+```
+
+The A/A arm tests the noise floor without switching the kernel. The GDN
+exact candidate only selects its pipeline for T>=32, so **TG-only primarily
+measures the unchanged recurrent Decode path** and is a negative end-to-end
+regression check, not proof that Prefill got faster. To exercise both the
+prefill kernel and full generation use `--prompt-gen '4096,256;16384,256'`.
+
+### 2. Cheap Op A/B pre-screen before another large 27B matrix
+
+Instead of reloading a giant Artifact to test every speculative scheduling
+change, first use the repository's existing **cold-L2 CUDA Graph GDN Op
+benchmark**. The new `tools.bench.run_gdn_op_ab` orchestrates paired AB/BA
+comparisons, validates exact public 128-dimensional GDN geometry, and reports
+median/p05 and GPU timing P95. It **never loads model weights**.
+
+```bash
+cmake --build build -j8 --target ninfer_gated_delta_net_bench
+
+python3 -m tools.bench.run_gdn_op_ab \
+  --exe ./build/bench/ninfer_gated_delta_net_bench \
+  --out profiles/bench/gdn-op-screen-v4 \
+  --heads 32,48 --tokens 32,64,65,128,256,1024 \
+  --pairs 5 --warmup 5 --repeat 50 --flush-mib 256 \
+  --cuda-visible-devices 0
+```
+
+Read `summary.md`, `summary.json`, `records.jsonl` and per-arm
+`stdout.csv` to identify widths/head geometries that may benefit.
+The Op screen requires >=2% paired median latency reduction, paired
+P05 >= -5%, and <=5% median P95 latency regression. It does not run the
+numerical oracle or imply model speedup.
+
+Optional `--attributed-fraction F` (0..1) estimates the **upper-bound
+end-to-end impact via Amdahl's law** only when `F` is backed by a real
+Nsight measurement of GDN's fraction of request wall time. Never guess a
+fraction or divide potentially overlapping summed GPU kernel durations by
+total time to construct it.
+
+### 3. Avoid further blind cp.async tuning
+
+The observed near-zero Prefill gain is consistent with the possibility
+that FP32 sequential recurrence, register dependencies, scheduling or
+occupancy dominate over DRAM load latency. It is *not* proof of a specific
+bottleneck. Use the existing GDN Op benchmark with NVIDIA Nsight Compute
+and inspect SM throughput, achieved occupancy, registers/thread, active
+warps, long-scoreboard vs execution dependency stalls, L1/L2 and DRAM
+throughput, and the generated SASS. The repository already provides
+`tools/bench/summarize_nsys_trace.py` for parsing GPU trace exports.
+
+Only pursue a new exact algorithm/kernel once the profiler indicates a
+plausible >2% model-level gain. If an Op-level experiment improves by 10%
+but GDN accounts for only 10% of wall time, Amdahl's upper bound is about
+0.9%; it is not worth another long resident matrix solely for that route.
+
+### Promotion disposition
+
+- **Keep:** model-resident A/B tooling, output identity, FP32-state tests,
+  route diagnostics and unit-correct reports.
+- **Experimental, not default:** Exact Double-Buffer, because numerical
+  qualification passed but its Prefill/full-request benefit is below 2%.
+- **Blocked:** upstream Two-stage Approx, because state semantics and
+  generation-token identity differ.
+- **Still required before production:** standalone TG-only, perplexity,
+  131K context, Agent branch/checkpoint continuation and C1/C2/C4/C8
+  concurrent Serving P95 testing for any subsequently qualified candidate.
+
+### 4. RTX 4090 validation results (2026-10-11)
+
+PR #26 was tested at fixed source SHA
+`244dcad80f59a2179a2e5b81e021f94c8c381783` on RTX 4090 GPU0, driver
+`610.57.04`, CUDA `13.4.92`, Python `3.11.15`, and CMake `4.4.2`.
+
+| Check | Result |
+|---|---|
+| Route-matrix and GDN Op Python tests | Pass, 18/18 |
+| Python 3.11 `py_compile` | Pass |
+| Release sm_89 configure | Pass |
+| `ninfer_gated_delta_net_bench` build | Pass |
+| GDN Op screen | Complete: 12/12 geometries, 60/60 pairs, 120/120 arms |
+| Op performance admission | Reject: none met the gain threshold |
+| Physical route diagnostic | Pass: baseline and candidate selected the expected kernels |
+
+The Op screen ran with the command above, writing raw data to
+`/opt/ninfer-4090/profiles/bench/gdn-op-screen-244dcad8`. Every H/T geometry
+completed five interleaved pairs. The runner found no qualified range:
+
+| H_v | Tokens | Baseline median (µs) | Candidate median (µs) | Paired gain median | P05 gain | Median paired P95 regression | Result |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 32 | 32 | 27.648 | 28.672 | -3.57% | -3.57% | +3.57% | Reject |
+| 32 | 64 | 47.104 | 48.128 | -2.13% | -2.13% | +2.13% | Reject |
+| 32 | 65 | 49.152 | 49.152 | +0.00% | +0.00% | +0.00% | Reject |
+| 32 | 128 | 87.040 | 86.080 | +0.07% | -0.94% | +0.00% | Reject |
+| 32 | 256 | 162.816 | 163.840 | -0.62% | -0.62% | +0.04% | Reject |
+| 32 | 1024 | 617.472 | 617.472 | +0.00% | +0.00% | -0.17% | Reject |
+| 48 | 32 | 32.768 | 33.792 | -3.03% | -3.03% | +0.09% | Reject |
+| 48 | 64 | 55.296 | 56.320 | -1.82% | -2.00% | +1.82% | Reject |
+| 48 | 65 | 57.344 | 57.472 | -0.22% | -1.75% | +1.79% | Reject |
+| 48 | 128 | 101.376 | 102.400 | -1.00% | -1.00% | +1.00% | Reject |
+| 48 | 256 | 191.488 | 193.536 | -1.06% | -1.06% | +0.53% | Reject |
+| 48 | 1024 | 730.112 | 732.160 | -0.28% | -0.29% | +0.56% | Reject |
+
+All median gains were below the required +2%; most were neutral or negative.
+The screen's `numerical_gate` is `not_run` and `production_qualified` is
+`false`: this Op-only result is a performance filter, not numerical or
+model-level qualification. No 27B matrix or Nsight Compute run was performed.
+
+The benchmark CSV `implementation` field is the public path label
+`public.persistent_fp32.qk_fused`, not the physical CUDA kernel. Separate,
+untimed tracing on H_v=32/T=64 confirmed:
+
+```text
+baseline:  kernel=original_staged
+candidate: kernel=exact_double_buffer reason=fp32_recurrence
+```
+
+The GDN CUDA sources and exact-prefetch numerical tests were unchanged from
+SHA `22803be9`; the earlier passing FP32 state/oracle and sanitizer evidence
+remains applicable to that implementation. It does not turn this Op screen
+into a model-level performance claim. The earlier resident test found no
+material model-level gain, so no route is promoted based on this screen.

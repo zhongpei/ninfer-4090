@@ -32,6 +32,14 @@ foreach(op IN LISTS ninfer_op_tests)
     LIBRARIES ninfer_ops)
 endforeach()
 
+# Direct qualification of the new exact FP32 GDN double-buffer candidate.
+# A separate test target avoids silently qualifying only the original kernel.
+add_test(NAME ninfer_gdn_exact_prefetch_test
+  COMMAND ninfer_gated_delta_net_test --exact-prefetch-only)
+set_tests_properties(ninfer_gdn_exact_prefetch_test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
+
 ninfer_add_op_test(ninfer_linear_topk_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_linear_topk.cu"
   LIBRARIES ninfer_ops)

@@ -5,7 +5,7 @@ add_executable(ninfer_bench
 ninfer_internal_includes(ninfer_bench)
 target_include_directories(ninfer_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(ninfer_bench PRIVATE NINFER_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
-target_link_libraries(ninfer_bench PRIVATE ninfer_engine ${NINFER_CUDART_TARGET})
+target_link_libraries(ninfer_bench PRIVATE ninfer_engine ninfer::json ${NINFER_CUDART_TARGET})
 
 add_executable(ninfer_spec_router_calibration_bench
   "${CMAKE_CURRENT_LIST_DIR}/spec_router_calibration.cpp"
