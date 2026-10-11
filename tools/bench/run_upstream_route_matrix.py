@@ -21,6 +21,8 @@ from typing import Any
 
 DEFAULT_CASES: dict[str, dict[str, str]] = {
     "baseline": {"NINFER_DEVICE_ROUTE_MODE": "off"},
+    # A/A route is an identical baseline control to measure the matrix noise floor.
+    "aa_control": {"NINFER_DEVICE_ROUTE_MODE": "off"},
     "prompt_fast": {
         "NINFER_DEVICE_ROUTE_MODE": "builtin",
         "NINFER_DEVICE_ROUTE_ONLY": "attn_prompt_fast",
@@ -258,7 +260,7 @@ def calculate(rows: list[dict[str, Any]], name: str, pairs: int) -> dict[str, An
         # An actual correctness or performance failure must not masquerade
         # as a candidate ready for independent numerical review.
         "performance_and_output_screen": (
-            all_matching and all(
+            name != "aa_control" and all_matching and all(
                 m["paired_improvement_pct"]["median"] >= 2
                 and m["paired_improvement_pct"]["p05"] >= -5
                 for m in results.values()
@@ -268,6 +270,7 @@ def calculate(rows: list[dict[str, Any]], name: str, pairs: int) -> dict[str, An
             ) and "approx" not in name
         ),
         "production_qualified": False,
+        "negative_control": name == "aa_control",
     }
 
 
@@ -499,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
             reports.append(result)
 
         summary = {
-            "schema": "ninfer.route-ab.v2", "scope": "single resident model per full AB matrix; fresh Program/Graph per arm",
+            "schema": "ninfer.route-ab.v3", "scope": "single resident model per full AB matrix; fresh Program/Graph per arm",
             "model": str(args.model.resolve()), "model_size_bytes": args.model.stat().st_size,
             "model_sha256": None, "exe": str(args.exe.resolve()),
             "exe_sha256": streaming_sha256(args.exe), "hardware": gpu,
@@ -518,6 +521,7 @@ def main(argv: list[str] | None = None) -> int:
                          "arm_warmup": args.arm_warmup, "repetitions": args.repetitions},
             "cases": {name: cases[name] for name in ["baseline", *selected]},
             "candidates": reports,
+            "aa_control": next((r for r in reports if r["case"] == "aa_control"), None),
             "promotion": "not approved; requires numerical, memory and serving correctness",
         }
         (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
