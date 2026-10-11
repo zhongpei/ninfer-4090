@@ -668,5 +668,57 @@ but GDN accounts for only 10% of wall time, Amdahl's upper bound is about
   131K context, Agent branch/checkpoint continuation and C1/C2/C4/C8
   concurrent Serving P95 testing for any subsequently qualified candidate.
 
-This section documents new code for operator retesting; the v4 commands
-above are **not** claimed to have been executed on RTX 4090 yet.
+### 4. RTX 4090 validation results (2026-10-11)
+
+PR #26 was tested at fixed source SHA
+`244dcad80f59a2179a2e5b81e021f94c8c381783` on RTX 4090 GPU0, driver
+`610.57.04`, CUDA `13.4.92`, Python `3.11.15`, and CMake `4.4.2`.
+
+| Check | Result |
+|---|---|
+| Route-matrix and GDN Op Python tests | Pass, 18/18 |
+| Python 3.11 `py_compile` | Pass |
+| Release sm_89 configure | Pass |
+| `ninfer_gated_delta_net_bench` build | Pass |
+| GDN Op screen | Complete: 12/12 geometries, 60/60 pairs, 120/120 arms |
+| Op performance admission | Reject: none met the gain threshold |
+| Physical route diagnostic | Pass: baseline and candidate selected the expected kernels |
+
+The Op screen ran with the command above, writing raw data to
+`/opt/ninfer-4090/profiles/bench/gdn-op-screen-244dcad8`. Every H/T geometry
+completed five interleaved pairs. The runner found no qualified range:
+
+| H_v | Tokens | Baseline median (µs) | Candidate median (µs) | Paired gain median | P05 gain | Median paired P95 regression | Result |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 32 | 32 | 27.648 | 28.672 | -3.57% | -3.57% | +3.57% | Reject |
+| 32 | 64 | 47.104 | 48.128 | -2.13% | -2.13% | +2.13% | Reject |
+| 32 | 65 | 49.152 | 49.152 | +0.00% | +0.00% | +0.00% | Reject |
+| 32 | 128 | 87.040 | 86.080 | +0.07% | -0.94% | +0.00% | Reject |
+| 32 | 256 | 162.816 | 163.840 | -0.62% | -0.62% | +0.04% | Reject |
+| 32 | 1024 | 617.472 | 617.472 | +0.00% | +0.00% | -0.17% | Reject |
+| 48 | 32 | 32.768 | 33.792 | -3.03% | -3.03% | +0.09% | Reject |
+| 48 | 64 | 55.296 | 56.320 | -1.82% | -2.00% | +1.82% | Reject |
+| 48 | 65 | 57.344 | 57.472 | -0.22% | -1.75% | +1.79% | Reject |
+| 48 | 128 | 101.376 | 102.400 | -1.00% | -1.00% | +1.00% | Reject |
+| 48 | 256 | 191.488 | 193.536 | -1.06% | -1.06% | +0.53% | Reject |
+| 48 | 1024 | 730.112 | 732.160 | -0.28% | -0.29% | +0.56% | Reject |
+
+All median gains were below the required +2%; most were neutral or negative.
+The screen's `numerical_gate` is `not_run` and `production_qualified` is
+`false`: this Op-only result is a performance filter, not numerical or
+model-level qualification. No 27B matrix or Nsight Compute run was performed.
+
+The benchmark CSV `implementation` field is the public path label
+`public.persistent_fp32.qk_fused`, not the physical CUDA kernel. Separate,
+untimed tracing on H_v=32/T=64 confirmed:
+
+```text
+baseline:  kernel=original_staged
+candidate: kernel=exact_double_buffer reason=fp32_recurrence
+```
+
+The GDN CUDA sources and exact-prefetch numerical tests were unchanged from
+SHA `22803be9`; the earlier passing FP32 state/oracle and sanitizer evidence
+remains applicable to that implementation. It does not turn this Op screen
+into a model-level performance claim. The earlier resident test found no
+material model-level gain, so no route is promoted based on this screen.
