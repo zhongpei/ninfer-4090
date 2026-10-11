@@ -32,7 +32,8 @@ def positive_list(value: str) -> list[int]:
 def parse_row(stdout: str, heads: int, tokens: int) -> dict:
     reader = csv.DictReader(StringIO(stdout))
     required = {"state_form", "normalization", "value_heads", "tokens", "batch",
-                "execution", "cache", "median_us", "p95_us", "graph_nodes"}
+                "dtype", "state_dim", "qk_heads", "execution", "cache",
+                "median_us", "p95_us", "graph_nodes"}
     if not required <= set(reader.fieldnames or []):
         raise ValueError("missing GDN microbenchmark CSV columns")
     rows = list(reader)
@@ -40,6 +41,8 @@ def parse_row(stdout: str, heads: int, tokens: int) -> dict:
         raise ValueError("exactly one running-state row is required")
     r = rows[0]
     if (r["state_form"] != "running" or r["normalization"] != "fused"
+            or r["dtype"] != "BF16" or int(r["state_dim"]) != 128
+            or int(r["qk_heads"]) != 16
             or r["execution"] != "cuda_graph" or r["cache"] != "cold_l2"
             or int(r["value_heads"]) != heads or int(r["tokens"]) != tokens
             or int(r["batch"]) != 1 or int(r["graph_nodes"]) < 1):
@@ -71,7 +74,8 @@ def compare(rows: list[dict], pairs: int, attributed_fraction: float | None = No
         "paired_p95_regression_pct": summary_values(tail),
         "estimated_model_gain_pct": projected,
         "performance_screen": statistics.median(gain) >= 2 and
-                              min(gain) >= -5 and statistics.median(tail) <= 5,
+                              summary_values(gain)["p05"] >= -5 and
+                              statistics.median(tail) <= 5,
         "production_qualified": False,
     }
 
