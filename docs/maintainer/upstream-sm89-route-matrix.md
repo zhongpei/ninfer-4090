@@ -488,3 +488,58 @@ approximate quality but is not a candidate for changing the default until
 its GDN FP32 state/split contract and long-context generation quality are
 resolved. Its earlier 8–11% speedup is not directly transferable to the
 new exact pipeline.
+
+### 4. Fixed-SHA RTX 4090 validation results (2026-10-11)
+
+PR #26 was independently tested at `22803be92a46456b45b4b6aff105f9054191bbcc`.
+The PR remains Draft/Open and unmerged. Tests ran on RTX 4090 GPU0 with driver
+`610.57.04`, CUDA `13.4.92`, Compute Sanitizer `2026.3.0.0`, Python `3.11.15`,
+and CMake `4.4.2`. The available CUDA compiler was 13.4 rather than the 12.8
+version expected in the earlier handoff; all checks below completed on 13.4.
+
+| Check | Result |
+|---|---|
+| Release sm_89 configure and requested three build targets | Pass |
+| Route-matrix Python tests | Pass, 13/13 |
+| Python 3.11 `py_compile` | Pass |
+| Exact-prefetch and benchmark-support ctest filter | Pass, 2/2 |
+| Exact-prefetch Compute Sanitizer | Pass, zero errors |
+| Resident 10-pair A/B structural and output-token gates | Pass |
+| Resident A/B performance screen | Fail: no material gain |
+
+The exact-prefetch test passed its independent FP32 oracle/state and segmented
+continuation cases, graph replay, state-cast cases, and unaligned fallback.
+Compute Sanitizer reported `ERROR SUMMARY: 0 errors`. The requested A/B ran
+22 arms (two warmups and 20 measured arms), loaded the model once, and created
+22 Programs. Every arm reported zero artifact bytes read and zero weight bytes
+uploaded. Runtime reservation stayed at `1,974,435,840` bytes and workspace
+capacity at `185,393,152` bytes. All measured output-token hashes matched and
+all earliest-divergence indices were null.
+
+| Workload | Primary metric | Median paired change | P05 paired change |
+|---|---|---:|---:|
+| pp1024 | Prefill tokens/s | +0.20% | -3.11% |
+| pp4096 | Prefill tokens/s | -0.25% | -0.64% |
+| pp16384 | Prefill tokens/s | +0.11% | -0.56% |
+| pp32768 | Prefill tokens/s | -0.29% | -0.95% |
+| pp4096+tg256 | Full request rate (requests/s) | +0.21% | -1.66% |
+| pp16384+tg256 | Full request rate (requests/s) | +0.18% | -0.74% |
+
+The route-trace run selected `recurrent` / `exact_or_default` for baseline and
+`exact_double_buffer` / `fp32_recurrence` for the candidate. It was a separate
+diagnostic and is excluded from performance results. No standalone TG-only
+workload ran. Per-request decode rates inside pp+tg changed by -0.066% and
++0.042%, respectively.
+
+**Disposition:** the exact double-buffer path passes the tested numerical,
+sanitizer, output-token, and residency gates. Its performance screen is false:
+all median gains are far below the approximately 2% admission target. Keep it
+opt-in; do not promote it to the default route based on this result. The run
+also did not test perplexity, 131K context, or concurrent serving. The earlier
+Two-stage Approx route remains separately blocked by its state-semantics and
+generated-token mismatch evidence.
+
+**Reporting issue:** summary JSON still names the paired values
+`baseline_tok_s` and `candidate_tok_s` when the objective is
+`full_request_rate`, and the Markdown summary omits the `requests/s` unit. This
+does not change the computed ratios, but can mislead readers about the unit.
