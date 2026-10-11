@@ -1,8 +1,6 @@
 """CPU-only validation of GDN cold-L2 Op A/B selection and admission checks."""
 from __future__ import annotations
 
-import csv
-from io import StringIO
 import json
 from pathlib import Path
 from subprocess import CompletedProcess
