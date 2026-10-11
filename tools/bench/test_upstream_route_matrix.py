@@ -64,6 +64,11 @@ class RouteMatrixContractTests(unittest.TestCase):
         report = calculate(rows, "fast", 3)
         self.assertAlmostEqual(report["tests"]["pp4096"]["paired_improvement_pct"]["median"], 10)
         self.assertTrue(report["performance_only_screen"])
+        self.assertTrue(report["performance_and_output_screen"])
+        self.assertFalse(report["production_qualified"])
+        self.assertEqual(report["tests"]["pp4096"]["primary_unit"], "tokens/s")
+        self.assertEqual(report["tests"]["pp4096"]["baseline_tok_s"]["median"], 100)
+        self.assertEqual(report["tests"]["pp4096"]["baseline_primary_rate"]["median"], 100)
         self.assertEqual(report["runtime_reservation_peak_bytes"], 110)
         self.assertEqual(report["quality_gate"], "not_executed")
         self.assertEqual(report["output_token_gate"], "pass")
@@ -71,6 +76,7 @@ class RouteMatrixContractTests(unittest.TestCase):
         rows[-1]["prefix_hashes"] = {"pp4096": [[12346]]}
         divergent = calculate(rows, "fast", 3)
         self.assertEqual(divergent["output_token_gate"], "fail")
+        self.assertFalse(divergent["performance_and_output_screen"])
         self.assertEqual(divergent["tests"]["pp4096"]["first_divergent_token_by_pair"][-1], 0)
 
     def test_custom_named_approx_case_still_blocks_quality_gate(self):
@@ -94,6 +100,7 @@ class RouteMatrixContractTests(unittest.TestCase):
         result = calculate(rows, "optimized", 3)
         self.assertEqual(result["output_token_gate"], "pass")
         self.assertEqual(result["quality_gate"], "blocked_approx_state_semantics")
+        self.assertFalse(result["performance_and_output_screen"])
 
     def test_full_request_objective_not_prefill_only(self):
         base = {"kind": "pp+tg", "label": "pp4096+tg256",
@@ -108,6 +115,8 @@ class RouteMatrixContractTests(unittest.TestCase):
         self.assertLess(candidate_rate / baseline_rate - 1, 0)
         self.assertEqual(primary_measure({"kind": "pp", "label": "pp4096",
                                          "prefill_tok_s_mean": 1100})[0], 1100)
+        self.assertEqual(primary_measure({"kind": "tg", "label": "tg64",
+                                         "decode_output_tok_s_mean": 75})[:], (75, "decode_output_tok_s", "tokens/s"))
 
     def test_earliest_divergence_fingerprint(self):
         self.assertEqual(first_divergent_token([[1, 2, 3]], [[1, 9, 10]]), 1)
@@ -176,16 +185,27 @@ for line in sys.stdin:
                           "error": "simulated illegal memory access"}), flush=True)
         break
     route = packet["route_env"]
-    score = 100.0 if route.get("NINFER_DEVICE_ROUTE_MODE") == "off" else 110.0
-    data = {"tests": [{"label": "pp1024", "prefill_tok_s_mean": score}],
+    is_candidate = (route.get("NINFER_DEVICE_ROUTE_MODE") != "off" or
+                    route.get("NINFER_GDN_EXACT_PREFETCH") == "1")
+    score = 110.0 if is_candidate else 100.0
+    if "-n" in sys.argv:
+        label = "tg64"
+        test = {"label": label, "kind": "tg", "decode_output_tok_s_mean": score}
+    elif "-pg" in sys.argv:
+        label = "pp4096+tg256"
+        test = {"label": label, "kind": "pp+tg", "total_seconds_mean": 100.0 / score}
+    else:
+        label = "pp1024"
+        test = {"label": label, "kind": "pp", "prefill_tok_s_mean": score}
+    data = {"tests": [test],
             "config": {"prefill_chunk": 1024},
             "memory": {"runtime_reservation_bytes": 1000,
                        "workspace": {"capacity_bytes": 200}},
             "residency": {"model_load_count": 1, "program_create_seconds": 0.001,
                           "artifact_bytes_read_this_arm": 0,
                           "weight_bytes_uploaded_this_arm": 0},
-            "generated_token_hashes": {"pp1024": [12345]},
-            "generated_token_prefix_hashes": {"pp1024": [[12345]]}}
+            "generated_token_hashes": {label: [12345]},
+            "generated_token_prefix_hashes": {label: [[12345]]}}
     print(json.dumps({"event": "measurement", "id": packet["id"], "ok": True,
                       "model_load_count": 1, "report": data}), flush=True)
 """, encoding="utf-8")
@@ -215,6 +235,40 @@ for line in sys.stdin:
             approx = json.loads((out / "summary-gdn_two_stage_approx.json").read_text())
             self.assertEqual(approx["quality_gate"], "blocked_approx_state_semantics")
             self.assertTrue((out / "summary.md").is_file())
+
+            # Both TG-only and pp+tg-only MUST omit -p and use the same single
+            # resident owner/protocol; those objectives have different units.
+            for kind, workload_arg, label, metric, unit in [
+                ("tg", ["--decode", "64"], "tg64", "decode_output_tok_s", "tokens/s"),
+                ("combined", ["--prompt-gen", "4096,256"], "pp4096+tg256",
+                 "full_request_rate", "requests/s"),
+            ]:
+                out_dir = root / f"out-{kind}"
+                args = [
+                    "--exe", str(exe), "--model", str(model), "--out", str(out_dir),
+                    "--max-context", "8192", "--prompts", "",
+                    "--cases", "gdn_exact_prefetch", "--pairs", "3",
+                    "--warmup", "0", "--timeout", "10", *workload_arg,
+                ]
+                with patch.dict(os.environ, {"FAKE_ROUTE_STARTUPS": str(startup_log)}):
+                    self.assertEqual(main(args), 0)
+                report = json.loads((out_dir / "summary-gdn_exact_prefetch.json").read_text())
+                scored = report["tests"][label]
+                self.assertEqual((scored["primary_metric"], scored["primary_unit"]),
+                                 (metric, unit))
+                self.assertAlmostEqual(scored["baseline_primary_rate"]["median"], 1 if kind == "combined" else 100)
+                self.assertAlmostEqual(scored["candidate_primary_rate"]["median"], 1.1 if kind == "combined" else 110)
+                if kind == "combined":
+                    self.assertNotIn("baseline_tok_s", scored)
+                    self.assertNotIn("candidate_tok_s", scored)
+                    self.assertIn("requests/s", (out_dir / "summary.md").read_text())
+                else:
+                    self.assertEqual(scored["baseline_tok_s"]["median"], 100)
+                    self.assertIn("tokens/s", (out_dir / "summary.md").read_text())
+                self.assertTrue(report["performance_only_screen"])
+                self.assertTrue(report["performance_and_output_screen"])
+                self.assertFalse(report["production_qualified"])
+                self.assertEqual(json.loads((out_dir / "summary.json").read_text())["model_load_count"], 1)
 
     def test_failed_later_candidate_keeps_completed_pair_reports(self):
         with tempfile.TemporaryDirectory() as tmp:
