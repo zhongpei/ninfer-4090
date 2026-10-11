@@ -543,3 +543,130 @@ generated-token mismatch evidence.
 `baseline_tok_s` and `candidate_tok_s` when the objective is
 `full_request_rate`, and the Markdown summary omits the `requests/s` unit. This
 does not change the computed ratios, but can mislead readers about the unit.
+
+## Post-validation: Op screening and report-unit correction (2026-10-11)
+
+The independent CUDA 13.4.92 test of PR #26 commit `22803be9` is retained
+above. It established that **Exact Double-Buffer is correct but not fast
+enough** for production: 10 paired resident-model comparisons yielded
+-0.29% to +0.20% for Prefill and +0.18% to +0.21% for complete requests.
+The approximately 2% minimum useful-gain gate was not met. Do **not**
+automatically promote or retune this candidate without new profiler evidence.
+The original BF16/TF32 Two-stage Approx still fails state semantics/Token IDs.
+
+### 1. Correct rate units, standalone decode and a noise-control arm
+
+The route matrix now emits `ninfer.route-ab.v3` summaries:
+
+- `baseline_primary_rate` and `candidate_primary_rate` are the
+  **unit-safe** numeric rate distributions. Always read `primary_metric`
+  and `primary_unit` with them.
+- Legacy `baseline_tok_s` and `candidate_tok_s` remain **only** when the
+  metric is actually tokens/sec. Complete-request throughput is
+  `full_request_rate` in `requests/s`, never mislabeled as Token rate.
+- Markdown now prints both baseline and candidate medians with the explicit
+  `tokens/s` or `requests/s` unit.
+- `performance_only_screen` continues to describe performance alone.
+  The separate `performance_and_output_screen` requires both the >=2%
+  gain / P05 >= -5% and generated-token identity, and excludes explicitly
+  approximate-state candidates. `production_qualified` remains false
+  until the independent GDN FP32/oracle, PPL, context and serving gates pass.
+- `aa_control` deliberately runs two identical baseline routes in AB/BA
+  order, measuring apparent system drift. It is a **negative control**:
+  even a spurious +2% is not eligible for promotion.
+- `--decode` exposes an independent TG-only workload; use `--prompts ''`
+  to avoid running the default Prefill matrix alongside it.
+
+Run the Python regression contracts; no CUDA compilation is required for
+these report and orchestration changes:
+
+```bash
+python3 -m unittest \
+  tools.bench.test_upstream_route_matrix \
+  tools.bench.test_run_gdn_op_ab -v
+python3 -m py_compile \
+  tools/bench/run_upstream_route_matrix.py \
+  tools/bench/run_gdn_op_ab.py
+```
+
+Standalone TG-only resident A/B, **one 27B model load**:
+
+```bash
+python3 -m tools.bench.run_upstream_route_matrix \
+  --exe ./build/bench/ninfer_bench \
+  --model /opt/ninfer-4090/Ternary-Bonsai-2-27B-ninfer-v3.ninfer \
+  --out profiles/bench/gdn-tg-only-v4 \
+  --device 0 --max-context 32768 --kv-dtype int8 \
+  --spec dflash2 --draft-tokens 7 --prefill-chunk 1024 \
+  --prompts '' --decode 64,256 \
+  --cases aa_control,gdn_exact_prefetch \
+  --warmup 1 --arm-warmup 1 --pairs 10
+```
+
+The A/A arm tests the noise floor without switching the kernel. The GDN
+exact candidate only selects its pipeline for T>=32, so **TG-only primarily
+measures the unchanged recurrent Decode path** and is a negative end-to-end
+regression check, not proof that Prefill got faster. To exercise both the
+prefill kernel and full generation use `--prompt-gen '4096,256;16384,256'`.
+
+### 2. Cheap Op A/B pre-screen before another large 27B matrix
+
+Instead of reloading a giant Artifact to test every speculative scheduling
+change, first use the repository's existing **cold-L2 CUDA Graph GDN Op
+benchmark**. The new `tools.bench.run_gdn_op_ab` orchestrates paired AB/BA
+comparisons, validates exact public 128-dimensional GDN geometry, and reports
+median/p05 and GPU timing P95. It **never loads model weights**.
+
+```bash
+cmake --build build -j8 --target ninfer_gated_delta_net_bench
+
+python3 -m tools.bench.run_gdn_op_ab \
+  --exe ./build/bench/ninfer_gated_delta_net_bench \
+  --out profiles/bench/gdn-op-screen-v4 \
+  --heads 32,48 --tokens 32,64,65,128,256,1024 \
+  --pairs 5 --warmup 5 --repeat 50 --flush-mib 256 \
+  --cuda-visible-devices 0
+```
+
+Read `summary.md`, `summary.json`, `records.jsonl` and per-arm
+`stdout.csv` to identify widths/head geometries that may benefit.
+The Op screen requires >=2% paired median latency reduction, paired
+P05 >= -5%, and <=5% median P95 latency regression. It does not run the
+numerical oracle or imply model speedup.
+
+Optional `--attributed-fraction F` (0..1) estimates the **upper-bound
+end-to-end impact via Amdahl's law** only when `F` is backed by a real
+Nsight measurement of GDN's fraction of request wall time. Never guess a
+fraction or divide potentially overlapping summed GPU kernel durations by
+total time to construct it.
+
+### 3. Avoid further blind cp.async tuning
+
+The observed near-zero Prefill gain is consistent with the possibility
+that FP32 sequential recurrence, register dependencies, scheduling or
+occupancy dominate over DRAM load latency. It is *not* proof of a specific
+bottleneck. Use the existing GDN Op benchmark with NVIDIA Nsight Compute
+and inspect SM throughput, achieved occupancy, registers/thread, active
+warps, long-scoreboard vs execution dependency stalls, L1/L2 and DRAM
+throughput, and the generated SASS. The repository already provides
+`tools/bench/summarize_nsys_trace.py` for parsing GPU trace exports.
+
+Only pursue a new exact algorithm/kernel once the profiler indicates a
+plausible >2% model-level gain. If an Op-level experiment improves by 10%
+but GDN accounts for only 10% of wall time, Amdahl's upper bound is about
+0.9%; it is not worth another long resident matrix solely for that route.
+
+### Promotion disposition
+
+- **Keep:** model-resident A/B tooling, output identity, FP32-state tests,
+  route diagnostics and unit-correct reports.
+- **Experimental, not default:** Exact Double-Buffer, because numerical
+  qualification passed but its Prefill/full-request benefit is below 2%.
+- **Blocked:** upstream Two-stage Approx, because state semantics and
+  generation-token identity differ.
+- **Still required before production:** standalone TG-only, perplexity,
+  131K context, Agent branch/checkpoint continuation and C1/C2/C4/C8
+  concurrent Serving P95 testing for any subsequently qualified candidate.
+
+This section documents new code for operator retesting; the v4 commands
+above are **not** claimed to have been executed on RTX 4090 yet.
